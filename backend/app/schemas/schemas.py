@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 
 
 # ── Auth ──
@@ -135,13 +135,26 @@ class OrderResponse(BaseModel):
 class RankingEntry(BaseModel):
     ticker: str
     rank_position: int
-    score: float
-    expected_return: Optional[float]
-    momentum_30d: Optional[float]
-    volatility: Optional[float]
-    liquidity_score: Optional[float]
-    current_price: Optional[float]
+    score: float = 0.0
+    expected_return: Optional[float] = None
+    momentum_30d: Optional[float] = None
+    volatility: Optional[float] = None
+    liquidity_score: Optional[float] = None
+    current_price: Optional[float] = None
     computed_at: datetime
+
+    @validator("score", "expected_return", "momentum_30d", "volatility",
+               "liquidity_score", "current_price", pre=True, always=True)
+    def nan_to_none(cls, v):
+        if v is None:
+            return None
+        try:
+            import math
+            if math.isnan(v) or math.isinf(v):
+                return None
+        except (TypeError, ValueError):
+            pass
+        return v
 
     class Config:
         from_attributes = True

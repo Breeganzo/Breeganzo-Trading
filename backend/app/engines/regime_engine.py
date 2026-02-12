@@ -115,6 +115,9 @@ def _fetch_yf_history(ticker: str, period: str = "1y") -> pd.DataFrame:
             f"No price data returned by yfinance for ticker '{ticker}' "
             f"(period={period})."
         )
+    # Flatten MultiIndex columns (yfinance >= 0.2.31 returns MultiIndex)
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
     return data
 
 

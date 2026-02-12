@@ -92,7 +92,19 @@ def _nan_safe(value: Any) -> Any:
     """Convert NaN / Inf to ``None`` for JSON serialization."""
     if value is None:
         return None
-    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+    try:
+        # Handle both Python float and numpy float NaN/Inf
+        if isinstance(value, (int, float)):
+            if math.isnan(value) or math.isinf(value):
+                return None
+        # numpy scalar types
+        import numpy as _np
+        if isinstance(value, (_np.floating, _np.integer)):
+            fval = float(value)
+            if math.isnan(fval) or math.isinf(fval):
+                return None
+            return fval
+    except (TypeError, ValueError):
         return None
     return value
 
@@ -125,6 +137,9 @@ def _fetch_yf_history(ticker: str, period: str = "3mo") -> pd.DataFrame:
             f"No price data returned by yfinance for ticker '{ticker}' "
             f"(period={period})."
         )
+    # Flatten MultiIndex columns (yfinance >= 0.2.31 returns MultiIndex)
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
     return data
 
 
@@ -486,7 +501,7 @@ class RankingEngine:
             ),
             "liquidity_score": _nan_safe(round(liquidity, 6)),
             "score": _nan_safe(round(score, 6)) if not math.isnan(score) else None,
-            "current_price": current_price,
+            "current_price": _nan_safe(current_price),
             "categories": sorted(categories),
         }
 
