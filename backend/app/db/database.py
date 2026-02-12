@@ -31,6 +31,10 @@ def _ensure_engine():
                 "DATABASE_URL is not configured. "
                 "Set it in backend/.env or as an environment variable."
             )
+        # Use statement_cache_size=0 for asyncpg when sitting behind
+        # a connection pooler (pgbouncer / Supabase pooler). Prepared
+        # statements are not supported with transaction/statement pool
+        # modes and will raise DuplicatePreparedStatementError.
         engine = create_async_engine(
             db_url,
             pool_size=settings.DB_POOL_SIZE,
@@ -38,6 +42,7 @@ def _ensure_engine():
             pool_pre_ping=True,
             pool_recycle=300,
             echo=settings.DEBUG,
+            connect_args={"statement_cache_size": 0},
         )
         async_session_factory = async_sessionmaker(
             engine, class_=AsyncSession, expire_on_commit=False

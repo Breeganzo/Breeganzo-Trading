@@ -15,40 +15,50 @@ function LoginContent() {
   const [totpUri, setTotpUri] = useState('');
   const [callbackData, setCallbackData] = useState<any>(null);
 
-  // Handle Google OAuth callback
+  // Handle OAuth redirect: backend redirects here with ?token=...&requires_totp=...
   useEffect(() => {
-    const code = searchParams.get('code');
-    if (code) {
+    const token = searchParams.get('token');
+    const errorParam = searchParams.get('error');
+    const totpSetupParam = searchParams.get('totp_setup_uri');
+    const requiresTotpParam = searchParams.get('requires_totp');
+
+    if (errorParam) {
+      setError(decodeURIComponent(errorParam));
+      setStatus('error');
+      return;
+    }
+
+    if (token) {
       setStatus('callback');
-      api
-        .handleCallback(code)
-        .then((data) => {
-          if (data.access_token) {
-            api.setToken(data.access_token);
-          }
-          if (data.requires_totp) {
-            setCallbackData(data);
-            setStatus('totp');
-          } else if (data.totp_setup_uri) {
-            setCallbackData(data);
-            setTotpUri(data.totp_setup_uri);
-            setStatus('totp');
-          } else {
-            setUser(data.user);
+      api.setToken(token);
+
+      const requiresTotp = requiresTotpParam === 'true';
+
+      if (requiresTotp) {
+        setStatus('totp');
+      } else if (totpSetupParam) {
+        setTotpUri(decodeURIComponent(totpSetupParam));
+        setStatus('totp');
+      } else {
+        // Token received, TOTP not required — fetch user and go to dashboard
+        api
+          .getMe()
+          .then((data) => {
+            setUser(data);
             router.push('/dashboard');
-          }
-        })
-        .catch((err) => {
-          setError(err.message || 'Login failed');
-          setStatus('error');
-        });
+          })
+          .catch((err) => {
+            setError(err.message || 'Login failed');
+            setStatus('error');
+          });
+      }
     }
   }, [searchParams, setUser, router]);
 
-  // Check if already logged in
+  // Check if already logged in (existing token in localStorage)
   useEffect(() => {
-    const token = api.getToken();
-    if (token && !searchParams.get('code')) {
+    const existingToken = api.getToken();
+    if (existingToken && !searchParams.get('token') && !searchParams.get('error')) {
       api
         .getMe()
         .then((data) => {
@@ -77,13 +87,13 @@ function LoginContent() {
     if (totpCode.length !== 6) return;
     try {
       const result = await api.verifyTotp(totpCode);
-      if (result.verified) {
+      if (result.totp_verified || result.verified) {
         if (result.access_token) {
           api.setToken(result.access_token);
         }
-        if (callbackData?.user) {
-          setUser(callbackData.user);
-        }
+        // Fetch user data and redirect to dashboard
+        const userData = await api.getMe();
+        setUser(userData);
         router.push('/dashboard');
       } else {
         setError('Invalid TOTP code. Try again.');

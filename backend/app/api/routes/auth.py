@@ -3,10 +3,12 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 import qrcode
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import RedirectResponse
 from jose import jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,7 +37,7 @@ async def login():
 
 
 # ── GET /callback ─────────────────────────────────────────────────────
-@router.get("/callback", response_model=TokenResponse)
+@router.get("/callback")
 async def google_callback(
     code: str,
     db: AsyncSession = Depends(get_db),
@@ -43,14 +45,45 @@ async def google_callback(
     """Handle the Google OAuth 2.0 callback.
 
     Exchanges the authorization *code* for tokens, validates the user
-    against the allowed email, creates or updates the user record, and
-    returns a JWT access token.
-
-    If TOTP has not been set up yet, ``totp_setup_uri`` is included in
-    the response so the frontend can present a QR code.  If TOTP is
-    already enabled, ``requires_totp`` is ``True`` and the client must
-    complete a TOTP challenge before accessing protected resources.
+    against the allowed email, creates or updates the user record,
+    and redirects the browser to the frontend with the JWT token
+    encoded in the URL fragment.
     """
+    settings = get_settings()
+    frontend_url = settings.ALLOWED_ORIGINS.split(",")[0].strip()  # e.g. http://localhost:3000
+
+    try:
+        result = await auth_service.exchange_google_code(code, db)
+    except PermissionError as exc:
+        logger.warning("Forbidden login: %s", exc)
+        return RedirectResponse(
+            url=f"{frontend_url}/login?error={urllib.parse.quote(str(exc))}"
+        )
+    except Exception as exc:
+        logger.exception("Google OAuth callback failed")
+        return RedirectResponse(
+            url=f"{frontend_url}/login?error=google_auth_failed"
+        )
+
+    # Build redirect URL with token data as query params
+    params = {
+        "token": result["access_token"],
+        "requires_totp": str(result.get("requires_totp", False)).lower(),
+    }
+    if result.get("totp_setup_uri"):
+        params["totp_setup_uri"] = result["totp_setup_uri"]
+
+    redirect_url = f"{frontend_url}/login?{urllib.parse.urlencode(params)}"
+    return RedirectResponse(url=redirect_url)
+
+
+# ── GET /callback/api ─────────────────────────────────────────────────
+@router.get("/callback/api", response_model=TokenResponse)
+async def google_callback_api(
+    code: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """API-only callback (returns JSON instead of redirecting)."""
     try:
         result = await auth_service.exchange_google_code(code, db)
     except PermissionError as exc:
