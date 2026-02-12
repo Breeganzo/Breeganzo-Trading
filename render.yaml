@@ -34,7 +34,7 @@ services:
       - key: GROQ_API_KEY
         sync: false
       - key: ALLOWED_ORIGINS
-        value: "http://localhost:3000,https://quantdesk-pro.vercel.app"
+        value: "http://localhost:3000,https://frontend-ten-alpha-49.vercel.app,https://quantdesk-pro.vercel.app"
       - key: PORT
         value: "8000"
     healthCheckPath: /health
