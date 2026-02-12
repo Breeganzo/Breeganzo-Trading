@@ -1,0 +1,55 @@
+# =============================================================================
+# Groww Brokerage & Transaction Cost Model
+# =============================================================================
+# Source: Groww pricing page (post-SEBI true-to-label regulations 2024-25)
+# Last updated: 2025-01-01
+# IMPORTANT: Verify latest rates at https://groww.in/pricing before deployment
+
+# --- Equity Delivery (Buy and hold) ---
+equity_delivery:
+  brokerage_per_order: 20        # ₹20 per order OR percentage below, whichever is lower
+  brokerage_pct: 0.0005          # 0.05% of trade value
+  stt_buy_pct: 0.001             # 0.1% Securities Transaction Tax on buy
+  stt_sell_pct: 0.001            # 0.1% STT on sell
+  nse_transaction_pct: 0.0000297 # 0.00297% NSE transaction charges
+  gst_pct: 0.18                  # 18% GST on (brokerage + transaction charges)
+  sebi_fee_per_crore: 10         # ₹10 per crore turnover
+  stamp_duty_buy_pct: 0.00015   # 0.015% stamp duty on buy side
+  dp_charges_per_scrip: 15.93   # ₹15.93 per scrip on sell (depository participant)
+
+# --- Equity Intraday ---
+equity_intraday:
+  brokerage_per_order: 20
+  brokerage_pct: 0.0005          # 0.05%
+  stt_sell_pct: 0.00025          # 0.025% on sell side only
+  nse_transaction_pct: 0.0000297
+  gst_pct: 0.18
+  sebi_fee_per_crore: 10
+  stamp_duty_buy_pct: 0.00003   # 0.003% stamp duty on buy side
+
+# --- Futures (F&O) ---
+futures:
+  brokerage_per_order: 20
+  stt_sell_pct: 0.0002           # 0.02% on sell side
+  nse_transaction_pct: 0.0000173 # 0.00173%
+  gst_pct: 0.18
+  sebi_fee_per_crore: 10
+  stamp_duty_buy_pct: 0.00002   # 0.002% on buy side
+
+# --- Options (F&O) ---
+options:
+  brokerage_per_order: 20
+  stt_sell_pct: 0.001            # 0.1% on sell side (on premium)
+  nse_transaction_pct: 0.000495  # 0.0495%
+  gst_pct: 0.18
+  sebi_fee_per_crore: 10
+  stamp_duty_buy_pct: 0.00003   # 0.003% on buy side
+
+# --- Common Notes ---
+notes:
+  - "Brokerage is min(₹20, 0.05% of trade value) per order"
+  - "GST is 18% applied on (brokerage + exchange transaction charges)"
+  - "DP charges (₹15.93) apply only on equity delivery sell orders, per scrip per day"
+  - "STT on exercised ITM options = 0.125% on settlement value (avoid holding ITM to expiry)"
+  - "Stamp duty varies by state; using Maharashtra rates as default"
+  - "All percentages are expressed as decimals (0.001 = 0.1%)"

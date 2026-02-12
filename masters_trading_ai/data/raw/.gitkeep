@@ -1,0 +1,2 @@
+# This directory stores raw yfinance downloads (parquet files).
+# It is gitignored — data must be re-downloaded via Notebook 01.

@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ name }} — Masters AI Trading</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Lightweight Charts for candlestick/line chart -->
+    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+    <!-- Top navbar -->
+    <nav class="navbar">
+        <div class="nav-brand">
+            <a href="/" class="back-link">← Back</a>
+            <span class="brand-name">Masters AI Trading</span>
+        </div>
+        <div class="nav-links" style="gap:12px;">
+            <a href="/" class="nav-link">Dashboard</a>
+            <a href="/risk" class="nav-link">Risk Analytics</a>
+        </div>
+        <div class="nav-status">
+            <span id="market-status" class="status-badge"></span>
+        </div>
+    </nav>
+
+    <!-- Stock header -->
+    <div class="stock-header">
+        <div class="stock-header-left">
+            <div class="stock-icon">{{ name[0] }}</div>
+            <div class="stock-header-info">
+                <h1 class="stock-name">{{ name }}</h1>
+                <span class="stock-symbol">{{ ticker }}</span>
+            </div>
+        </div>
+        <div class="stock-header-right">
+            <div class="stock-price-big" id="live-price">---</div>
+            <div class="stock-change-big" id="live-change">---</div>
+        </div>
+    </div>
+
+    <!-- Price Tracker: Opening vs Predicted vs Current -->
+    <div class="price-tracker-section" id="price-tracker">
+        <h3 class="section-heading">📍 Price Tracker — Today's Journey</h3>
+        <div class="price-tracker-grid">
+            <div class="price-tracker-card opening">
+                <div class="tracker-label">Opening Price</div>
+                <div class="tracker-price" id="tracker-open">---</div>
+                <div class="tracker-sub" id="tracker-open-time">Market Open</div>
+            </div>
+            <div class="price-tracker-arrow">→</div>
+            <div class="price-tracker-card predicted">
+                <div class="tracker-label">AI Predicted</div>
+                <div class="tracker-price" id="tracker-predicted">---</div>
+                <div class="tracker-change" id="tracker-predicted-pct">---</div>
+            </div>
+            <div class="price-tracker-arrow">→</div>
+            <div class="price-tracker-card current">
+                <div class="tracker-label">Current Price</div>
+                <div class="tracker-price" id="tracker-current">---</div>
+                <div class="tracker-change" id="tracker-current-pct">---</div>
+            </div>
+        </div>
+        <div class="price-progress-bar">
+            <div class="progress-labels">
+                <span>Open</span>
+                <span id="progress-status">Loading...</span>
+                <span>Target</span>
+            </div>
+            <div class="progress-track">
+                <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+                <div class="progress-marker predicted-marker" id="predicted-marker" title="AI Predicted"></div>
+                <div class="progress-marker current-marker" id="current-marker" title="Current"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Stock Overview Section (AI-powered) -->
+    <div class="overview-section" id="overview-section">
+        <div class="overview-toggle" onclick="toggleOverview()">
+            <h3 class="section-heading">📋 About This Stock <span class="toggle-hint">(click to expand)</span></h3>
+        </div>
+        <div class="overview-content hidden" id="overview-content">
+            <div class="overview-loading" id="overview-loading">
+                <div class="spinner"></div>
+                <p>Loading company overview...</p>
+            </div>
+            <div class="overview-body hidden" id="overview-body">
+                <div class="overview-card">
+                    <h4>🏢 Company Overview</h4>
+                    <div id="company-overview" class="overview-text">Loading...</div>
+                </div>
+                <div class="overview-card">
+                    <h4>📰 News & Sentiment</h4>
+                    <div id="news-sentiment" class="overview-text">Loading...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chart timeframe buttons -->
+    <div class="chart-controls">
+        <button class="tf-btn active" data-period="1d" data-interval="5m" onclick="changeTimeframe(this)">1D</button>
+        <button class="tf-btn" data-period="5d" data-interval="15m" onclick="changeTimeframe(this)">5D</button>
+        <button class="tf-btn" data-period="1mo" data-interval="1h" onclick="changeTimeframe(this)">1M</button>
+        <button class="tf-btn" data-period="3mo" data-interval="1d" onclick="changeTimeframe(this)">3M</button>
+        <button class="tf-btn" data-period="6mo" data-interval="1d" onclick="changeTimeframe(this)">6M</button>
+        <button class="tf-btn" data-period="1y" data-interval="1d" onclick="changeTimeframe(this)">1Y</button>
+    </div>
+
+    <!-- Price chart -->
+    <div class="chart-container" id="chart-container"></div>
+
+    <!-- Performance stats (Groww-style) -->
+    <div class="performance-section">
+        <h3 class="section-heading">Performance</h3>
+        <div class="performance-bar">
+            <div class="perf-label">Today's Low <span id="today-low">---</span></div>
+            <div class="perf-range">
+                <div class="range-track">
+                    <div class="range-marker" id="price-marker"></div>
+                </div>
+            </div>
+            <div class="perf-label right">Today's High <span id="today-high">---</span></div>
+        </div>
+        <div class="perf-stats-grid">
+            <div class="perf-stat"><span class="stat-label">Open</span><span class="stat-value" id="stat-open">---</span></div>
+            <div class="perf-stat"><span class="stat-label">Prev. Close</span><span class="stat-value" id="stat-prev-close">---</span></div>
+            <div class="perf-stat"><span class="stat-label">Volume</span><span class="stat-value" id="stat-volume">---</span></div>
+        </div>
+    </div>
+
+    <!-- ML Prediction section -->
+    <div class="prediction-section" id="prediction-section">
+        <h3 class="section-heading">🤖 AI Prediction <span class="pred-timestamp" id="pred-generated-at"></span></h3>
+        <div class="prediction-loading" id="pred-loading">
+            <div class="spinner"></div>
+            <p>Running ML models...</p>
+        </div>
+        <div class="prediction-content hidden" id="pred-content">
+            <div class="signal-badge-large" id="signal-badge">HOLD</div>
+
+            <div class="pred-grid">
+                <div class="pred-card">
+                    <span class="pred-label">Predicted Return</span>
+                    <span class="pred-value" id="pred-return">---</span>
+                </div>
+                <div class="pred-card">
+                    <span class="pred-label">Predicted Price</span>
+                    <span class="pred-value" id="pred-price">---</span>
+                </div>
+                <div class="pred-card">
+                    <span class="pred-label">Confidence</span>
+                    <span class="pred-value" id="pred-confidence">---</span>
+                </div>
+                <div class="pred-card">
+                    <span class="pred-label">Model Agreement</span>
+                    <span class="pred-value" id="pred-agreement">---</span>
+                </div>
+            </div>
+
+            <!-- Individual model predictions -->
+            <h4 class="sub-heading">Model Breakdown <span class="ensemble-strategy-badge" id="ensemble-strategy"></span></h4>
+            <div class="model-breakdown" id="model-breakdown"></div>
+
+            <!-- Entry/Exit levels -->
+            <h4 class="sub-heading">Trade Levels</h4>
+            <div class="trade-levels">
+                <div class="level-item entry"><span>Entry</span><span id="level-entry">---</span></div>
+                <div class="level-item target"><span>Target</span><span id="level-target">---</span></div>
+                <div class="level-item stoploss"><span>Stop Loss</span><span id="level-sl">---</span></div>
+                <div class="level-item rr"><span>Risk:Reward</span><span id="level-rr">---</span></div>
+            </div>
+
+            <!-- Technical Indicators -->
+            <div class="indicators-section" id="indicators-section">
+                <h4 class="sub-heading">📊 Technical Indicators <span class="clickable-hint">(click any to explain)</span></h4>
+                <div class="indicator-grid" id="indicator-grid"></div>
+            </div>
+
+            <!-- Fundamentals -->
+            <div class="fundamentals-section hidden" id="fundamentals-section">
+                <h4 class="sub-heading">📈 Fundamentals <span class="clickable-hint">(click any to explain)</span></h4>
+                <div class="fund-grid" id="fund-grid"></div>
+            </div>
+
+            <!-- Options Greeks -->
+            <div class="greeks-section hidden" id="greeks-section">
+                <h4 class="sub-heading">🎯 Options Greeks <span class="clickable-hint">(click any to explain)</span></h4>
+                <div class="greeks-grid" id="greeks-grid"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Strategy Section -->
+    <div class="strategy-section" id="strategy-section">
+        <h3 class="section-heading">🧠 Strategy Analysis</h3>
+        <div class="strategy-content" id="strategy-content">
+            <div class="strategy-card">
+                <div class="strategy-header prediction-strategy">
+                    <span class="strategy-icon">📊</span>
+                    <span>ML Prediction Strategy</span>
+                </div>
+                <div class="strategy-body" id="ml-strategy">
+                    <p class="muted-text">Loading prediction analysis...</p>
+                </div>
+            </div>
+            <div class="strategy-card">
+                <div class="strategy-header groq-strategy">
+                    <span class="strategy-icon">🤖</span>
+                    <span>Groq AI Strategy</span>
+                </div>
+                <div class="strategy-body" id="groq-strategy">
+                    <p class="muted-text">Loading AI analysis...</p>
+                </div>
+            </div>
+            <div class="strategy-card combined">
+                <div class="strategy-header combined-strategy">
+                    <span class="strategy-icon">⚡</span>
+                    <span>Combined Best Approach</span>
+                </div>
+                <div class="strategy-body" id="combined-strategy">
+                    <p class="muted-text">Loading combined strategy...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Prediction Hit/Miss Tracking -->
+    <div class="tracking-section" id="tracking-section">
+        <h3 class="section-heading">🎯 Prediction Tracking</h3>
+        <div class="tracking-summary" id="tracking-summary">
+            <p class="muted-text">Loading prediction outcomes...</p>
+        </div>
+        <div class="tracking-detail" id="tracking-detail"></div>
+    </div>
+
+    <!-- Expected vs Actual for this stock -->
+    <div class="eva-stock-section">
+        <h3 class="section-heading">📊 Expected vs Actual</h3>
+        <div id="stock-eva-content">
+            <p class="muted-text">Prediction will be compared with actual close at end of day.</p>
+        </div>
+    </div>
+
+    <!-- Features Affecting Price -->
+    <div class="feature-importance-section" id="feature-importance-section">
+        <h3 class="section-heading">🔬 What's Affecting This Stock's Price</h3>
+        <p class="section-subtitle-sm">Key factors from ML models that influence the prediction</p>
+        <div class="feature-list" id="feature-list">
+            <div class="loading-spinner"><div class="spinner"></div><p>Analyzing key factors...</p></div>
+        </div>
+    </div>
+
+    <!-- Real World News Section -->
+    <div class="news-section" id="news-section">
+        <h3 class="section-heading">📰 Real-World News & Sentiment</h3>
+        <div class="news-content" id="news-content">
+            <div class="loading-spinner"><div class="spinner"></div><p>Fetching latest news...</p></div>
+        </div>
+    </div>
+
+    <!-- Groq Explanation Modal -->
+    <div class="explanation-modal hidden" id="explanation-modal">
+        <div class="explanation-overlay" onclick="closeExplanation()"></div>
+        <div class="explanation-panel">
+            <div class="explanation-header">
+                <h3 id="explanation-title">Loading...</h3>
+                <button class="explanation-close" onclick="closeExplanation()">✕</button>
+            </div>
+            <div class="explanation-body" id="explanation-body">
+                <div class="spinner"></div>
+                <p>Getting AI explanation...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Disclaimer footer -->
+    <footer class="disclaimer-footer">
+        <p>⚠️ DISCLAIMER: Academic research project. NOT financial advice.</p>
+    </footer>
+
+    <script>
+        const TICKER = "{{ ticker }}";
+        const STOCK_NAME = "{{ name }}";
+    </script>
+    <script src="/static/js/stock.js"></script>
+</body>
+</html>

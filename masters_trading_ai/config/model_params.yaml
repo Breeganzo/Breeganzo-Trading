@@ -1,0 +1,139 @@
+# =============================================================================
+# Model Hyperparameters — All Architectures
+# =============================================================================
+
+# --- ARIMA (Statistical Baseline) ---
+arima:
+  max_p: 5                        # Max AR order to search
+  max_d: 2                        # Max differencing order
+  max_q: 5                        # Max MA order
+  default_order: [2, 0, 1]        # Fallback order if auto-selection fails
+  forecast_horizon: 5             # Match target_horizon in notebooks
+
+# --- GARCH (Volatility Model) ---
+garch:
+  p: 1                            # GARCH order
+  q: 1                            # ARCH order
+  mean_model: "AR"                # Mean model (AR, Constant, Zero)
+  ar_order: 1                     # AR lags in mean model
+  distribution: "studentst"       # Innovation distribution (studentst, normal, ged)
+  forecast_horizon: 5             # Match target_horizon
+
+# --- XGBoost ---
+xgboost:
+  # Regression (range prediction)
+  regressor:
+    objective: "reg:squarederror"
+    n_estimators: 1500
+    max_depth: 5                  # Deeper trees capture stock-specific patterns
+    learning_rate: 0.02           # Slower learning for better generalization
+    subsample: 0.80
+    colsample_bytree: 0.80
+    reg_alpha: 0.1              # L1 regularization (moderate)
+    reg_lambda: 1.0             # L2 regularization (moderate)
+    min_child_weight: 10        # Allow more granular leaves
+    gamma: 0.1                  # Lower threshold for split
+    max_delta_step: 0.1         # Limits prediction magnitude per tree
+    early_stopping_rounds: 50
+    random_state: 42
+
+  # Classification (direction prediction)
+  classifier:
+    objective: "binary:logistic"
+    n_estimators: 1500
+    max_depth: 5
+    learning_rate: 0.02
+    subsample: 0.80
+    colsample_bytree: 0.80
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    min_child_weight: 10
+    gamma: 0.1
+    max_delta_step: 0.1
+    scale_pos_weight: 1.0       # Adjust if classes are imbalanced
+    early_stopping_rounds: 50
+    random_state: 42
+
+# --- LightGBM ---
+lightgbm:
+  regressor:
+    objective: "regression"
+    n_estimators: 1500
+    num_leaves: 31              # More leaves to capture stock patterns
+    learning_rate: 0.02
+    subsample: 0.80
+    colsample_bytree: 0.80
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    min_child_samples: 20
+    min_gain_to_split: 0.01     # Lower threshold for meaningful splits
+    path_smooth: 5              # Smooths leaf predictions
+    early_stopping_rounds: 50
+    random_state: 42
+    verbose: -1
+
+  classifier:
+    objective: "binary"
+    n_estimators: 1500
+    num_leaves: 31
+    learning_rate: 0.02
+    subsample: 0.80
+    colsample_bytree: 0.80
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    min_child_samples: 20
+    min_gain_to_split: 0.01
+    path_smooth: 5
+    early_stopping_rounds: 50
+    random_state: 42
+    verbose: -1
+
+# --- LSTM ---
+lstm:
+  sequence_length: 30            # Days of history per input sequence
+  hidden_size: 48                # Smaller model reduces overfitting with 29K samples
+  num_layers: 2                  # Stacked LSTM layers
+  dropout: 0.5                   # Strong dropout for regularization
+  batch_size: 64
+  learning_rate: 0.0008
+  weight_decay: 0.0003           # L2 regularization (stronger)
+  max_epochs: 100
+  patience: 15                   # Early stopping patience
+  scheduler_factor: 0.5          # LR scheduler factor
+  scheduler_patience: 5          # LR scheduler patience
+  clip_target: 0.03              # Clip target returns to ±3% (reduce outlier sensitivity)
+  random_state: 42
+
+# --- Temporal Fusion Transformer ---
+transformer:
+  sequence_length: 45            # Reduced from 60 — more practical in live inference
+  hidden_size: 48                # Smaller to reduce overfitting
+  attention_head_size: 4
+  num_attention_heads: 4
+  hidden_continuous_size: 32
+  dropout: 0.4                   # Increased dropout
+  batch_size: 64
+  learning_rate: 0.0008
+  max_epochs: 80
+  patience: 10
+  gradient_clip_val: 0.5
+  clip_target: 0.03              # Clip target returns to ±3%
+  random_state: 42
+
+# --- Ensemble (Multi-Strategy Meta-Learner) ---
+# Evaluates 5 strategies (median, simple_average, weighted_average, ridge,
+# confidence_filtered) on a held-out validation set and auto-selects the best.
+# Anti-overfit guard: prefers simpler strategies when gap vs Ridge < 2%.
+ensemble:
+  method: "auto"                     # "auto" evaluates all strategies; or pick one directly
+  meta_learner: "ridge"              # Only used when strategy is "ridge"
+  meta_alpha: 100.0                  # Ridge regularization (high = anti-overfit)
+  confidence_threshold: 0.001        # Min |pred| for confidence-filtered strategy
+  min_accuracy_threshold: 0.50       # Auto-remove models below this (50% = random)
+  weights:                           # Used by "weighted_average" strategy
+    arima: 0.10
+    garch: 0.10
+    xgboost: 0.25
+    lightgbm: 0.25
+    lstm: 0.20
+    transformer: 0.10

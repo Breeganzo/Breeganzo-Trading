@@ -1,0 +1,43 @@
+# ============================================================================
+# Render Blueprint — QuantDesk Pro Backend
+# Deploy: Connect GitHub repo → Render detects this file automatically
+# ============================================================================
+
+services:
+  - type: web
+    name: quantdesk-pro-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    region: oregon
+    plan: free
+    branch: main
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false  # Set manually in Render dashboard
+      - key: REDIS_URL
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        value: https://quantdesk-pro-api.onrender.com/api/v1/auth/callback
+      - key: ALLOWED_EMAIL
+        value: anthonybreeganzo02@gmail.com
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: "http://localhost:3000,https://quantdesk-pro.vercel.app"
+      - key: PORT
+        value: "8000"
+    healthCheckPath: /health
+    buildFilter:
+      paths:
+        - backend/**

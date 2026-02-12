@@ -1,0 +1,1 @@
+Date,Ticker,Predicted_Return,Signal,Confidence,Model_Agreement,Entry_Price,Target_Price,Stop_Loss,XGB_Pred,LGB_Pred,LSTM_Pred,TF_Pred,Actual_Close,Actual_Return,Hit_Target,Hit_Stop

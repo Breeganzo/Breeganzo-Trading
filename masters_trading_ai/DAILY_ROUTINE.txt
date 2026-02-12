@@ -1,0 +1,50 @@
+# 🚀 DAILY TRADING AI ROUTINE
+# Run these commands every morning for fresh predictions
+
+# =============================================================================
+# STEP 1: Go to your project folder
+# =============================================================================
+cd /Users/anto/Trading_Project/masters_trading_ai
+
+# =============================================================================
+# STEP 2: Run the daily script (this does everything automatically)
+# =============================================================================
+./run_daily.sh
+
+# =============================================================================
+# STEP 3: Open your browser to see results
+# =============================================================================
+# Go to: http://localhost:5001
+# - See today's top buy/sell picks
+# - Check prediction accuracy
+# - Click on stocks for detailed analysis
+
+# =============================================================================
+# STEP 4: Stop the server when done (optional)
+# =============================================================================
+# Press Ctrl+C in the terminal to stop the server
+
+# =============================================================================
+# WEEKLY TASK (Every Sunday): Retrain models
+# =============================================================================
+# ./run_daily.sh --retrain
+# This takes 10-30 minutes but improves accuracy
+
+# =============================================================================
+# TROUBLESHOOTING
+# =============================================================================
+# If server won't start:
+# pkill -f "python webapp/server.py"
+# ./run_daily.sh
+
+# If you get API key error:
+# Check your .env file has: GROQ_API_KEY=gsk_...
+# Get free key from: https://console.groq.com/keys
+
+# =============================================================================
+# WHAT THIS DOES:
+# ✅ Downloads latest stock data
+# ✅ Generates fresh predictions for all 124 stocks
+# ✅ Starts web dashboard at http://localhost:5001
+# ✅ Shows you top trading opportunities
+# =============================================================================

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Masters AI Trading Bot</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Top navbar -->
+    <nav class="navbar">
+        <div class="nav-brand">
+            <span class="logo">📈</span>
+            <span class="brand-name">Masters AI Trading</span>
+        </div>
+        <div class="nav-links">
+            <a href="/" class="nav-link active" onclick="selectSector('all')">Stocks</a>
+            <a href="#" class="nav-link" onclick="showTopAnalysis()">Top 10 Analysis</a>
+            <a href="#" class="nav-link" onclick="showTopPicks()">Top Picks</a>
+            <a href="#" class="nav-link" onclick="showExpectedVsActual()">Expected vs Actual</a>
+            <a href="/risk" class="nav-link">Risk Analytics</a>
+        </div>
+        <div class="nav-status">
+            <span id="market-status" class="status-badge"></span>
+            <span id="model-status" class="status-badge loading">Loading models...</span>
+        </div>
+    </nav>
+
+    <!-- Market banner -->
+    <div class="market-banner" id="market-banner">
+        <div class="banner-item">
+            <span class="banner-label">IST</span>
+            <span class="banner-value" id="ist-time">--:--</span>
+        </div>
+        <div class="banner-item" id="nifty-banner">
+            <span class="banner-label">NIFTY 50</span>
+            <span class="banner-value" id="nifty-price">---</span>
+            <span class="banner-change" id="nifty-change">---</span>
+        </div>
+        <div class="banner-item" id="banknifty-banner">
+            <span class="banner-label">BANK NIFTY</span>
+            <span class="banner-value" id="banknifty-price">---</span>
+            <span class="banner-change" id="banknifty-change">---</span>
+        </div>
+        <div class="banner-item market-summary-banner" id="market-summary-banner">
+            <span class="banner-label">MARKET</span>
+            <span class="banner-value" id="market-mood">--</span>
+        </div>
+    </div>
+
+    <!-- Main content -->
+    <main class="main-content">
+        <!-- Sector filter tabs -->
+        <div class="sector-tabs" id="sector-tabs">
+            <button class="sector-tab active" data-sector="all" onclick="selectSector('all')">All Stocks</button>
+            <button class="sector-tab" data-sector="large_cap" onclick="selectSector('large_cap')">Large Cap</button>
+            <button class="sector-tab" data-sector="banking" onclick="selectSector('banking')">Banking</button>
+            <button class="sector-tab" data-sector="mid_cap" onclick="selectSector('mid_cap')">Mid Cap</button>
+            <button class="sector-tab" data-sector="high_volatility" onclick="selectSector('high_volatility')">High Vol</button>
+            <button class="sector-tab" data-sector="commodities" onclick="selectSector('commodities')">Commodities</button>
+        </div>
+
+        <!-- Search bar -->
+        <div class="search-container">
+            <input type="text" id="search-input" placeholder="Search stocks..." oninput="filterStocks()">
+        </div>
+
+        <!-- Stock cards grid -->
+        <div class="stock-grid" id="stock-grid">
+            <div class="loading-spinner" id="grid-loading">
+                <div class="spinner"></div>
+                <p>Loading stock prices...</p>
+            </div>
+        </div>
+
+        <!-- Top 10 Analysis section (hidden by default) -->
+        <div class="top-analysis-section hidden" id="top-analysis-section">
+            <h2 class="section-title">🏆 Top 10 AI-Analyzed Stocks</h2>
+            <p class="section-subtitle">Ranked by composite score: Predicted Return + Confidence + Model Agreement + Risk:Reward</p>
+            <div class="analysis-grid" id="analysis-grid">
+                <div class="loading-spinner"><div class="spinner"></div><p>Running deep analysis across all stocks...</p></div>
+            </div>
+        </div>
+
+        <!-- Top Picks section (hidden by default) -->
+        <div class="top-picks-section hidden" id="top-picks-section">
+            <h2 class="section-title">🎯 AI Top Picks</h2>
+            <p class="section-subtitle">ML model predictions ranked by composite score</p>
+            <div class="picks-grid" id="picks-grid">
+                <div class="loading-spinner"><div class="spinner"></div><p>Generating predictions...</p></div>
+            </div>
+        </div>
+
+        <!-- Expected vs Actual section (hidden by default) -->
+        <div class="expected-actual-section hidden" id="expected-actual-section">
+            <h2 class="section-title">📊 Expected vs Actual</h2>
+            <div class="date-selector">
+                <label>Date:</label>
+                <select id="prediction-date" onchange="loadExpectedVsActual()"></select>
+            </div>
+            <div class="summary-cards" id="eva-summary"></div>
+            <div class="eva-table-container" id="eva-table"></div>
+        </div>
+    </main>
+
+    <!-- Disclaimer footer -->
+    <footer class="disclaimer-footer">
+        <p>⚠️ DISCLAIMER: Academic research project for educational purposes only. NOT financial advice.
+        Past performance does not guarantee future results. Always consult a qualified financial advisor.</p>
+    </footer>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

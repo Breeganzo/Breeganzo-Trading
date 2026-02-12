@@ -1,0 +1,164 @@
+# =============================================================================
+# Ticker Universe — 120+ Indian Equities (NSE via yfinance)
+# =============================================================================
+#
+# CHANGE LOG:
+# -----------
+# If you ADD or REMOVE tickers from this file, you MUST re-run notebooks
+# 01 (data download) through 09 (ensemble) in order. Then re-run 10 and 11.
+#
+# All tickers use the .NS suffix for NSE via yfinance.
+# Verify new tickers: yfinance.download("TICKER.NS", period="5d")
+
+# --- Large-Cap / Long-Term (Nifty 50 Blue Chips) ---
+large_cap:
+  - RELIANCE.NS
+  - TCS.NS
+  - HDFCBANK.NS
+  - INFY.NS
+  - ICICIBANK.NS
+  - HINDUNILVR.NS
+  - ITC.NS
+  - BHARTIARTL.NS
+  - SBIN.NS
+  - BAJFINANCE.NS
+  - KOTAKBANK.NS
+  - LT.NS
+  - ASIANPAINT.NS
+  - AXISBANK.NS
+  - MARUTI.NS
+  - SUNPHARMA.NS
+  - TITAN.NS
+  - BAJAJFINSV.NS
+  - NTPC.NS
+  - HCLTECH.NS
+  - POWERGRID.NS
+  - WIPRO.NS
+  - NESTLEIND.NS
+  - ULTRACEMCO.NS
+  - DRREDDY.NS
+  - TECHM.NS
+  - CIPLA.NS
+  - GRASIM.NS
+  - APOLLOHOSP.NS
+  - EICHERMOT.NS
+
+# --- Banking & Financial Sector ---
+banking:
+  - HDFCLIFE.NS
+  - SBILIFE.NS
+  - BANKBARODA.NS
+  - CANBK.NS
+  - PNB.NS
+  - ICICIGI.NS
+  - CHOLAFIN.NS
+  - SHRIRAMFIN.NS
+  - JIOFIN.NS
+  - LICI.NS
+  - PFC.NS
+  - RECLTD.NS
+  - IRFC.NS
+  - IDFCFIRSTB.NS
+  - FEDERALBNK.NS
+  - BANDHANBNK.NS
+  - ICICIPRULI.NS
+  - MUTHOOTFIN.NS
+  - MANAPPURAM.NS
+  - SBICARD.NS
+  - KTKBANK.NS            # Karnataka Bank
+  - SOUTHBANK.NS          # South Indian Bank
+  - DCBBANK.NS            # DCB Bank
+
+# --- Mid-Cap Growth ---
+mid_cap:
+  - NAUKRI.NS
+  - INDHOTEL.NS
+  - TRENT.NS
+  - PIDILITIND.NS
+  - HAVELLS.NS
+  - GODREJCP.NS
+  - DMART.NS
+  - DLF.NS
+  - LODHA.NS
+  - TVSMOTOR.NS
+  - VBL.NS
+  - SIEMENS.NS
+  - ABB.NS
+  - TORNTPHARM.NS
+  - LTIM.NS
+  - JUBLFOOD.NS
+  - PAGEIND.NS
+  - AUBANK.NS
+  - PERSISTENT.NS
+  - COFORGE.NS
+  - PIIND.NS
+  - POLYCAB.NS
+  - ASTRAL.NS
+  - MAXHEALTH.NS
+  - SAGILITY.NS           # Sagility India
+  - RICOAUTO.NS           # Rico Auto Industries
+  - JAMNAAUTO.NS          # Jamna Auto Industries
+
+# --- High-Volatility / Momentum ---
+high_volatility:
+  - ADANIENT.NS
+  - ADANIPORTS.NS
+  - ADANIGREEN.NS
+  - ADANIPOWER.NS
+  - TMCV.NS             # Tata Motors Commercial Vehicles (post Oct-2025 demerger)
+  - TMPV.NS             # Tata Motors Passenger Vehicles (post Oct-2025 demerger)
+  - ETERNAL.NS
+  - PAYTM.NS
+  - INDIAMART.NS
+  - MAZDOCK.NS
+  - HAL.NS
+  - BEL.NS
+  - IREDA.NS
+  - RVNL.NS
+  - NHPC.NS
+  - SUZLON.NS
+  - JSWENERGY.NS
+  - CGPOWER.NS
+  - SOLARINDS.NS
+  - INDIGO.NS
+  - MOTHERSON.NS
+
+# --- Commodities-Linked ---
+commodities:
+  - TATASTEEL.NS
+  - JSWSTEEL.NS
+  - HINDALCO.NS
+  - VEDL.NS
+  - HINDZINC.NS
+  - COALINDIA.NS
+  - ONGC.NS
+  - BPCL.NS
+  - IOC.NS
+  - GAIL.NS
+  - JINDALSTEL.NS
+  - NMDC.NS
+  - OIL.NS
+  - TATAPOWER.NS
+  - SHREECEM.NS
+  - AMBUJACEM.NS
+  - BRITANNIA.NS
+  - TATACONSUM.NS
+  - BOSCHLTD.NS
+  - DIVISLAB.NS
+  - ZYDUSLIFE.NS
+  - BAJAJ-AUTO.NS
+  - SAIL.NS               # Steel Authority of India
+
+# --- External / Cross-Asset Tickers (for feature engineering, not trading) ---
+external:
+  - ^NSEI          # Nifty 50 Index
+  - ^NSEBANK       # Bank Nifty Index
+  - ^INDIAVIX      # India VIX
+  - USDINR=X       # USD/INR exchange rate
+  - GC=F           # Gold Futures
+  - CL=F           # Crude Oil Futures
+
+# --- Options Universe (for options signals notebook) ---
+options_underlyings:
+  - ^NSEI          # Nifty 50 options
+  - ^NSEBANK       # Bank Nifty options

@@ -1,0 +1,69 @@
+# =============================================================================
+# Global Settings — Masters AI Trading Bot
+# =============================================================================
+# These settings control the entire pipeline. Modify carefully.
+
+# --- Market Parameters ---
+market:
+  risk_free_rate: 0.065          # India 10Y government bond yield (~6.5%)
+  trading_days_per_year: 252     # NSE trading calendar
+  benchmark_ticker: "^NSEI"      # Nifty 50 index
+  currency: "INR"
+  exchange: "NSE"
+
+# --- Data Parameters ---
+data:
+  lookback_years: 5              # Years of historical data to download
+  min_trading_days: 500          # Minimum days a ticker must have to be included
+  max_missing_pct: 0.20          # Drop tickers with >20% missing data
+  forward_fill_limit: 3          # Max consecutive days to forward-fill
+  outlier_sigma: 5.0             # Cap returns beyond 5 standard deviations
+  storage_format: "parquet"      # parquet or csv
+
+# --- Walk-Forward Cross-Validation ---
+walk_forward:
+  n_folds: 8                     # Number of walk-forward folds
+  train_window_days: 504         # ~2 years of training data per fold
+  test_window_days: 63           # ~1 quarter of test data per fold
+  embargo_days: 5                # Gap between train end and test start
+  purge_days: 5                  # Remove training samples with labels overlapping test
+  step_days: 63                  # Step size between folds (= test window)
+  validation_split: 0.20         # Within each train fold, hold out 20% for early stopping/tuning
+
+# --- Feature Engineering ---
+features:
+  rolling_zscore_window: 252     # Window for rolling z-score normalization
+  lag_periods: [1, 2, 5]         # Lag periods for feature construction
+  correlation_threshold: 0.95    # Drop features with |correlation| > this
+  min_warmup_days: 200           # Discard first N rows (indicator warmup)
+
+# --- Backtest ---
+backtest:
+  initial_capital: 50000         # Starting capital in INR (₹50,000)
+  slippage_pct: 0.0005           # 0.05% slippage per trade
+  max_positions: 8               # Maximum concurrent positions
+  max_position_pct: 0.12         # Max 12% of capital per position (reduced)
+  sector_concentration_limit: 0.35  # Max 35% in any one sector
+
+# --- Risk Management ---
+risk:
+  max_daily_drawdown: 0.03       # Stop trading if daily loss > 3%
+  max_total_drawdown: 0.15       # Stop trading if total drawdown > 15%
+  position_sizing: "half_kelly"  # half_kelly, equal_risk, equal_weight
+  stop_loss_pct: 0.03            # 3% stop-loss per position (tight risk control)
+  take_profit_pct: 0.10          # 10% take-profit per position (1:3.3 R:R)
+  min_confidence: 0.60           # Minimum model confidence to trade (raised from 0.55)
+
+# --- Retraining ---
+retraining:
+  schedule: "monthly"            # monthly, weekly, quarterly
+  sharpe_threshold: 0.3          # Retrain if rolling 30-day Sharpe < this
+  accuracy_threshold: 0.52       # Retrain if rolling accuracy < this
+  rolling_window_days: 30        # Window for monitoring metrics
+
+# --- Prediction Horizons ---
+horizons:
+  - 1    # Next day
+  - 5    # 1 week
+  - 10   # 2 weeks
+  - 20   # 1 month

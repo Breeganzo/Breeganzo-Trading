@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data (too large for git)
+data/raw/*.parquet
+data/interim/*.parquet
+data/processed/*.parquet
+data/external/*.parquet
+
+# Model weights (too large for git)
+models/*.joblib
+models/*.pt
+
+# Cache
+cache/
+*.json.bak
+
+# Logs
+logs/
+*.log
+
+# Environment / Secrets
+.env
+.env.local
+.env.production
+*.pem
+*.key
+secrets/

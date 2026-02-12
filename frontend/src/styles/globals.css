@@ -1,0 +1,170 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-bg-primary text-text-primary font-sans antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  /* Custom scrollbar - minimal institutional style */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-bg-primary;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-border-light rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-neutral;
+  }
+
+  /* Number formatting */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  /* Panel system */
+  .panel {
+    @apply bg-bg-secondary border border-border rounded-lg overflow-hidden;
+  }
+  .panel-header {
+    @apply px-4 py-3 border-b border-border flex items-center justify-between;
+  }
+  .panel-title {
+    @apply text-xs font-semibold uppercase tracking-wider text-text-secondary;
+  }
+  .panel-body {
+    @apply p-4;
+  }
+
+  /* Data table */
+  .data-table {
+    @apply w-full text-data;
+  }
+  .data-table th {
+    @apply px-3 py-2 text-left text-label font-semibold uppercase tracking-wider text-text-muted border-b border-border;
+  }
+  .data-table td {
+    @apply px-3 py-2 border-b border-border/50 font-mono tabular-nums;
+  }
+  .data-table tr:hover td {
+    @apply bg-bg-hover;
+  }
+  .data-table .sortable {
+    @apply cursor-pointer select-none hover:text-text-primary transition-colors;
+  }
+
+  /* Metric card */
+  .metric-card {
+    @apply bg-bg-tertiary rounded-md p-3 border border-border/50;
+  }
+  .metric-label {
+    @apply text-label text-text-muted uppercase tracking-wider mb-1;
+  }
+  .metric-value {
+    @apply text-lg font-mono font-semibold tabular-nums;
+  }
+
+  /* Status indicators */
+  .status-dot {
+    @apply w-2 h-2 rounded-full inline-block;
+  }
+  .status-healthy {
+    @apply bg-profit;
+  }
+  .status-degraded {
+    @apply bg-warning;
+  }
+  .status-down {
+    @apply bg-loss;
+  }
+
+  /* Buttons */
+  .btn {
+    @apply px-3 py-1.5 text-xs font-medium rounded transition-colors duration-150;
+  }
+  .btn-primary {
+    @apply bg-accent-blue text-white hover:bg-accent-blue/90;
+  }
+  .btn-secondary {
+    @apply bg-bg-tertiary text-text-secondary border border-border hover:bg-bg-hover hover:text-text-primary;
+  }
+  .btn-danger {
+    @apply bg-loss/10 text-loss border border-loss/20 hover:bg-loss/20;
+  }
+  .btn-success {
+    @apply bg-profit/10 text-profit border border-profit/20 hover:bg-profit/20;
+  }
+
+  /* Badge */
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-label font-medium;
+  }
+  .badge-buy {
+    @apply bg-profit/10 text-profit;
+  }
+  .badge-sell {
+    @apply bg-loss/10 text-loss;
+  }
+  .badge-draft {
+    @apply bg-warning/10 text-warning;
+  }
+
+  /* Ticker strip */
+  .ticker-strip {
+    @apply flex items-center gap-6 whitespace-nowrap;
+  }
+  .ticker-item {
+    @apply flex items-center gap-2 text-data font-mono;
+  }
+
+  /* Input */
+  .input {
+    @apply w-full bg-bg-tertiary border border-border rounded px-3 py-2 text-sm text-text-primary
+           placeholder-text-muted focus:outline-none focus:border-border-focus focus:ring-1 focus:ring-border-focus/30
+           transition-colors;
+  }
+
+  /* Select */
+  .select {
+    @apply bg-bg-tertiary border border-border rounded px-3 py-1.5 text-xs text-text-primary
+           focus:outline-none focus:border-border-focus appearance-none cursor-pointer;
+  }
+
+  /* Tooltip */
+  .tooltip {
+    @apply absolute z-50 px-2 py-1 text-label bg-bg-elevated border border-border rounded shadow-lg
+           text-text-secondary pointer-events-none;
+  }
+}
+
+@layer utilities {
+  .pnl-positive {
+    @apply text-profit;
+  }
+  .pnl-negative {
+    @apply text-loss;
+  }
+  .pnl-neutral {
+    @apply text-text-secondary;
+  }
+}
