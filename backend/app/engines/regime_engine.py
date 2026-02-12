@@ -62,8 +62,8 @@ _BREADTH_BEAR: float = 0.40   # < 40% above 50-day MA
 _CACHE_TTL_SECONDS: int = 30 * 60  # 30 minutes
 
 # History period -- must cover at least 200 trading days for the long MA.
-_INDEX_HISTORY_PERIOD: str = "1y"
-_BREADTH_HISTORY_PERIOD: str = "3mo"  # ~63 trading days, enough for 50-day MA
+_INDEX_HISTORY_PERIOD: str = "2y"
+_BREADTH_HISTORY_PERIOD: str = "6mo"  # enough for 50-day MA
 
 # Representative sample of NIFTY 50 constituents used for breadth proxy.
 _NIFTY50_SAMPLE: list[str] = [
@@ -96,29 +96,46 @@ def _ensure_nse_suffix(ticker: str) -> str:
     return ticker
 
 
-def _fetch_yf_history(ticker: str, period: str = "1y") -> pd.DataFrame:
+def _fetch_yf_history(ticker: str, period: str = "2y") -> pd.DataFrame:
     """Blocking helper -- download OHLCV history from Yahoo Finance.
 
     Imported lazily so the module can be loaded in environments where
     *yfinance* is not yet installed.
+    Includes retry with fallback periods for cloud environments.
     """
     import yfinance as yf  # lazy import
 
-    data = yf.download(
-        ticker,
-        period=period,
-        auto_adjust=True,
-        progress=False,
+    periods_to_try = [period, "2y", "1y", "6mo"]
+    seen = set()
+    for p in periods_to_try:
+        if p in seen:
+            continue
+        seen.add(p)
+        try:
+            data = yf.download(
+                ticker,
+                period=p,
+                auto_adjust=True,
+                progress=False,
+            )
+            if data is not None and not data.empty:
+                # Flatten MultiIndex columns (yfinance >= 0.2.31)
+                if isinstance(data.columns, pd.MultiIndex):
+                    data.columns = data.columns.get_level_values(0)
+                logger.info(
+                    "Fetched %d rows for %s (period=%s)", len(data), ticker, p
+                )
+                return data
+        except Exception as exc:
+            logger.warning(
+                "yfinance download failed for %s period=%s: %s", ticker, p, exc
+            )
+            continue
+
+    raise ValueError(
+        f"No price data returned by yfinance for ticker '{ticker}' "
+        f"after trying periods {list(seen)}."
     )
-    if data is None or data.empty:
-        raise ValueError(
-            f"No price data returned by yfinance for ticker '{ticker}' "
-            f"(period={period})."
-        )
-    # Flatten MultiIndex columns (yfinance >= 0.2.31 returns MultiIndex)
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
-    return data
 
 
 # ---------------------------------------------------------------------------
@@ -203,13 +220,28 @@ class RegimeEngine:
             ``{"ma_50": float, "ma_200": float, "ma_signal": str}``
         """
         ma_50 = float(close.rolling(window=_MA_SHORT).mean().iloc[-1])
-        ma_200 = float(close.rolling(window=_MA_LONG).mean().iloc[-1])
+        
+        # MA200 may be NaN if insufficient data — use MA50 vs price as fallback
+        if len(close) >= _MA_LONG:
+            ma_200 = float(close.rolling(window=_MA_LONG).mean().iloc[-1])
+        else:
+            ma_200 = float("nan")
 
-        if math.isnan(ma_50) or math.isnan(ma_200):
+        if math.isnan(ma_50):
             return {
-                "ma_50": _nan_safe(ma_50),
+                "ma_50": None,
                 "ma_200": _nan_safe(ma_200),
                 "ma_signal": "neutral",
+            }
+
+        if math.isnan(ma_200):
+            # Fallback: use price vs MA50 as trend signal
+            current_price = float(close.iloc[-1])
+            ma_signal = "bullish" if current_price > ma_50 else "bearish"
+            return {
+                "ma_50": round(ma_50, 2),
+                "ma_200": None,
+                "ma_signal": ma_signal,
             }
 
         ma_signal = "bullish" if ma_50 > ma_200 else "bearish"
@@ -457,12 +489,12 @@ class RegimeEngine:
         if isinstance(close, pd.DataFrame):
             close = close.iloc[:, 0]
 
-        if close.empty or len(close) < _MA_LONG:
+        if close.empty or len(close) < _MA_SHORT:
             logger.warning(
                 "Insufficient index data for regime detection "
                 "(got %d rows, need >= %d).",
                 len(close),
-                _MA_LONG,
+                _MA_SHORT,
             )
             return self._default_result()
 
