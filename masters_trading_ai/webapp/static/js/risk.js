@@ -9,6 +9,36 @@ document.addEventListener('DOMContentLoaded', () => {
 const riskExplainCache = {};
 let riskTooltipHideTimer = null;
 
+function renderExplainPopover(bodyEl, text) {
+    const full = String(text || '').trim();
+    bodyEl.innerHTML = '';
+    if (full.length <= 260) {
+        bodyEl.textContent = full || 'No explanation available';
+        return;
+    }
+    const summary = document.createElement('div');
+    summary.className = 'explain-summary';
+    summary.textContent = `${full.slice(0, 260).trim()}...`;
+
+    const readMore = document.createElement('button');
+    readMore.type = 'button';
+    readMore.className = 'tf-btn explain-read-more';
+    readMore.textContent = 'Read more';
+
+    const fullText = document.createElement('div');
+    fullText.className = 'explain-full hidden';
+    fullText.textContent = full;
+
+    readMore.addEventListener('click', () => {
+        const expanded = !fullText.classList.contains('hidden');
+        fullText.classList.toggle('hidden', expanded);
+        summary.classList.toggle('hidden', !expanded);
+        readMore.textContent = expanded ? 'Read more' : 'Show less';
+    });
+
+    bodyEl.append(summary, readMore, fullText);
+}
+
 async function loadRiskAnalytics() {
     const loading = document.getElementById('risk-loading');
     const content = document.getElementById('risk-content');
@@ -371,7 +401,7 @@ function bindRiskTermHover() {
         bodyEl.textContent = 'Loading explanation...';
         const cacheKey = `${term}::portfolio risk analytics`;
         if (riskExplainCache[cacheKey]) {
-            bodyEl.textContent = riskExplainCache[cacheKey];
+            renderExplainPopover(bodyEl, riskExplainCache[cacheKey]);
             return;
         }
         try {
@@ -379,7 +409,7 @@ function bindRiskTermHover() {
             const data = await res.json();
             const text = data.explanation || data.error || 'No explanation available';
             riskExplainCache[cacheKey] = text;
-            bodyEl.textContent = text;
+            renderExplainPopover(bodyEl, text);
         } catch (e) {
             bodyEl.textContent = `Explanation unavailable: ${e.message}`;
         }

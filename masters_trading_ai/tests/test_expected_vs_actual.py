@@ -130,6 +130,11 @@ def test_api_expected_vs_actual_includes_training_fields(tmp_path: Path, monkeyp
     assert row["ai_last_prediction"] == 102.0
     assert row["actual_close"] == 103.0
     assert row["direction_comparison"] is True
+    assert "strategy_return_pct" in row
+    assert "ai_return_pct" in row
+    assert "alpha_pct" in row
+    assert row["open_price"] == 100.0
+    assert row["close_price"] == 103.0
     pred_open_ts = datetime.fromisoformat(row["strategy_predicted_at_open"])
     assert pred_open_ts.hour == 9 and 15 <= pred_open_ts.minute <= 30
 

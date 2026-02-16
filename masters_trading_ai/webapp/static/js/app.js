@@ -15,6 +15,8 @@ let metricExplainCache = {};
 let premarketOutlookData = [];
 let highlightedPremarketTicker = null;
 let metricTooltipHideTimer = null;
+let useLatestStoredPredictions = false;
+let currentMarketStatus = '';
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -76,9 +78,13 @@ async function checkStatus() {
         const data = await res.json();
 
         const mktBadge = document.getElementById('market-status');
+        currentMarketStatus = data.market?.status || '';
         if (data.market.status === 'market_open') {
             mktBadge.textContent = '🟢 Market Open';
             mktBadge.className = 'status-badge open';
+        } else if (data.market.status === 'after_hours') {
+            mktBadge.textContent = '🕓 After Hours';
+            mktBadge.className = 'status-badge closed';
         } else {
             mktBadge.textContent = '🔴 ' + data.market.description;
             mktBadge.className = 'status-badge closed';
@@ -152,6 +158,36 @@ function bindMetricTooltipInteractions() {
     tip.addEventListener('focusout', scheduleMetricTooltipHide);
 }
 
+function renderExplainPopover(bodyEl, text) {
+    const full = String(text || '').trim();
+    bodyEl.innerHTML = '';
+    if (full.length <= 260) {
+        bodyEl.textContent = full || 'No explanation available';
+        return;
+    }
+    const summary = document.createElement('div');
+    summary.className = 'explain-summary';
+    summary.textContent = `${full.slice(0, 260).trim()}...`;
+
+    const readMore = document.createElement('button');
+    readMore.type = 'button';
+    readMore.className = 'tf-btn explain-read-more';
+    readMore.textContent = 'Read more';
+
+    const fullText = document.createElement('div');
+    fullText.className = 'explain-full hidden';
+    fullText.textContent = full;
+
+    readMore.addEventListener('click', () => {
+        const expanded = !fullText.classList.contains('hidden');
+        fullText.classList.toggle('hidden', expanded);
+        summary.classList.toggle('hidden', !expanded);
+        readMore.textContent = expanded ? 'Read more' : 'Show less';
+    });
+
+    bodyEl.append(summary, readMore, fullText);
+}
+
 async function showMetricTooltip(evt, term, context = '') {
     const tip = document.getElementById('metric-tooltip');
     const titleEl = document.getElementById('metric-tooltip-title');
@@ -169,7 +205,7 @@ async function showMetricTooltip(evt, term, context = '') {
 
     const key = `${term}::${context}`;
     if (metricExplainCache[key]) {
-        bodyEl.textContent = metricExplainCache[key];
+        renderExplainPopover(bodyEl, metricExplainCache[key]);
         return;
     }
     try {
@@ -177,7 +213,7 @@ async function showMetricTooltip(evt, term, context = '') {
         const data = await res.json();
         const text = data.explanation || data.error || 'No explanation';
         metricExplainCache[key] = text;
-        bodyEl.textContent = text;
+        renderExplainPopover(bodyEl, text);
     } catch (e) {
         bodyEl.textContent = `Explanation unavailable: ${e.message}`;
     }
@@ -689,6 +725,11 @@ function setTopPickFilter(filterKey) {
     loadCurrentSecondSnapshot();
 }
 
+function togglePremarketStored(checked) {
+    useLatestStoredPredictions = Boolean(checked);
+    loadPremarketOutlook();
+}
+
 function updateTopPickFilterButtons() {
     const filterEl = document.getElementById('top-picks-filter');
     if (filterEl) filterEl.value = topPickFilter;
@@ -769,14 +810,20 @@ function renderTopPicks() {
 async function loadPremarketOutlook() {
     const table = document.getElementById('premarket-table-body');
     const header = document.getElementById('premarket-captured-at');
+    const toggle = document.getElementById('premarket-use-stored');
     if (!table) return;
+    if (toggle) {
+        const locked = currentMarketStatus === 'after_hours' || currentMarketStatus === 'weekend';
+        toggle.disabled = locked;
+    }
 
-    table.innerHTML = '<tr><td colspan="6" class="muted-text">Loading premarket snapshot...</td></tr>';
+    table.innerHTML = '<tr><td colspan="7" class="muted-text">Loading premarket snapshot...</td></tr>';
     try {
-        const res = await fetch('/api/premarket-outlook');
+        const url = `/api/premarket-outlook?use_latest_stored=${useLatestStoredPredictions ? 'true' : 'false'}`;
+        const res = await fetch(url);
         const data = await res.json();
         if (!res.ok || data.error) {
-            table.innerHTML = `<tr><td colspan="6" class="muted-text">${data.error || 'Premarket snapshot unavailable'}</td></tr>`;
+            table.innerHTML = `<tr><td colspan="7" class="muted-text">${data.error || 'Premarket snapshot unavailable'}</td></tr>`;
             premarketOutlookData = [];
             if (header) header.textContent = 'Premarket snapshot unavailable';
             return;
@@ -792,7 +839,11 @@ async function loadPremarketOutlook() {
             if (snapshotType === 'market_open_backfilled' && actualCapture && actualCapture !== openWindowTime) {
                 header.textContent = `Market-open snapshot: ${openWindowTime} (backfilled, generated at ${actualCapture})`;
             } else {
-                header.textContent = `Market-open snapshot: ${openWindowTime}`;
+                const modeLabel = useLatestStoredPredictions ? 'stored snapshot' : 'fresh snapshot';
+                const sessionLabel = (currentMarketStatus === 'after_hours' || currentMarketStatus === 'weekend')
+                    ? 'after-hours view'
+                    : 'market session view';
+                header.textContent = `Market-open snapshot: ${openWindowTime} (${modeLabel}; ${sessionLabel})`;
             }
         }
         renderPremarketOutlookTable();
@@ -807,7 +858,7 @@ function renderPremarketOutlookTable() {
     const table = document.getElementById('premarket-table-body');
     if (!table) return;
     if (!premarketOutlookData.length) {
-        table.innerHTML = '<tr><td colspan="6" class="muted-text">No premarket rows available.</td></tr>';
+        table.innerHTML = '<tr><td colspan="7" class="muted-text">No premarket rows available.</td></tr>';
         return;
     }
 
@@ -827,6 +878,7 @@ function renderPremarketOutlookTable() {
                 <td>${formatPrice(row.current_price)}</td>
                 <td>${Number(row.strategy_price_at_open || 0) > 0 ? formatPrice(row.strategy_price_at_open) : '—'}</td>
                 <td>${Number(row.ai_predicted_price || 0) > 0 ? formatPrice(row.ai_predicted_price) : '—'}</td>
+                <td>${formatIstTimestamp(row.strategy_predicted_at_open || row.captured_at)}</td>
                 <td>${row.strategy_direction || 'FLAT'} / ${row.ai_direction || 'N/A'}</td>
                 <td><span class="direction-badge ${badgeClass}">${badgeText}</span></td>
             </tr>
@@ -856,39 +908,43 @@ async function loadCurrentSecondSnapshot() {
     body.innerHTML = '<tr><td colspan="4" class="muted-text">Loading live snapshot...</td></tr>';
     if (label) label.textContent = ticker;
     try {
-        const res = await fetch(`/api/price-tracker/${encodeURIComponent(ticker)}`);
-        const data = await res.json();
-        if (!res.ok || data.error) {
-            body.innerHTML = `<tr><td colspan="4" class="muted-text">${data.error || 'Snapshot unavailable'}</td></tr>`;
+        const strategyUrl = `/api/strategy-price/${encodeURIComponent(ticker)}?use_latest_stored=${useLatestStoredPredictions ? 'true' : 'false'}`;
+        const aiUrl = `/api/predict/${encodeURIComponent(ticker)}?use_latest_stored=${useLatestStoredPredictions ? 'true' : 'false'}`;
+        const priceUrl = `/api/prices?tickers=${encodeURIComponent(ticker)}`;
+        const [strategyRes, aiRes, priceRes] = await Promise.all([
+            fetch(strategyUrl),
+            fetch(aiUrl),
+            fetch(priceUrl),
+        ]);
+        const strategyData = await strategyRes.json();
+        const aiData = await aiRes.json();
+        const priceData = await priceRes.json();
+        if (!strategyRes.ok || strategyData.error) {
+            body.innerHTML = `<tr><td colspan="4" class="muted-text">${strategyData.error || 'Strategy snapshot unavailable'}</td></tr>`;
+            return;
+        }
+        if (!aiRes.ok || aiData.error) {
+            body.innerHTML = `<tr><td colspan="4" class="muted-text">${aiData.error || 'AI snapshot unavailable'}</td></tr>`;
             return;
         }
 
-        const strategyNow = Number(
-            data.current_strategy_predicted_price
-            || data.next_day_strategy_predicted_price
-            || data.strategy_predicted_price
-            || data.predicted_price
-            || 0
-        );
-        const aiNow = Number(
-            data.current_ai_predicted_price
-            || data.next_day_ai_predicted_price
-            || data.ai_predicted_price
-            || 0
-        );
-        const current = Number(data.current_price || 0);
+        const current = Number(priceData?.[ticker]?.price || strategyData.current_price || aiData.current_price || 0);
+        const strategyNow = Number(strategyData.strategy_price || 0);
+        const aiNow = Number(aiData.predicted_price || 0);
         const strategyDir = strategyNow > current ? 'UP' : strategyNow < current ? 'DOWN' : 'FLAT';
         const aiAvailable = aiNow > 0;
         const aiDir = aiAvailable ? (aiNow > current ? 'UP' : aiNow < current ? 'DOWN' : 'FLAT') : 'N/A';
         const aligned = aiAvailable ? strategyDir === aiDir : null;
         const badgeClass = aligned === null ? '' : (aligned ? 'correct' : 'wrong');
         const badgeText = aligned === null ? `${strategyDir}/N/A` : `${strategyDir}/${aiDir}`;
+        const strategyTime = formatIstTimestamp(strategyData.strategy_generated_at);
+        const aiTime = formatIstTimestamp(aiData.timestamp || aiData.generated_at || aiData.generated_at_iso);
 
         body.innerHTML = `
             <tr>
                 <td>${formatPrice(current)}</td>
-                <td>${strategyNow > 0 ? formatPrice(strategyNow) : '—'}</td>
-                <td>${aiNow > 0 ? formatPrice(aiNow) : '—'}</td>
+                <td>${strategyNow > 0 ? `${formatPrice(strategyNow)}<br><span class="muted-text">${strategyTime}</span>` : '—'}</td>
+                <td>${aiNow > 0 ? `${formatPrice(aiNow)}<br><span class="muted-text">${aiTime}</span>` : '—'}</td>
                 <td><span class="direction-badge ${badgeClass}">${badgeText}</span></td>
             </tr>
         `;

@@ -140,6 +140,8 @@ PORTFOLIO_FILE = CACHE_DIR / "portfolio.json"
 PORTFOLIO_TRADES_FILE = CACHE_DIR / "portfolio_trades.json"
 DELISTED_TICKERS_FILE = CACHE_DIR / "delisted_tickers.csv"
 PREMARKET_OUTLOOK_FILE = CACHE_DIR / "premarket_outlook.json"
+PREDICTION_SNAPSHOTS_FILE = CACHE_DIR / "prediction_snapshots.json"
+SNAPSHOT_SCHEMA_VERSION = 1
 PREDICTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -184,6 +186,42 @@ NEXT_DAY_PREDICTION_MINUTE = int(
 )
 NEXT_DAY_PREDICTION_HOUR = int(np.clip(NEXT_DAY_PREDICTION_HOUR, 0, 23))
 NEXT_DAY_PREDICTION_MINUTE = int(np.clip(NEXT_DAY_PREDICTION_MINUTE, 0, 59))
+PREMARKET_WINDOW_START_HOUR = int(
+    os.environ.get(
+        "PREMARKET_WINDOW_START_HOUR",
+        _webapp_settings.get("premarket_window_start_hour", 9),
+    )
+)
+PREMARKET_WINDOW_START_MINUTE = int(
+    os.environ.get(
+        "PREMARKET_WINDOW_START_MINUTE",
+        _webapp_settings.get("premarket_window_start_minute", 15),
+    )
+)
+MARKET_LOCK_START_HOUR = int(
+    os.environ.get(
+        "MARKET_LOCK_START_HOUR",
+        _webapp_settings.get("market_lock_start_hour", 9),
+    )
+)
+MARKET_LOCK_START_MINUTE = int(
+    os.environ.get(
+        "MARKET_LOCK_START_MINUTE",
+        _webapp_settings.get("market_lock_start_minute", 30),
+    )
+)
+MARKET_LOCK_END_HOUR = int(
+    os.environ.get(
+        "MARKET_LOCK_END_HOUR",
+        _webapp_settings.get("market_lock_end_hour", 15),
+    )
+)
+MARKET_LOCK_END_MINUTE = int(
+    os.environ.get(
+        "MARKET_LOCK_END_MINUTE",
+        _webapp_settings.get("market_lock_end_minute", 30),
+    )
+)
 
 # Thread-safe lock for file I/O
 _log_lock = threading.Lock()
@@ -314,10 +352,14 @@ def _log_prediction(ticker: str, pred: dict):
         else "DOWN" if strategy_price_at_open < open_price else "FLAT"
     )
     ai_direction = (
-        "UP"
-        if ai_last_prediction > current_price
-        else "DOWN" if ai_last_prediction < current_price else "FLAT"
-    ) if ai_last_prediction > 0 else "N/A"
+        (
+            "UP"
+            if ai_last_prediction > current_price
+            else "DOWN" if ai_last_prediction < current_price else "FLAT"
+        )
+        if ai_last_prediction > 0
+        else "N/A"
+    )
     strategy_predicted_at_open = _normalize_open_window_timestamp(
         premarket_row.get("strategy_predicted_at_open")
         or premarket_row.get("captured_at"),
@@ -381,6 +423,7 @@ def _log_prediction(ticker: str, pred: dict):
         tracked["ai_last_prediction_at"] = now_iso
         tracked["strategy_direction_at_open"] = strategy_direction
         tracked["ai_direction_last"] = ai_direction
+        tracked["snapshot_type"] = _prediction_window_type(now_ist)
         tracked["strategy_vs_ai_direction"] = (
             strategy_direction == ai_direction if ai_last_prediction > 0 else None
         )
@@ -996,18 +1039,29 @@ def api_status():
         load_elapsed = max(0.0, ref - models_load_started_at)
 
     load_progress = predictor.get_load_status() if predictor else {}
-    with _premarket_snapshot_lock:
-        premarket_meta = (
-            {
-                "date": _premarket_snapshot.get("date"),
-                "captured_at": _premarket_snapshot.get("captured_at"),
-                "captured_within_buffer": _premarket_snapshot.get(
-                    "captured_within_buffer"
-                ),
+    premarket_meta = {}
+    try:
+        snap = _get_prediction_snapshot(use_latest_stored=True)
+        if snap:
+            premarket_meta = {
+                "date": snap.get("date"),
+                "captured_at": snap.get("captured_at"),
+                "captured_within_buffer": snap.get("captured_within_buffer"),
+                "snapshot_type": snap.get("snapshot_type"),
             }
-            if _premarket_snapshot
-            else {}
-        )
+    except Exception:
+        with _premarket_snapshot_lock:
+            premarket_meta = (
+                {
+                    "date": _premarket_snapshot.get("date"),
+                    "captured_at": _premarket_snapshot.get("captured_at"),
+                    "captured_within_buffer": _premarket_snapshot.get(
+                        "captured_within_buffer"
+                    ),
+                }
+                if _premarket_snapshot
+                else {}
+            )
     snapshot_now_iso = datetime.now(IST).isoformat()
     return jsonify(
         {
@@ -1027,6 +1081,8 @@ def api_status():
             "premarket_config": {
                 "max_buffer_minutes": PREMARKET_MAX_BUFFER_MINUTES,
                 "default_tickers": PREMARKET_DEFAULT_TICKERS,
+                "premarket_window": f"{PREMARKET_WINDOW_START_HOUR:02d}:{PREMARKET_WINDOW_START_MINUTE:02d}-{MARKET_LOCK_START_HOUR:02d}:{MARKET_LOCK_START_MINUTE:02d} IST",
+                "market_lock_window": f"{MARKET_LOCK_START_HOUR:02d}:{MARKET_LOCK_START_MINUTE:02d}-{MARKET_LOCK_END_HOUR:02d}:{MARKET_LOCK_END_MINUTE:02d} IST",
             },
             "premarket_snapshot": premarket_meta,
         }
@@ -1079,8 +1135,21 @@ def api_predict(ticker: str):
         return jsonify({"error": "Models still loading, please wait..."}), 503
 
     force = request.args.get("force", "").lower() in ("true", "1", "yes")
+    use_latest_stored = request.args.get("use_latest_stored", "").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
     try:
-        pred = predictor.predict_single(ticker, use_cache=not force)
+        if force:
+            try:
+                predictor.cache.invalidate(ticker)
+            except Exception:
+                pass
+        # Default behavior is fresh inference. Stored cache is opt-in.
+        pred = predictor.predict_single(
+            ticker, use_cache=use_latest_stored and not force
+        )
         if pred is None:
             return jsonify({"error": f"Prediction failed for {ticker}"}), 404
 
@@ -1088,9 +1157,85 @@ def api_predict(ticker: str):
         _log_prediction(ticker, pred)
 
         pred["name"] = ticker_names.get(ticker, _clean_name(ticker))
+        pred["cache_policy"] = (
+            "force_refresh"
+            if force
+            else ("stored_cache" if use_latest_stored else "fresh_inference")
+        )
         return jsonify(pred)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/strategy-price/<ticker>")
+def api_strategy_price(ticker: str):
+    """
+    Strategy-engine price endpoint.
+    Returns strategy-only fields (no Groq synthesis):
+      strategy_price, rr_ratio, strategy_generated_at
+    """
+    if not models_loaded or predictor is None:
+        return jsonify({"error": "Models still loading, please wait..."}), 503
+
+    force = request.args.get("force", "").lower() in ("true", "1", "yes")
+    use_latest_stored = request.args.get("use_latest_stored", "").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
+    now = datetime.now(IST)
+    window_type = _prediction_window_type(now)
+    try:
+        row = {}
+        if window_type in {"premarket_open", "market_open_locked"} and not force:
+            row = _get_premarket_row_for_ticker(ticker, now.strftime("%Y-%m-%d"))
+
+        if row and _safe_float(row.get("strategy_price_at_open")) > 0:
+            strategy_price = round(_safe_float(row.get("strategy_price_at_open")), 2)
+            rr_ratio = _safe_float(row.get("risk_reward"))
+            strategy_generated_at = (
+                row.get("strategy_predicted_at_open")
+                or row.get("captured_at")
+                or now.isoformat()
+            )
+            open_price = _safe_float(row.get("open_price"))
+            current_price = _safe_float(row.get("current_price"))
+            predicted_return_decimal = _safe_float(row.get("predicted_return_decimal"))
+            payload = {
+                "ticker": ticker,
+                "strategy_price": strategy_price,
+                "rr_ratio": rr_ratio,
+                "strategy_generated_at": strategy_generated_at,
+                "predicted_return_decimal": predicted_return_decimal,
+                "source": "strategy_snapshot",
+                "open_price": round(open_price, 2) if open_price > 0 else None,
+                "current_price": round(current_price, 2) if current_price > 0 else None,
+                "snapshot_type": row.get("snapshot_type", window_type),
+            }
+            return jsonify(payload)
+
+        if force:
+            try:
+                predictor.cache.invalidate(ticker)
+            except Exception:
+                pass
+
+        strategy = predictor.get_strategy_price(
+            ticker,
+            use_cache=use_latest_stored and not force,
+        )
+        if not strategy:
+            return jsonify({"error": f"Strategy price unavailable for {ticker}"}), 404
+
+        strategy["snapshot_type"] = window_type
+        strategy["cache_policy"] = (
+            "force_refresh"
+            if force
+            else ("stored_cache" if use_latest_stored else "fresh_inference")
+        )
+        return jsonify(strategy)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/api/top-picks")
@@ -1138,8 +1283,16 @@ def api_premarket_outlook():
         return jsonify({"error": "Predictor not initialized"}), 503
 
     force = request.args.get("force", "").lower() in ("1", "true", "yes")
+    use_latest_stored = request.args.get("use_latest_stored", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     try:
-        snapshot = _capture_premarket_snapshot_if_due(force=force)
+        snapshot = _get_prediction_snapshot(
+            force=force,
+            use_latest_stored=use_latest_stored,
+        )
         items = snapshot.get("items", [])
         return jsonify(
             {
@@ -1151,8 +1304,9 @@ def api_premarket_outlook():
                 "buffer_minutes": snapshot.get(
                     "buffer_minutes", PREMARKET_MAX_BUFFER_MINUTES
                 ),
-                "snapshot_type": snapshot.get("snapshot_type", "market_open"),
+                "snapshot_type": snapshot.get("snapshot_type", "premarket_open"),
                 "capture_note": snapshot.get("capture_note"),
+                "use_latest_stored": use_latest_stored,
                 "items": items,
             }
         )
@@ -1250,11 +1404,13 @@ def api_expected_vs_actual():
     # Fetch actual prices
     tickers_to_check = list(predictions.keys())
     today_str = datetime.now(IST).strftime("%Y-%m-%d")
-    if date_str == today_str:
+    market_status = get_market_status().get("status", "")
+    use_eod_close = date_str != today_str or market_status in {"after_hours", "weekend"}
+    if use_eod_close:
+        actual_prices = _get_close_prices_for_date(tickers_to_check, date_str)
+    else:
         actuals = _get_live_prices_batch(tickers_to_check)
         actual_prices = {k: v.get("price", 0) for k, v in actuals.items()}
-    else:
-        actual_prices = _get_close_prices_for_date(tickers_to_check, date_str)
 
     # Fetch benchmark (Nifty 50) return for alpha
     benchmark_data = _get_live_prices_batch(["^NSEI"])
@@ -1263,7 +1419,6 @@ def api_expected_vs_actual():
         bd = benchmark_data["^NSEI"]
         if bd["prev_close"] > 0:
             benchmark_return = (bd["price"] - bd["prev_close"]) / bd["prev_close"]
-    market_status = get_market_status().get("status", "")
 
     def _rescale_logged_price(raw_price: float, actual_price: float) -> float:
         """
@@ -1308,8 +1463,8 @@ def api_expected_vs_actual():
             pred_price_at_prediction, actual_price
         )
 
-        actual_return = (actual_price - pred_price_at_prediction) / pred_price_at_prediction
-        actual_return_pct = actual_return * 100
+        actual_return = 0.0
+        actual_return_pct = 0.0
 
         # Direction check uses market-open baseline vs strategy-open prediction.
         pred_dir = (
@@ -1339,7 +1494,9 @@ def api_expected_vs_actual():
             or pred_price_at_prediction
         )
         open_price = _rescale_logged_price(open_price, actual_price)
-        strategy_price_at_open = _rescale_logged_price(strategy_price_at_open, actual_price)
+        strategy_price_at_open = _rescale_logged_price(
+            strategy_price_at_open, actual_price
+        )
         if ai_last_prediction > 0:
             ai_last_prediction = _rescale_logged_price(ai_last_prediction, actual_price)
         if (
@@ -1368,6 +1525,46 @@ def api_expected_vs_actual():
             )
         if ai_last_prediction <= 0 or ai_last_prediction > pred_price_at_prediction * 5:
             ai_last_prediction = 0.0
+        if open_price > 0:
+            actual_return = (actual_price - open_price) / open_price
+            actual_return_pct = actual_return * 100
+            strategy_return_pct = (
+                (strategy_price_at_open - open_price) / open_price * 100
+                if strategy_price_at_open > 0
+                else 0.0
+            )
+            ai_return_pct = (
+                (ai_last_prediction - open_price) / open_price * 100
+                if ai_last_prediction > 0
+                else None
+            )
+        else:
+            actual_return = 0.0
+            actual_return_pct = 0.0
+            strategy_return_pct = 0.0
+            ai_return_pct = None
+        strategy_alpha_pct = actual_return_pct - strategy_return_pct
+        benchmark_alpha_pct = actual_return_pct - (benchmark_return * 100.0)
+
+        if "strategy_return_pct" in tracker_row:
+            tracker_strategy_ret = _safe_float(
+                tracker_row.get("strategy_return_pct", strategy_return_pct)
+            )
+            if abs(tracker_strategy_ret) <= 200:
+                strategy_return_pct = tracker_strategy_ret
+        if (
+            "ai_return_pct" in tracker_row
+            and tracker_row.get("ai_return_pct") is not None
+        ):
+            tracker_ai_ret = _safe_float(tracker_row.get("ai_return_pct"))
+            if abs(tracker_ai_ret) <= 200:
+                ai_return_pct = tracker_ai_ret
+        if ai_last_prediction <= 0:
+            ai_return_pct = None
+        elif ai_return_pct is not None and abs(ai_return_pct) > 200:
+            ai_return_pct = None
+        strategy_alpha_pct = actual_return_pct - strategy_return_pct
+
         strategy_predicted_at_open = _normalize_open_window_timestamp(
             tracker_row.get("strategy_predicted_at_open")
             or pred.get("strategy_predicted_at_open")
@@ -1390,17 +1587,16 @@ def api_expected_vs_actual():
         strategy_direction = tracker_row.get(
             "strategy_direction_at_open"
         ) or _direction_from_prices(open_price, strategy_price_at_open)
-        ai_direction = (
-            tracker_row.get("ai_direction_last")
-            or (
-                _direction_from_prices(pred_price_at_prediction, ai_last_prediction)
-                if ai_last_prediction > 0
-                else "N/A"
-            )
+        ai_direction = tracker_row.get("ai_direction_last") or (
+            _direction_from_prices(open_price, ai_last_prediction)
+            if ai_last_prediction > 0
+            else "N/A"
         )
         actual_dir = _direction_from_prices(open_price, actual_price)
         strategy_vs_actual = strategy_direction == actual_dir
         direction_comparison = bool(strategy_vs_actual)
+        if tracker_row.get("direction_comparison") in (True, False):
+            direction_comparison = bool(tracker_row.get("direction_comparison"))
         strategy_vs_ai_direction = tracker_row.get("strategy_vs_ai_direction")
         if strategy_vs_ai_direction not in (True, False):
             strategy_vs_ai_direction = (
@@ -1416,20 +1612,20 @@ def api_expected_vs_actual():
             actual_price - strategy_price_at_open if strategy_price_at_open > 0 else 0.0
         )
         strategy_vs_actual_pct = (
-            (strategy_vs_actual_price_diff / open_price * 100) if open_price > 0 else 0.0
+            (strategy_vs_actual_price_diff / open_price * 100)
+            if open_price > 0
+            else 0.0
         )
-        market_open_price = round(open_price, 2) if open_price > 0 else round(
-            pred_price_at_prediction, 2
+        market_open_price = (
+            round(open_price, 2)
+            if open_price > 0
+            else round(pred_price_at_prediction, 2)
         )
         strategy_price_display = (
             round(strategy_price_at_open, 2)
             if strategy_price_at_open > 0
             else market_open_price
         )
-
-        # Alpha = actual return - benchmark return
-        alpha = actual_return - benchmark_return
-        alpha_pct = alpha * 100
 
         results.append(
             {
@@ -1439,11 +1635,18 @@ def api_expected_vs_actual():
                 "predicted_return_pct": round(pred_return_pct, 3),
                 "predicted_price": round(predicted_price, 2),
                 "actual_price": round(actual_price, 2),
+                "close_price": round(actual_price, 2),
                 "actual_close": round(actual_price, 2),
                 "actual_return_pct": round(actual_return_pct, 3),
+                "strategy_return_pct": round(strategy_return_pct, 3),
+                "ai_return_pct": (
+                    round(ai_return_pct, 3) if ai_return_pct is not None else None
+                ),
                 "market_open_price": market_open_price,
                 "open_price": market_open_price,
-                "strategy_vs_actual_price_diff": round(strategy_vs_actual_price_diff, 2),
+                "strategy_vs_actual_price_diff": round(
+                    strategy_vs_actual_price_diff, 2
+                ),
                 "strategy_vs_actual_pct": round(strategy_vs_actual_pct, 3),
                 "direction_predicted": pred_dir,
                 "direction_actual": actual_dir,
@@ -1469,7 +1672,8 @@ def api_expected_vs_actual():
                 "ai_last_prediction_at_display": _format_ist_timestamp(
                     ai_last_prediction_at
                 ),
-                "alpha_pct": round(alpha_pct, 3),
+                "alpha_pct": round(strategy_alpha_pct, 3),
+                "benchmark_alpha_pct": round(benchmark_alpha_pct, 3),
                 "confidence": pred.get("confidence", 50),
                 "checked_at": tracker_row.get("checked_at"),
                 "market_status": market_status,
@@ -1683,6 +1887,8 @@ _daily_prediction_baseline: dict[str, dict] = {}
 _daily_prediction_baseline_date: str = ""
 _premarket_snapshot: dict = {}
 _premarket_snapshot_lock = threading.Lock()
+_prediction_snapshots: dict = {}
+_prediction_snapshots_lock = threading.Lock()
 MARKET_OPEN_HOUR = 9
 MARKET_OPEN_MINUTE = 15
 
@@ -1768,6 +1974,214 @@ def _open_window_bounds(trading_day: date) -> tuple[datetime, datetime]:
     )
     end = start + timedelta(minutes=15)  # 09:15 -> 09:30 IST window
     return start, end
+
+
+def _premarket_window_start_dt(now: datetime) -> datetime:
+    return now.replace(
+        hour=PREMARKET_WINDOW_START_HOUR,
+        minute=PREMARKET_WINDOW_START_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+
+
+def _premarket_window_end_dt(now: datetime) -> datetime:
+    return now.replace(
+        hour=MARKET_LOCK_START_HOUR,
+        minute=MARKET_LOCK_START_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+
+
+def _market_lock_start_dt(now: datetime) -> datetime:
+    return _premarket_window_end_dt(now)
+
+
+def _market_lock_end_dt(now: datetime) -> datetime:
+    return now.replace(
+        hour=MARKET_LOCK_END_HOUR,
+        minute=MARKET_LOCK_END_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+
+
+def _prediction_window_type(now: datetime | None = None) -> str:
+    """
+    Returns one of:
+      - premarket_open (09:15–09:30 IST)
+      - market_open_locked (09:30–15:30 IST)
+      - after_hours_live (15:30 IST onwards and pre-09:15)
+    """
+    ts = now or datetime.now(IST)
+    if ts.weekday() >= 5:
+        return "after_hours_live"
+    if _premarket_window_start_dt(ts) <= ts < _premarket_window_end_dt(ts):
+        return "premarket_open"
+    if _market_lock_start_dt(ts) <= ts < _market_lock_end_dt(ts):
+        return "market_open_locked"
+    return "after_hours_live"
+
+
+def _load_prediction_snapshots_from_disk() -> dict:
+    if not PREDICTION_SNAPSHOTS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(PREDICTION_SNAPSHOTS_FILE.read_text())
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def _save_prediction_snapshots_to_disk(payload: dict) -> None:
+    PREDICTION_SNAPSHOTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PREDICTION_SNAPSHOTS_FILE.write_text(json.dumps(payload, indent=2, default=str))
+
+
+def _derive_snapshot_item_fields(item: dict, snapshot_type: str) -> dict:
+    row = dict(item or {})
+    strategy_price = _safe_float(row.get("strategy_price_at_open"))
+    if strategy_price <= 0:
+        strategy_price = _safe_float(row.get("predicted_price"))
+    predicted_return_pct = _safe_float(
+        row.get("predicted_return_pct", row.get("predicted_return", 0))
+    )
+    predicted_return_decimal = predicted_return_pct / 100.0
+    row["snapshot_type"] = snapshot_type
+    row["source"] = str(row.get("source") or "strategy_engine")
+    row["predicted_price"] = round(strategy_price, 2) if strategy_price > 0 else None
+    row["predicted_return_decimal"] = round(predicted_return_decimal, 6)
+    return row
+
+
+def _normalize_prediction_snapshot(
+    snapshot: dict, snapshot_type: str | None = None
+) -> dict:
+    if not isinstance(snapshot, dict):
+        return {}
+    out = dict(snapshot)
+    inferred_type = str(snapshot_type or out.get("snapshot_type") or "premarket_open")
+    out["snapshot_type"] = inferred_type
+    out["schema_version"] = int(out.get("schema_version", SNAPSHOT_SCHEMA_VERSION))
+    out["captured_at"] = out.get("captured_at") or datetime.now(IST).isoformat()
+    out["source"] = str(out.get("source") or "strategy_engine")
+    items = out.get("items", [])
+    normalized_items = []
+    for raw in items if isinstance(items, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        row = _derive_snapshot_item_fields(raw, inferred_type)
+        normalized_items.append(row)
+    out["items"] = normalized_items
+    return out
+
+
+def _to_snapshot_store(today: str, snapshots: dict[str, dict]) -> dict:
+    return {
+        "schema_version": SNAPSHOT_SCHEMA_VERSION,
+        "date": today,
+        "snapshots": snapshots,
+    }
+
+
+def _latest_available_snapshot(snapshots: dict[str, dict]) -> dict:
+    for key in ("after_hours_live", "market_open_locked", "premarket_open"):
+        snap = snapshots.get(key) if isinstance(snapshots, dict) else None
+        if isinstance(snap, dict) and snap.get("items"):
+            return snap
+    return {}
+
+
+def _build_prediction_snapshot(snapshot_type: str, force_live: bool = False) -> dict:
+    now = datetime.now(IST)
+    base = _normalize_premarket_snapshot(_build_premarket_snapshot())
+    base["snapshot_type"] = snapshot_type
+    base["schema_version"] = SNAPSHOT_SCHEMA_VERSION
+    base["source"] = "strategy_engine"
+
+    if snapshot_type == "premarket_open":
+        capture_ts = _premarket_window_start_dt(now)
+    elif snapshot_type == "market_open_locked":
+        capture_ts = _market_lock_start_dt(now)
+    else:
+        capture_ts = now
+
+    base["captured_at"] = capture_ts.isoformat()
+    if force_live:
+        base["captured_at_actual"] = now.isoformat()
+
+    base["items"] = [
+        _derive_snapshot_item_fields(item, snapshot_type)
+        for item in base.get("items", [])
+    ]
+    return base
+
+
+def _get_prediction_snapshot(
+    *,
+    force: bool = False,
+    use_latest_stored: bool = False,
+) -> dict:
+    """
+    Window-aware snapshot resolver:
+      - premarket_open: 09:15–09:30 IST (frozen)
+      - market_open_locked: 09:30–15:30 IST (frozen strategy values)
+      - after_hours_live: manual refresh can update values
+    """
+    global _prediction_snapshots
+
+    now = datetime.now(IST)
+    today = now.strftime("%Y-%m-%d")
+    target_type = _prediction_window_type(now)
+
+    with _prediction_snapshots_lock:
+        disk = _load_prediction_snapshots_from_disk()
+        if (
+            isinstance(disk, dict)
+            and disk.get("date") == today
+            and isinstance(disk.get("snapshots"), dict)
+        ):
+            _prediction_snapshots = disk
+        elif not _prediction_snapshots or _prediction_snapshots.get("date") != today:
+            _prediction_snapshots = _to_snapshot_store(today, {})
+
+        snapshots = dict(_prediction_snapshots.get("snapshots", {}))
+
+    if use_latest_stored:
+        latest = _latest_available_snapshot(snapshots)
+        if latest:
+            return _normalize_prediction_snapshot(latest)
+
+    if not force and target_type in snapshots and snapshots[target_type].get("items"):
+        return _normalize_prediction_snapshot(snapshots[target_type], target_type)
+
+    if target_type == "market_open_locked":
+        pre = snapshots.get("premarket_open", {})
+        if pre.get("items") and not force:
+            built = _normalize_prediction_snapshot(dict(pre), "market_open_locked")
+            built["captured_at"] = _market_lock_start_dt(now).isoformat()
+        else:
+            built = _build_prediction_snapshot("market_open_locked")
+    elif target_type == "premarket_open":
+        built = _build_prediction_snapshot("premarket_open")
+    else:
+        # After-hours: updates are intentionally volatile on manual refresh only.
+        if not force and snapshots.get("after_hours_live", {}).get("items"):
+            built = _normalize_prediction_snapshot(
+                snapshots.get("after_hours_live", {}), "after_hours_live"
+            )
+        else:
+            built = _build_prediction_snapshot("after_hours_live", force_live=True)
+
+    with _prediction_snapshots_lock:
+        snapshots = dict(_prediction_snapshots.get("snapshots", {}))
+        snapshots[target_type] = built
+        _prediction_snapshots = _to_snapshot_store(today, snapshots)
+        _save_prediction_snapshots_to_disk(_prediction_snapshots)
+        return _normalize_prediction_snapshot(built, target_type)
 
 
 def _next_day_prediction_switch_dt(now: datetime) -> datetime:
@@ -1856,6 +2270,19 @@ def _get_premarket_row_for_ticker(ticker: str, date_str: str | None = None) -> d
     Best-effort read of cached premarket row for a ticker (no live fetch).
     """
     target_date = date_str or datetime.now(IST).strftime("%Y-%m-%d")
+    try:
+        window_snapshot = _get_prediction_snapshot(use_latest_stored=True)
+        if (
+            window_snapshot
+            and window_snapshot.get("date") == target_date
+            and window_snapshot.get("items")
+        ):
+            for row in window_snapshot.get("items", []):
+                if row.get("ticker") == ticker:
+                    return row
+    except Exception:
+        pass
+
     snapshot: dict = {}
     with _premarket_snapshot_lock:
         if (
@@ -1913,9 +2340,7 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
     out["date"] = snap_date
     out["captured_at"] = snap_captured
     out["captured_at_actual"] = snap_captured_actual or snap_captured
-    out["buffer_minutes"] = int(
-        out.get("buffer_minutes", PREMARKET_MAX_BUFFER_MINUTES)
-    )
+    out["buffer_minutes"] = int(out.get("buffer_minutes", PREMARKET_MAX_BUFFER_MINUTES))
 
     parsed_actual = _parse_iso_datetime(out["captured_at_actual"])
     snapshot_type = str(out.get("snapshot_type", "")).strip()
@@ -1927,9 +2352,10 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
                 if parsed_actual > open_end
                 else "market_open_live"
             )
-            out["capture_cutoff"] = out.get("capture_cutoff") or (
-                open_start - timedelta(minutes=out["buffer_minutes"])
-            ).isoformat()
+            out["capture_cutoff"] = (
+                out.get("capture_cutoff")
+                or (open_start - timedelta(minutes=out["buffer_minutes"])).isoformat()
+            )
         else:
             snapshot_type = "market_open"
     out["snapshot_type"] = snapshot_type
@@ -1965,12 +2391,10 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
         )
         row["captured_at"] = row_captured
         row["captured_at_actual"] = row_captured_actual or out["captured_at_actual"]
-        row["strategy_predicted_at_open"] = (
-            _normalize_open_window_timestamp(
-                row.get("strategy_predicted_at_open") or row_captured,
-                date_hint=snap_date,
-                default_offset_minutes=5,
-            )
+        row["strategy_predicted_at_open"] = _normalize_open_window_timestamp(
+            row.get("strategy_predicted_at_open") or row_captured,
+            date_hint=snap_date,
+            default_offset_minutes=5,
         )
         row["ai_predicted_at_open"] = _normalize_open_window_timestamp(
             row.get("ai_predicted_at_open") or row_captured,
@@ -1982,7 +2406,9 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
         except Exception:
             ai_px = 0.0
         row["strategy_source"] = row.get("strategy_source") or "ensemble_models"
-        row["ai_source"] = row.get("ai_source") or ("groq_cache" if ai_px > 0 else "none")
+        row["ai_source"] = row.get("ai_source") or (
+            "groq_cache" if ai_px > 0 else "none"
+        )
         if ai_px <= 0:
             row["ai_direction"] = "N/A"
         if row.get("strategy_vs_ai_direction") not in (True, False):
@@ -2077,6 +2503,9 @@ def _build_premarket_snapshot(tickers: list[str] | None = None) -> dict:
             "strategy_direction": strategy_direction,
             "ai_direction": ai_direction,
             "predicted_return_pct": round(predicted_return_pct, 4),
+            "risk_reward": round(float(pred.get("risk_reward", 0) or 0), 3),
+            "confidence": round(float(pred.get("confidence", 0) or 0), 2),
+            "model_agreement": round(float(pred.get("model_agreement", 0) or 0), 2),
             "captured_at": captured_at_open_window,
             "captured_at_actual": captured_at_actual,
             "strategy_predicted_at_open": _normalize_open_window_timestamp(
@@ -2110,6 +2539,7 @@ def _build_premarket_snapshot(tickers: list[str] | None = None) -> dict:
                     or captured_at_actual,
                     "strategy_direction_at_open": strategy_direction,
                     "ai_direction_last": ai_direction,
+                    "snapshot_type": "premarket_open",
                     "strategy_vs_ai_direction": (
                         strategy_direction == ai_direction
                         if row["ai_predicted_price"] is not None
@@ -2175,9 +2605,7 @@ def _capture_premarket_snapshot_if_due(force: bool = False) -> dict:
     snapshot["buffer_minutes"] = PREMARKET_MAX_BUFFER_MINUTES
     snapshot["captured_within_buffer"] = now <= cutoff
     snapshot["snapshot_type"] = (
-        "market_open_live"
-        if now <= open_window_end
-        else "market_open_backfilled"
+        "market_open_live" if now <= open_window_end else "market_open_backfilled"
     )
     snapshot["capture_note"] = (
         "Captured in pre-open buffer"
@@ -2387,7 +2815,9 @@ def _build_daily_analysis() -> dict:
     now_ist = datetime.now(IST)
     market = get_market_status()
     market_status = market.get("status", "")
-    next_day_mode = _is_next_day_prediction_window(now_ist) or market_status == "weekend"
+    next_day_mode = (
+        _is_next_day_prediction_window(now_ist) or market_status == "weekend"
+    )
     prediction_mode = "next_day_after_close" if next_day_mode else "market_open_window"
     predicted_for_date = (
         _next_trading_day(now_ist.date()).strftime("%Y-%m-%d")
@@ -2395,7 +2825,11 @@ def _build_daily_analysis() -> dict:
         else now_ist.strftime("%Y-%m-%d")
     )
     prediction_generated_at = now_ist.isoformat()
-    price_label = "Close Price" if market_status in ("after_hours", "weekend") else "Current Price"
+    price_label = (
+        "Close Price"
+        if market_status in ("after_hours", "weekend")
+        else "Current Price"
+    )
 
     # Get all predictions (from cache)
     today_str = now_ist.strftime("%Y-%m-%d")
@@ -2445,7 +2879,9 @@ def _build_daily_analysis() -> dict:
             or 0
         )
         if strategy_price_at_open <= 0 and open_price > 0:
-            strategy_price_at_open = round(open_price * (1 + predicted_return / 100.0), 2)
+            strategy_price_at_open = round(
+                open_price * (1 + predicted_return / 100.0), 2
+            )
         if strategy_price_at_open <= 0:
             strategy_price_at_open = float(current_price or 0)
 
@@ -2457,9 +2893,7 @@ def _build_daily_analysis() -> dict:
             allow_generate=False,
         )
         ai_price_at_open = float(
-            premarket_row.get("ai_predicted_price")
-            or ai_meta_open.get("price")
-            or 0
+            premarket_row.get("ai_predicted_price") or ai_meta_open.get("price") or 0
         )
         ai_source_open = str(
             premarket_row.get("ai_source") or ai_meta_open.get("source", "none")
@@ -2506,9 +2940,8 @@ def _build_daily_analysis() -> dict:
             strategy_predicted_price = float(strategy_price_at_open or 0)
             ai_predicted_price = float(ai_price_at_open or 0)
             strategy_predicted_at = strategy_predicted_at_open
-            ai_predicted_at = (
-                ai_meta_open.get("generated_at_iso")
-                or (ai_predicted_at_open if ai_predicted_price > 0 else None)
+            ai_predicted_at = ai_meta_open.get("generated_at_iso") or (
+                ai_predicted_at_open if ai_predicted_price > 0 else None
             )
             ai_source = ai_source_open
             prediction_context = "market_open"
@@ -2581,7 +3014,9 @@ def _build_daily_analysis() -> dict:
                     round(ai_predicted_price, 2) if ai_predicted_price > 0 else None
                 ),
                 "strategy_price_at_open": round(strategy_price_at_open, 2),
-                "ai_price_at_open": round(ai_price_at_open, 2) if ai_price_at_open > 0 else None,
+                "ai_price_at_open": (
+                    round(ai_price_at_open, 2) if ai_price_at_open > 0 else None
+                ),
                 "current_price": round(current_price, 2),
                 "prev_close": round(prev_close, 2),
                 "display_price_label": price_label,
@@ -2667,7 +3102,7 @@ def _daily_analysis_background_loop():
             time.sleep(5)
             continue
         try:
-            _capture_premarket_snapshot_if_due(force=False)
+            _get_prediction_snapshot(force=False, use_latest_stored=True)
             result = _build_daily_analysis()
             with _daily_analysis_lock:
                 _daily_analysis_cache = result
@@ -2769,16 +3204,16 @@ def api_price_tracker(ticker: str):
     ai_predicted_price = float(ai_meta_open.get("price") or 0)
     ai_available = ai_predicted_price > 0
     ai_open_price = float(
-        premarket_row.get("ai_predicted_price")
-        or ai_predicted_price
-        or 0
+        premarket_row.get("ai_predicted_price") or ai_predicted_price or 0
     )
     signal = pred.get("signal", "")
     confidence = pred.get("confidence", 0)
     market = get_market_status()
     market_status = market.get("status", "")
     now_ist = datetime.now(IST)
-    next_day_mode = _is_next_day_prediction_window(now_ist) or market_status == "weekend"
+    next_day_mode = (
+        _is_next_day_prediction_window(now_ist) or market_status == "weekend"
+    )
     prediction_mode = "next_day_after_close" if next_day_mode else "market_open_window"
     predicted_for_date = (
         _next_trading_day(now_ist.date()).strftime("%Y-%m-%d")
@@ -2887,7 +3322,9 @@ def api_price_tracker(ticker: str):
             ),
             "predicted_price": round(strategy_price_at_open, 2),
             "strategy_predicted_price": round(strategy_price_at_open, 2),
-            "ai_predicted_price": round(ai_open_price, 2) if ai_open_price > 0 else None,
+            "ai_predicted_price": (
+                round(ai_open_price, 2) if ai_open_price > 0 else None
+            ),
             "current_strategy_predicted_price": round(next_day_strategy_price, 2),
             "current_ai_predicted_price": (
                 round(next_day_ai_price, 2) if next_day_ai_price > 0 else None
@@ -2898,23 +3335,27 @@ def api_price_tracker(ticker: str):
             "market_status": market_status,
             "prediction_mode": prediction_mode,
             "predicted_for_date": predicted_for_date,
-            "prediction_reference_price": round(reference_price, 2) if reference_price > 0 else None,
+            "prediction_reference_price": (
+                round(reference_price, 2) if reference_price > 0 else None
+            ),
             "next_day_strategy_predicted_price": (
-                round(next_day_strategy_price, 2) if next_day_strategy_price > 0 else None
+                round(next_day_strategy_price, 2)
+                if next_day_strategy_price > 0
+                else None
             ),
             "next_day_ai_predicted_price": (
                 round(next_day_ai_price, 2) if next_day_ai_price > 0 else None
             ),
             "next_day_predicted_at": next_day_predicted_at,
-            "next_day_predicted_at_display": _format_ist_timestamp(next_day_predicted_at),
+            "next_day_predicted_at_display": _format_ist_timestamp(
+                next_day_predicted_at
+            ),
             "strategy_predicted_at_open": strategy_predicted_at_open,
             "strategy_predicted_at_open_display": _format_ist_timestamp(
                 strategy_predicted_at_open
             ),
             "ai_predicted_at_open": ai_predicted_at_open,
-            "ai_predicted_at_open_display": _format_ist_timestamp(
-                ai_predicted_at_open
-            ),
+            "ai_predicted_at_open_display": _format_ist_timestamp(ai_predicted_at_open),
             "current_strategy_predicted_at": current_strategy_predicted_at,
             "current_strategy_predicted_at_display": _format_ist_timestamp(
                 current_strategy_predicted_at
@@ -3056,6 +3497,38 @@ def api_groq_price_forecast(ticker: str):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/score-explain/<ticker>")
+def api_score_explain(ticker: str):
+    """Return strategy-derived numeric score plus optional Groq explanation."""
+    if not models_loaded or predictor is None:
+        return jsonify({"error": "Models still loading..."}), 503
+
+    try:
+        pred = predictor.predict_single(ticker, use_cache=True)
+        if not pred:
+            return jsonify({"error": f"Prediction unavailable for {ticker}"}), 404
+        score = float(LivePredictor._score_prediction(pred))
+        context = (
+            f"Ticker={ticker}, signal={pred.get('signal')}, "
+            f"predicted_return_pct={pred.get('predicted_return')}, "
+            f"confidence={pred.get('confidence')}, "
+            f"model_agreement={pred.get('model_agreement')}, "
+            f"risk_reward={pred.get('risk_reward')}."
+        )
+        explanation = explain_risk_term("Strategy Composite Score", context)
+        return jsonify(
+            {
+                "ticker": ticker,
+                "score": round(score, 4),
+                "signal": pred.get("signal", "HOLD"),
+                "source": "strategy_metrics",
+                "explanation": explanation,
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/explain-risk-term")
 def api_explain_risk_term():
     """Get Groq explanation for a risk metric/term."""
@@ -3066,6 +3539,52 @@ def api_explain_risk_term():
     try:
         explanation = explain_risk_term(term, context)
         return jsonify({"term": term, "explanation": explanation})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/debug/prediction-status/<ticker>")
+def api_debug_prediction_status(ticker: str):
+    """Debug cache/snapshot state for a ticker."""
+    if predictor is None:
+        return jsonify({"error": "Predictor not initialized"}), 503
+
+    try:
+        now = datetime.now(IST)
+        window = _prediction_window_type(now)
+        snapshot = _get_prediction_snapshot(use_latest_stored=True)
+        snapshot_row = next(
+            (row for row in snapshot.get("items", []) if row.get("ticker") == ticker),
+            {},
+        )
+        cache_entry = predictor.cache.get(ticker)
+        live_quote = _get_live_prices_batch([ticker]).get(ticker, {})
+
+        formula_ok = None
+        if cache_entry:
+            cp = _safe_float(cache_entry.get("current_price"))
+            ret_pct = _safe_float(cache_entry.get("predicted_return"))
+            px = _safe_float(cache_entry.get("predicted_price"))
+            if cp > 0 and px > 0:
+                expected = round(cp * (1 + ret_pct / 100.0), 2)
+                formula_ok = abs(px - expected) <= 0.02
+
+        return jsonify(
+            {
+                "ticker": ticker,
+                "timestamp": now.isoformat(),
+                "market_status": get_market_status().get("status"),
+                "prediction_window": window,
+                "cache_ttl_seconds": getattr(predictor.cache, "ttl_seconds", None),
+                "cache_hit": bool(cache_entry),
+                "cache_entry": cache_entry,
+                "snapshot_type": snapshot.get("snapshot_type"),
+                "snapshot_captured_at": snapshot.get("captured_at"),
+                "snapshot_row": snapshot_row or None,
+                "live_quote": live_quote,
+                "predicted_price_formula_ok": formula_ok,
+            }
+        )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -3361,6 +3880,57 @@ def api_portfolio_summary():
             summary["strategy_suggestion"] = f"Suggestion unavailable: {e}"
     summary["trade_count"] = len(trades)
     return jsonify(summary)
+
+
+@app.route("/api/portfolio/refresh")
+def api_portfolio_refresh():
+    """
+    Atomic portfolio refresh payload for UI.
+    Ensures holdings and summary are computed from the same trade snapshot and
+    live price batch.
+    """
+    _sanitize_portfolio_storage()
+    suggest = request.args.get("suggest", "").lower() in ("1", "true", "yes")
+    ticker = request.args.get("ticker", "").strip().upper()
+    limit = request.args.get("limit")
+
+    trades = _read_portfolio_trades()
+    if _ensure_trade_ids(trades):
+        _write_portfolio_trades(trades)
+    summary = _portfolio_summary_from_trades(trades)
+    if suggest:
+        try:
+            summary["strategy_suggestion"] = portfolio_profit_suggestion(summary)
+        except Exception as e:
+            summary["strategy_suggestion"] = f"Suggestion unavailable: {e}"
+
+    holdings = list(summary.get("positions", []))
+    if ticker:
+        holdings = [h for h in holdings if str(h.get("ticker", "")).upper() == ticker]
+
+    view_trades = sorted(trades, key=lambda x: x.get("timestamp", ""), reverse=True)
+    if ticker:
+        view_trades = [
+            t for t in view_trades if str(t.get("ticker", "")).upper() == ticker
+        ]
+    if limit:
+        try:
+            n = max(1, int(limit))
+            view_trades = view_trades[:n]
+        except ValueError:
+            pass
+
+    summary["trade_count"] = len(trades)
+    return jsonify(
+        {
+            "summary": summary,
+            "holdings": holdings,
+            "trades": view_trades,
+            "count": len(holdings),
+            "trade_count": len(view_trades),
+            "refreshed_at": datetime.now(IST).isoformat(),
+        }
+    )
 
 
 @app.route("/api/portfolio/trades")
@@ -3966,6 +4536,16 @@ def api_risk_analytics():
             port_returns = weighted
         else:
             port_returns = returns[portfolio_cols].mean(axis=1)
+        if len(port_returns.dropna()) < 20:
+            return (
+                jsonify(
+                    {
+                        "error": "Insufficient portfolio return history for risk analytics (need at least 20 observations).",
+                        "portfolio_tickers": surviving_tickers,
+                    }
+                ),
+                400,
+            )
         initial_capital = float(sum(custom_weights.get(t, 0.0) for t in portfolio_cols))
         if initial_capital <= 0:
             initial_capital = 100000.0
@@ -4046,7 +4626,7 @@ def api_risk_analytics():
         )
 
     except Exception as e:
-        log.error(f"Risk analytics error: {e}")
+        log.exception("Risk analytics error")
         return jsonify({"error": str(e)}), 500
 
 

@@ -193,7 +193,9 @@
 
     <!-- ML Prediction section -->
     <div class="prediction-section" id="prediction-section">
-        <h3 class="section-heading">🤖 AI Prediction <span class="pred-timestamp" id="pred-generated-at"></span></h3>
+        <h3 class="section-heading">🤖 AI Prediction <span class="pred-timestamp" id="pred-generated-at"></span>
+            <button class="tf-btn" style="margin-left:8px;" onclick="refreshPredictionNow()">Refresh</button>
+        </h3>
         <p class="section-help-text">AI model output at request time: return %, target price, confidence, and model agreement with full feature breakdown.</p>
         <div class="prediction-loading" id="pred-loading">
             <div class="spinner"></div>

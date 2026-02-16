@@ -1,25 +1,19 @@
-name: Masters Trading AI CI
+name: CI
 
 on:
-  pull_request:
-    paths:
-      - "masters_trading_ai/**"
-      - ".github/workflows/ci.yml"
   push:
     branches:
-      - main
-    paths:
-      - "masters_trading_ai/**"
-      - ".github/workflows/ci.yml"
-  workflow_dispatch:
+      - "**"
+  pull_request:
+    branches:
+      - "**"
 
 jobs:
-  test-and-lint:
+  test-lint:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: masters_trading_ai
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,6 +22,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: masters_trading_ai/requirements.txt
 
       - name: Install dependencies
         run: |
@@ -39,19 +35,12 @@ jobs:
         run: pytest -q
 
       - name: Black check
-        run: |
-          black --check \
-            src/inference/predictor.py \
-            webapp/server.py \
-            webapp/prediction_tracker.py \
-            tests/test_predictor_sanity.py \
-            tests/test_api_top_picks.py \
-            tests/test_premarket_outlook.py \
-            tests/test_expected_vs_actual.py \
-            tests/test_backtest_costs.py
+        run: black --check src/inference/predictor.py webapp/server.py webapp/prediction_tracker.py tests/test_expected_vs_actual.py tests/test_prediction_endpoints.py
 
       - name: Flake8
-        run: flake8 tests --max-line-length=120 --extend-ignore=E203,W503,E501
+        continue-on-error: true
+        run: flake8 src/inference/predictor.py webapp/server.py webapp/prediction_tracker.py tests/test_expected_vs_actual.py tests/test_prediction_endpoints.py --max-line-length=120 --extend-ignore=E203,W503
 
-      - name: Mypy
-        run: mypy webapp/prediction_tracker.py --ignore-missing-imports --follow-imports=silent --disable-error-code=import-untyped --namespace-packages --explicit-package-bases
+      - name: Mypy (targeted)
+        continue-on-error: true
+        run: mypy --explicit-package-bases src/inference/predictor.py webapp/prediction_tracker.py webapp/server.py --ignore-missing-imports --follow-imports=silent

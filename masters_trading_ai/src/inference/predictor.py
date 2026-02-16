@@ -16,6 +16,7 @@ The predicted value is the next-day return (%) from the regression models.
 """
 
 import sys
+import os
 import json
 import hashlib
 import logging
@@ -179,10 +180,17 @@ def get_market_status() -> dict:
 class PredictionCache:
     """Simple JSON-based disk cache for predictions."""
 
-    def __init__(self, cache_dir: Path = CACHE_DIR):
+    def __init__(self, cache_dir: Path = CACHE_DIR, ttl_seconds: int | None = None):
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_file = self.cache_dir / "predictions.json"
+        env_ttl = os.environ.get("PREDICTION_CACHE_TTL_SECONDS")
+        if ttl_seconds is None:
+            try:
+                ttl_seconds = int(env_ttl) if env_ttl is not None else 6 * 60 * 60
+            except ValueError:
+                ttl_seconds = 6 * 60 * 60
+        self.ttl_seconds = max(0, int(ttl_seconds))
         self._data = self._load()
 
     def _load(self) -> dict:
@@ -199,17 +207,28 @@ class PredictionCache:
             json.dump(self._data, f, indent=2, default=str)
 
     def get(self, ticker: str) -> dict | None:
-        """Get cached prediction. Returns None if stale (>6 hours)."""
+        """Get cached prediction. Returns None if stale."""
         entry = self._data.get(ticker)
         if entry is None:
             return None
-        cached_time = datetime.fromisoformat(entry["timestamp"])
+        ts = entry.get("timestamp")
+        if not ts:
+            return None
+        try:
+            cached_time = datetime.fromisoformat(ts)
+        except Exception:
+            return None
         now = datetime.now(IST)
         # Make cached_time offset-aware if needed
         if cached_time.tzinfo is None:
             cached_time = cached_time.replace(tzinfo=IST)
-        if now - cached_time > timedelta(hours=6):
-            return None  # Stale
+        if self.ttl_seconds > 0 and now - cached_time > timedelta(
+            seconds=self.ttl_seconds
+        ):
+            # Drop stale entries from disk so stale/placeholder values do not linger.
+            self._data.pop(ticker, None)
+            self._save()
+            return None
         return entry
 
     def set(self, ticker: str, prediction: dict):
@@ -217,6 +236,15 @@ class PredictionCache:
         prediction["timestamp"] = datetime.now(IST).isoformat()
         self._data[ticker] = prediction
         self._save()
+
+    def invalidate(self, ticker: str | None = None):
+        """Invalidate a specific ticker cache key or clear all cached predictions."""
+        if ticker is None:
+            self.clear()
+            return
+        if ticker in self._data:
+            self._data.pop(ticker, None)
+            self._save()
 
     def clear(self):
         self._data = {}
@@ -309,7 +337,7 @@ class LivePredictor:
             "steps": self._load_steps,
         }
 
-    def load_models(self) -> dict:
+    def load_models(self, force_reload: bool = False) -> dict:
         """
         Load all trained models from disk.
 
@@ -324,6 +352,11 @@ class LivePredictor:
         -------
         dict : model_name → model object
         """
+        if force_reload:
+            self.models = {}
+            self.ensemble = None
+            self._loaded = False
+
         if self._loaded:
             return self.models
 
@@ -481,6 +514,8 @@ class LivePredictor:
         self.models = loaded
         self._loaded = True
         self._load_completed_at = datetime.now(IST).isoformat()
+        # Model refresh must invalidate stale cached predictions.
+        self.cache.clear()
         print(f"  ✅ All models loaded: {list(loaded.keys())}")
         return loaded
 
@@ -548,6 +583,10 @@ class LivePredictor:
             signal, confidence, entry_price, stop_loss, target_price,
             atr_pct, volume_ratio, rvol, timestamp
         """
+        # Force-refresh path should invalidate stale cached entry immediately.
+        if not use_cache:
+            self.cache.invalidate(ticker)
+
         # Check cache first
         if use_cache:
             cached = self.cache.get(ticker)
@@ -989,6 +1028,42 @@ class LivePredictor:
         # Cache the result
         self.cache.set(ticker, result)
         return result
+
+    def get_strategy_price(self, ticker: str, use_cache: bool = True) -> dict | None:
+        """
+        Strategy-only price payload derived from ensemble model output.
+        This is intentionally separate from Groq/AI narrative forecasts.
+        """
+        pred = self.predict_single(ticker, use_cache=use_cache)
+        if pred is None:
+            return None
+
+        live = self.get_live_price(ticker) or {}
+        current_price = float(pred.get("current_price", 0) or live.get("price", 0) or 0)
+        open_price = float(live.get("open", current_price) or current_price)
+        if open_price <= 0:
+            open_price = current_price
+        if current_price <= 0 or open_price <= 0:
+            return None
+
+        predicted_return_decimal = _sanitize_predicted_return(
+            float(pred.get("predicted_return", 0) or 0) / 100.0,
+            {},
+        )
+        strategy_price = round(open_price * (1 + predicted_return_decimal), 2)
+        assert strategy_price == round(open_price * (1 + predicted_return_decimal), 2)
+
+        generated_at = str(pred.get("timestamp") or datetime.now(IST).isoformat())
+        return {
+            "ticker": ticker,
+            "strategy_price": strategy_price,
+            "rr_ratio": float(pred.get("risk_reward", 0) or 0),
+            "strategy_generated_at": generated_at,
+            "predicted_return_decimal": predicted_return_decimal,
+            "source": "strategy_engine",
+            "open_price": round(open_price, 2),
+            "current_price": round(current_price, 2),
+        }
 
     def _generate_signal(
         self,

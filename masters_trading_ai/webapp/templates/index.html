@@ -103,6 +103,10 @@
                 <div class="premarket-panel">
                     <div class="premarket-panel-head">
                         <h3>Premarket vs Current</h3>
+                        <label class="muted-text" style="display:flex;align-items:center;gap:6px;">
+                            <input type="checkbox" id="premarket-use-stored" onchange="togglePremarketStored(this.checked)">
+                            Use latest stored prediction
+                        </label>
                         <span id="premarket-captured-at" class="muted-text">Loading snapshot...</span>
                     </div>
                     <div class="premarket-table-wrap">
@@ -113,12 +117,13 @@
                                     <th>Current Price</th>
                                     <th>Strategy Price (Open)</th>
                                     <th>AI Predicted (Now)</th>
+                                    <th>Prediction Time</th>
                                     <th>Directions</th>
                                     <th>Comparison</th>
                                 </tr>
                             </thead>
                             <tbody id="premarket-table-body">
-                                <tr><td colspan="6" class="muted-text">Loading premarket snapshot...</td></tr>
+                                <tr><td colspan="7" class="muted-text">Loading premarket snapshot...</td></tr>
                             </tbody>
                         </table>
                     </div>

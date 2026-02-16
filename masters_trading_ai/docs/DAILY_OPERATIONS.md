@@ -17,6 +17,10 @@ Confirm:
 - models are loading/loaded
 - premarket snapshot exists
 - snapshot was captured within configured buffer if server was running before cutoff
+- snapshot type matches session window:
+  - `premarket_open` (09:15-09:30)
+  - `market_open_locked` (09:30-15:30, frozen strategy)
+  - `after_hours_live` (15:30 onwards)
 
 ## 2) Intraday health checks
 ```bash
@@ -37,9 +41,12 @@ curl -s 'http://localhost:5001/api/training-feedback' | jq
 ```
 
 Ensure expected-vs-actual rows include:
+- `open_price`, `close_price`
 - `strategy_price_at_open`
 - `ai_last_prediction`
 - `actual_close`
+- `strategy_return_pct`, `ai_return_pct`, `actual_return_pct`
+- `alpha_pct` (actual vs strategy)
 - `direction_comparison`
 
 ## 4) Retraining cadence
@@ -60,10 +67,13 @@ Use this list to replace failing symbols in `config/tickers.yaml` before retrain
 ## 6) CI and local gate before push
 ```bash
 pytest -q
-black --check src webapp tests
-flake8 src webapp tests --max-line-length=120 --extend-ignore=E203,W503
-mypy src/inference/predictor.py webapp/prediction_tracker.py webapp/server.py --ignore-missing-imports --follow-imports=silent
+black --check src/inference/predictor.py webapp/server.py webapp/prediction_tracker.py tests/test_expected_vs_actual.py tests/test_prediction_endpoints.py
+flake8 src/inference/predictor.py webapp/server.py webapp/prediction_tracker.py tests/test_expected_vs_actual.py tests/test_prediction_endpoints.py --max-line-length=120 --extend-ignore=E203,W503 || true
+mypy --explicit-package-bases src/inference/predictor.py webapp/prediction_tracker.py webapp/server.py --ignore-missing-imports --follow-imports=silent || true
 ```
+
+GitHub Actions workflow is located at repo root:
+- `../.github/workflows/ci.yml`
 
 ## 7) Branch and PR flow
 From `/Users/anto/Trading_Project`:

@@ -34,7 +34,7 @@ for d in [TRACKING_DIR, DAILY_DIR, MONTHLY_DIR]:
 class PredictionTracker:
     """Track whether each predicted price threshold was hit during the day."""
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     @staticmethod
     def _to_float(value, default: float = 0.0) -> float:
@@ -120,13 +120,20 @@ class PredictionTracker:
             open_price, strategy_price_at_open
         )
         ai_direction = (
-            PredictionTracker._direction(current_price, ai_last_prediction)
-            if ai_last_prediction > 0 and current_price > 0
+            PredictionTracker._direction(open_price, ai_last_prediction)
+            if ai_last_prediction > 0 and open_price > 0
             else "N/A"
         )
         ai_source = str(prediction_data.get("ai_source", "none") or "none")
+        snapshot_type = str(
+            prediction_data.get("snapshot_type", "intraday") or "intraday"
+        )
         strategy_vs_ai_direction = prediction_data.get("strategy_vs_ai_direction")
-        if strategy_vs_ai_direction is None and ai_last_prediction > 0 and current_price > 0:
+        if (
+            strategy_vs_ai_direction is None
+            and ai_last_prediction > 0
+            and open_price > 0
+        ):
             strategy_vs_ai_direction = strategy_direction == ai_direction
         if strategy_vs_ai_direction not in (True, False):
             strategy_vs_ai_direction = None
@@ -141,14 +148,29 @@ class PredictionTracker:
         # For BUY: stock needs to reach at or above predicted_price
         # For SELL: stock needs to reach at or below predicted_price
         is_bullish = pred_return > 0
+        strategy_return_pct = (
+            (strategy_price_at_open - open_price) / open_price * 100
+            if open_price > 0 and strategy_price_at_open > 0
+            else 0.0
+        )
+        ai_return_pct = (
+            (ai_last_prediction - open_price) / open_price * 100
+            if open_price > 0 and ai_last_prediction > 0
+            else None
+        )
 
         existing[ticker] = {
             "predicted_return_pct": round(pred_return, 4),
             "predicted_price": round(predicted_price, 2),
             "price_at_prediction": round(current_price, 2),
+            "snapshot_type": snapshot_type,
             "open_price": round(open_price, 2),
+            "close_price": None,
             "strategy_price_at_open": round(strategy_price_at_open, 2),
             "ai_last_prediction": round(ai_last_prediction, 2),
+            "ai_price_at_open": (
+                round(ai_last_prediction, 2) if ai_last_prediction > 0 else None
+            ),
             "ai_source": ai_source if ai_last_prediction > 0 else "none",
             "strategy_predicted_at_open": strategy_predicted_at_open,
             "ai_predicted_at_open": ai_predicted_at_open,
@@ -168,9 +190,15 @@ class PredictionTracker:
             # Outcome fields — filled later
             "outcome": None,  # "HIT" or "MISS"
             "actual_close": None,
+            "close_price": None,
             "actual_high": None,
             "actual_low": None,
+            "strategy_return_pct": round(strategy_return_pct, 4),
+            "ai_return_pct": (
+                round(ai_return_pct, 4) if ai_return_pct is not None else None
+            ),
             "actual_return_pct": None,
+            "alpha_pct": None,
             "actual_direction": None,
             "direction_correct": None,
             "checked_at": None,
@@ -287,7 +315,8 @@ class PredictionTracker:
                         or pred.get("timestamp", "")
                     )
                     ai_last_prediction_at = str(
-                        pred.get("ai_last_prediction_at", "") or pred.get("timestamp", "")
+                        pred.get("ai_last_prediction_at", "")
+                        or pred.get("timestamp", "")
                     )
                     strategy_direction = pred.get(
                         "strategy_direction_at_open"
@@ -296,11 +325,26 @@ class PredictionTracker:
                     )
                     ai_direction = pred.get(
                         "ai_direction_last"
-                    ) or PredictionTracker._direction(price_at_pred, ai_last_prediction)
+                    ) or PredictionTracker._direction(open_price, ai_last_prediction)
                     actual_direction = PredictionTracker._direction(
                         open_price, actual_close
                     )
-                    actual_return = (actual_close - price_at_pred) / price_at_pred * 100
+                    actual_return = (
+                        (actual_close - open_price) / open_price * 100
+                        if open_price > 0
+                        else 0.0
+                    )
+                    strategy_return = (
+                        (strategy_price_at_open - open_price) / open_price * 100
+                        if open_price > 0 and strategy_price_at_open > 0
+                        else 0.0
+                    )
+                    ai_return = (
+                        (ai_last_prediction - open_price) / open_price * 100
+                        if open_price > 0 and ai_last_prediction > 0
+                        else None
+                    )
+                    alpha_pct = actual_return - strategy_return
                     direction_comparison = strategy_direction == actual_direction
                     direction_vs_actual = ai_direction == actual_direction
 
@@ -309,13 +353,22 @@ class PredictionTracker:
                     # Update prediction record
                     pred["outcome"] = outcome
                     pred["actual_close"] = round(actual_close, 2)
+                    pred["close_price"] = round(actual_close, 2)
                     pred["actual_high"] = round(actual_high, 2)
                     pred["actual_low"] = round(actual_low, 2)
                     pred["actual_return_pct"] = round(actual_return, 4)
+                    pred["strategy_return_pct"] = round(strategy_return, 4)
+                    pred["ai_return_pct"] = (
+                        round(ai_return, 4) if ai_return is not None else None
+                    )
+                    pred["alpha_pct"] = round(alpha_pct, 4)
                     pred["actual_direction"] = actual_direction
                     pred["strategy_price_at_open"] = round(strategy_price_at_open, 2)
                     pred["open_price"] = round(open_price, 2)
                     pred["ai_last_prediction"] = round(ai_last_prediction, 2)
+                    pred["ai_price_at_open"] = (
+                        round(ai_last_prediction, 2) if ai_last_prediction > 0 else None
+                    )
                     pred["strategy_predicted_at_open"] = strategy_predicted_at_open
                     pred["ai_predicted_at_open"] = ai_predicted_at_open
                     pred["ai_last_prediction_at"] = ai_last_prediction_at
@@ -333,10 +386,21 @@ class PredictionTracker:
                         "outcome": outcome,
                         "predicted_return_pct": pred["predicted_return_pct"],
                         "actual_return_pct": round(actual_return, 4),
+                        "strategy_return_pct": round(strategy_return, 4),
+                        "ai_return_pct": (
+                            round(ai_return, 4) if ai_return is not None else None
+                        ),
+                        "alpha_pct": round(alpha_pct, 4),
                         "predicted_price": pred["predicted_price"],
                         "strategy_price_at_open": round(strategy_price_at_open, 2),
                         "ai_last_prediction": round(ai_last_prediction, 2),
+                        "ai_price_at_open": (
+                            round(ai_last_prediction, 2)
+                            if ai_last_prediction > 0
+                            else None
+                        ),
                         "open_price": round(open_price, 2),
+                        "close_price": round(actual_close, 2),
                         "actual_close": round(actual_close, 2),
                         "actual_high": round(actual_high, 2),
                         "actual_low": round(actual_low, 2),
@@ -554,14 +618,30 @@ class PredictionTracker:
                             "ticker": ticker,
                             "predicted_return": pred["predicted_return_pct"],
                             "actual_return": pred.get("actual_return_pct", 0),
+                            "strategy_return_pct": pred.get("strategy_return_pct"),
+                            "ai_return_pct": pred.get("ai_return_pct"),
+                            "alpha_pct": pred.get("alpha_pct"),
                             "outcome": pred["outcome"],
                             "signal": pred.get("signal", "HOLD"),
                             "confidence": pred.get("confidence", 50),
+                            "snapshot_type": pred.get("snapshot_type", "intraday"),
                             "open_price": round(
-                                PredictionTracker._to_float(pred.get("open_price", 0)), 2
+                                PredictionTracker._to_float(pred.get("open_price", 0)),
+                                2,
+                            ),
+                            "close_price": round(
+                                PredictionTracker._to_float(
+                                    pred.get("close_price", pred.get("actual_close", 0))
+                                ),
+                                2,
                             ),
                             "strategy_price_at_open": round(strategy_price_at_open, 2),
                             "ai_last_prediction": round(ai_last_prediction, 2),
+                            "ai_price_at_open": (
+                                round(ai_last_prediction, 2)
+                                if ai_last_prediction > 0
+                                else None
+                            ),
                             "strategy_predicted_at_open": pred.get(
                                 "strategy_predicted_at_open"
                             ),
@@ -669,9 +749,15 @@ class PredictionTracker:
                     "predicted_price": pred.get("predicted_price", 0),
                     "price_at_prediction": pred.get("price_at_prediction", 0),
                     "open_price": pred.get("open_price"),
+                    "close_price": pred.get("close_price", pred.get("actual_close")),
                     "strategy_price_at_open": pred.get("strategy_price_at_open"),
                     "ai_last_prediction": pred.get("ai_last_prediction"),
-                    "strategy_predicted_at_open": pred.get("strategy_predicted_at_open"),
+                    "ai_price_at_open": pred.get(
+                        "ai_price_at_open", pred.get("ai_last_prediction")
+                    ),
+                    "strategy_predicted_at_open": pred.get(
+                        "strategy_predicted_at_open"
+                    ),
                     "ai_predicted_at_open": pred.get("ai_predicted_at_open"),
                     "ai_last_prediction_at": pred.get("ai_last_prediction_at"),
                     "strategy_direction_at_open": pred.get(
@@ -682,6 +768,9 @@ class PredictionTracker:
                     "signal": pred.get("signal", "HOLD"),
                     "confidence": pred.get("confidence", 50),
                     "outcome": pred.get("outcome"),  # None, "HIT", "MISS"
+                    "strategy_return_pct": pred.get("strategy_return_pct"),
+                    "ai_return_pct": pred.get("ai_return_pct"),
+                    "alpha_pct": pred.get("alpha_pct"),
                     "actual_close": pred.get("actual_close"),
                     "actual_return_pct": pred.get("actual_return_pct"),
                 }

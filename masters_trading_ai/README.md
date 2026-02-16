@@ -68,8 +68,15 @@ webapp:
   premarket_default_tickers: 10
 ```
 
-Snapshot is captured once/day and intended to be taken by:
-- `market_open - premarket_max_buffer_minutes`
+Snapshot windows (IST, server-side):
+- `09:15-09:30`: `premarket_open` snapshot (frozen)
+- `09:30-15:30`: `market_open_locked` strategy snapshot (frozen)
+- `15:30-next day 09:15`: `after_hours_live` (manual refresh can update)
+
+Use latest stored snapshot:
+```bash
+curl -s 'http://localhost:5001/api/premarket-outlook?use_latest_stored=true' | jq
+```
 
 Endpoint:
 ```bash
@@ -104,11 +111,31 @@ curl -s 'http://localhost:5001/api/expected-vs-actual?date=2026-02-14' | jq
 ```
 
 Includes:
+- `open_price`, `close_price`, `actual_close`
 - `strategy_price_at_open`
-- `ai_last_prediction`
-- `actual_close`
+- `ai_last_prediction` (`ai_price_at_open`)
+- `strategy_return_pct`, `ai_return_pct`, `actual_return_pct`
+- `alpha_pct` (actual vs strategy, open-relative)
 - `direction_comparison`
 - `schema_version`
+
+### `/api/strategy-price/<ticker>`
+```bash
+curl -s 'http://localhost:5001/api/strategy-price/INFY.NS' | jq
+```
+
+Returns strategy-only fields:
+- `strategy_price`
+- `rr_ratio`
+- `strategy_generated_at`
+- `predicted_return_decimal`
+
+### `/api/debug/prediction-status/<ticker>`
+```bash
+curl -s 'http://localhost:5001/api/debug/prediction-status/INFY.NS' | jq
+```
+
+Provides cache/snapshot diagnostics and formula consistency checks.
 
 ### `/api/training-feedback`
 ```bash
@@ -145,14 +172,14 @@ Before retraining, replace repeated failures in `config/tickers.yaml`.
 cd /Users/anto/Trading_Project/masters_trading_ai
 source .venv/bin/activate
 pytest -q
-black --check src webapp tests
-flake8 src webapp tests --max-line-length=120 --extend-ignore=E203,W503
-mypy src/inference/predictor.py webapp/prediction_tracker.py webapp/server.py --ignore-missing-imports --follow-imports=silent
+black --check src/inference/predictor.py webapp/server.py webapp/prediction_tracker.py tests/test_expected_vs_actual.py tests/test_prediction_endpoints.py
+flake8 src/inference/predictor.py webapp/server.py webapp/prediction_tracker.py tests/test_expected_vs_actual.py tests/test_prediction_endpoints.py --max-line-length=120 --extend-ignore=E203,W503 || true
+mypy --explicit-package-bases src/inference/predictor.py webapp/prediction_tracker.py webapp/server.py --ignore-missing-imports --follow-imports=silent || true
 ```
 
 ## 11) CI
 GitHub Actions workflow:
-- `.github/workflows/ci.yml`
+- `../.github/workflows/ci.yml` (repo root)
 
 Runs on `masters_trading_ai/**` changes:
 - install deps
@@ -202,6 +229,12 @@ flowchart LR
 - Bi-weekly: retrain sequence/tree models.
 - Monthly: walk-forward + ensemble + backtest review.
 - Quarterly: full pipeline refresh.
+
+Early retrain triggers:
+- KS-test drift alert on core features.
+- Direction hit-rate drop > 7% week-over-week.
+- Sustained alpha degradation for 10+ trading sessions.
+- Portfolio risk metrics degrade (Sharpe collapse / drawdown regime shift).
 
 See `docs/DAILY_OPERATIONS.md` for detailed runbook.
 

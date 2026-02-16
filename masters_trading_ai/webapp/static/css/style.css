@@ -2551,6 +2551,16 @@ a:hover { text-decoration: underline; }
     white-space: pre-wrap;
 }
 
+.explain-summary,
+.explain-full {
+    white-space: pre-wrap;
+}
+
+.explain-read-more {
+    margin: 8px 0;
+    align-self: flex-start;
+}
+
 .groq-popover,
 .explain-popover {
     max-height: 360px;
@@ -2591,6 +2601,11 @@ a:hover { text-decoration: underline; }
     align-items: center;
     margin-bottom: 12px;
     flex-wrap: wrap;
+}
+
+.position-count {
+    display: inline-block;
+    min-width: 100%;
 }
 
 a.tf-btn {

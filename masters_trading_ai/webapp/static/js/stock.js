@@ -156,6 +156,36 @@ function bindMetricTooltipInteractions() {
     tip.addEventListener('focusout', scheduleMetricTooltipHide);
 }
 
+function renderExplainPopover(bodyEl, text) {
+    const full = String(text || '').trim();
+    bodyEl.innerHTML = '';
+    if (full.length <= 260) {
+        bodyEl.textContent = full || 'No explanation available';
+        return;
+    }
+    const summary = document.createElement('div');
+    summary.className = 'explain-summary';
+    summary.textContent = `${full.slice(0, 260).trim()}...`;
+
+    const readMore = document.createElement('button');
+    readMore.type = 'button';
+    readMore.className = 'tf-btn explain-read-more';
+    readMore.textContent = 'Read more';
+
+    const fullText = document.createElement('div');
+    fullText.className = 'explain-full hidden';
+    fullText.textContent = full;
+
+    readMore.addEventListener('click', () => {
+        const expanded = !fullText.classList.contains('hidden');
+        fullText.classList.toggle('hidden', expanded);
+        summary.classList.toggle('hidden', !expanded);
+        readMore.textContent = expanded ? 'Read more' : 'Show less';
+    });
+
+    bodyEl.append(summary, readMore, fullText);
+}
+
 async function showMetricTooltip(evt, term, context = '') {
     const tip = document.getElementById('metric-tooltip');
     const titleEl = document.getElementById('metric-tooltip-title');
@@ -173,7 +203,7 @@ async function showMetricTooltip(evt, term, context = '') {
 
     const key = `${term}::${context}`;
     if (metricExplainCache[key]) {
-        bodyEl.textContent = metricExplainCache[key];
+        renderExplainPopover(bodyEl, metricExplainCache[key]);
         return;
     }
 
@@ -182,7 +212,7 @@ async function showMetricTooltip(evt, term, context = '') {
         const data = await res.json();
         const text = data.explanation || data.error || 'No explanation';
         metricExplainCache[key] = text;
-        bodyEl.textContent = text;
+        renderExplainPopover(bodyEl, text);
     } catch (e) {
         bodyEl.textContent = `Explanation unavailable: ${e.message}`;
     }
@@ -616,12 +646,22 @@ async function loadLivePrice() {
 }
 
 // ── Prediction ────────────────────────────────────
-async function loadPrediction() {
+async function loadPrediction(options = {}) {
     const loading = document.getElementById('pred-loading');
     const content = document.getElementById('pred-content');
+    const force = Boolean(options.force);
+    const useLatestStored = Boolean(options.useLatestStored);
+
+    loading.classList.remove('hidden');
+    loading.innerHTML = '<div class="spinner"></div><p>Running ML models...</p>';
+    content.classList.add('hidden');
 
     try {
-        const res = await fetch(`/api/predict/${encodeURIComponent(TICKER)}`);
+        const params = new URLSearchParams({
+            force: force ? 'true' : 'false',
+            use_latest_stored: useLatestStored ? 'true' : 'false',
+        });
+        const res = await fetch(`/api/predict/${encodeURIComponent(TICKER)}?${params.toString()}`);
 
         if (res.status === 503) {
             loading.innerHTML = '<div class="spinner"></div><p>Models still loading... will retry in 5s</p>';
@@ -659,8 +699,9 @@ async function loadPrediction() {
 
         // Show generated-at timestamp
         const genEl = document.getElementById('pred-generated-at');
-        if (genEl && data.generated_at) {
-            genEl.textContent = data.generated_at;
+        if (genEl) {
+            const mode = data.cache_policy || 'fresh_inference';
+            genEl.textContent = data.generated_at ? `${data.generated_at} (${mode})` : mode;
         }
 
         // Model breakdown — sorted by weight (highest first)
@@ -693,11 +734,8 @@ async function loadPrediction() {
         }
         breakdown.innerHTML = bhtml;
 
-        // Trade levels
-        document.getElementById('level-entry').textContent = `₹${formatN(data.entry_price)}`;
-        document.getElementById('level-target').textContent = `₹${formatN(data.target_price)}`;
-        document.getElementById('level-sl').textContent = `₹${formatN(data.stop_loss)}`;
-        document.getElementById('level-rr').textContent = data.risk_reward?.toFixed(1);
+        // Trade levels are strategy-only; pull from strategy endpoint.
+        await loadStrategyTradeLevels({ force, useLatestStored });
 
         // Fundamentals
         if (data.fundamentals) {
@@ -761,6 +799,48 @@ async function loadPrediction() {
     } catch (e) {
         loading.innerHTML = `<p class="muted-text">⚠️ Prediction error: ${e.message}</p>`;
     }
+}
+
+async function loadStrategyTradeLevels(options = {}) {
+    const force = Boolean(options.force);
+    const useLatestStored = Boolean(options.useLatestStored);
+    try {
+        const params = new URLSearchParams({
+            force: force ? 'true' : 'false',
+            use_latest_stored: useLatestStored ? 'true' : 'false',
+        });
+        const res = await fetch(`/api/strategy-price/${encodeURIComponent(TICKER)}?${params.toString()}`);
+        const data = await res.json();
+        if (!res.ok || data.error) {
+            document.getElementById('level-entry').textContent = '—';
+            document.getElementById('level-target').textContent = '—';
+            document.getElementById('level-sl').textContent = '—';
+            document.getElementById('level-rr').textContent = '—';
+            return;
+        }
+        const current = Number(data.current_price || predictionData?.current_price || latestLivePrice || 0);
+        const target = Number(data.strategy_price || 0);
+        const rr = Number(data.rr_ratio || 0);
+        const entry = current > 0 ? current : Number(data.open_price || 0);
+        let stopLoss = 0;
+        if (entry > 0 && target > 0 && rr > 0) {
+            const risk = Math.abs(target - entry) / rr;
+            stopLoss = target >= entry ? entry - risk : entry + risk;
+        }
+        document.getElementById('level-entry').textContent = entry > 0 ? `₹${formatN(entry)}` : '—';
+        document.getElementById('level-target').textContent = target > 0 ? `₹${formatN(target)}` : '—';
+        document.getElementById('level-sl').textContent = stopLoss > 0 ? `₹${formatN(stopLoss)}` : '—';
+        document.getElementById('level-rr').textContent = rr > 0 ? rr.toFixed(2) : '—';
+    } catch (_) {
+        document.getElementById('level-entry').textContent = '—';
+        document.getElementById('level-target').textContent = '—';
+        document.getElementById('level-sl').textContent = '—';
+        document.getElementById('level-rr').textContent = '—';
+    }
+}
+
+function refreshPredictionNow() {
+    loadPrediction({ force: true, useLatestStored: false });
 }
 
 // ── Expected vs Actual for this stock ─────────────
