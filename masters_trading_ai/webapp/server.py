@@ -3582,6 +3582,7 @@ def _normalize_open_window_timestamp(
     *,
     date_hint: str | None = None,
     default_offset_minutes: int = 5,
+    preserve_live_today: bool = False,
 ) -> str:
     """
     Clamp/derive an "at-open" timestamp into 09:15–09:30 IST for a trading day.
@@ -3602,6 +3603,15 @@ def _normalize_open_window_timestamp(
 
     if parsed is None:
         return (start + timedelta(minutes=offset)).isoformat()
+    now_ist = datetime.now(IST)
+    # Preserve real-time timestamps for current-day live windows
+    # (pre-09:15 and post-15:30) when explicitly requested.
+    if (
+        preserve_live_today
+        and parsed.date() == now_ist.date()
+        and _prediction_window_type(now_ist) == "after_hours_live"
+    ):
+        return parsed.isoformat()
     if parsed < start:
         return start.isoformat()
     if parsed > end:
@@ -3675,11 +3685,13 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
         return {}
     out = dict(snapshot)
     snap_date = out.get("date") or datetime.now(IST).strftime("%Y-%m-%d")
+    preserve_live_today = _prediction_window_type(datetime.now(IST)) == "after_hours_live"
     snap_captured_actual = out.get("captured_at_actual") or out.get("captured_at")
     snap_captured = _normalize_open_window_timestamp(
         out.get("captured_at") or snap_captured_actual,
         date_hint=snap_date,
         default_offset_minutes=20,
+        preserve_live_today=preserve_live_today,
     )
     out["date"] = snap_date
     out["captured_at"] = snap_captured
@@ -3732,6 +3744,7 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
             row.get("captured_at") or row_captured_actual or snap_captured,
             date_hint=snap_date,
             default_offset_minutes=20,
+            preserve_live_today=preserve_live_today,
         )
         row["captured_at"] = row_captured
         row["captured_at_actual"] = row_captured_actual or out["captured_at_actual"]
@@ -3739,11 +3752,13 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
             row.get("strategy_predicted_at_open") or row_captured,
             date_hint=snap_date,
             default_offset_minutes=5,
+            preserve_live_today=preserve_live_today,
         )
         row["ai_predicted_at_open"] = _normalize_open_window_timestamp(
             row.get("ai_predicted_at_open") or row_captured,
             date_hint=snap_date,
             default_offset_minutes=7,
+            preserve_live_today=preserve_live_today,
         )
         try:
             ai_px = float(row.get("ai_predicted_price") or 0)
@@ -3790,6 +3805,7 @@ def _build_premarket_snapshot(tickers: list[str] | None = None) -> dict:
         captured_at_actual,
         date_hint=today,
         default_offset_minutes=20,
+        preserve_live_today=True,
     )
     rows: list[dict] = []
 
@@ -3856,11 +3872,13 @@ def _build_premarket_snapshot(tickers: list[str] | None = None) -> dict:
                 captured_at_open_window,
                 date_hint=today,
                 default_offset_minutes=5,
+                preserve_live_today=True,
             ),
             "ai_predicted_at_open": _normalize_open_window_timestamp(
                 ai_meta.get("generated_at_iso") or captured_at_open_window,
                 date_hint=today,
                 default_offset_minutes=7,
+                preserve_live_today=True,
             ),
             "strategy_source": "ensemble_models",
             "ai_source": ai_meta.get("source", "none"),
@@ -4170,6 +4188,7 @@ def _get_prediction_for_ticker(
     fallback: dict | None = None,
     allow_live_refresh: bool = False,
     baseline_price: float = 0.0,
+    freeze_baseline: bool = False,
 ) -> dict:
     """Get a robust prediction object from log or predictor cache/live output."""
     global _daily_prediction_baseline, _daily_prediction_baseline_date
@@ -4178,7 +4197,7 @@ def _get_prediction_for_ticker(
         _daily_prediction_baseline = {}
         _daily_prediction_baseline_date = today
 
-    if ticker in _daily_prediction_baseline:
+    if freeze_baseline and ticker in _daily_prediction_baseline:
         return dict(_daily_prediction_baseline[ticker])
 
     pred = dict(fallback or {})
@@ -4215,17 +4234,28 @@ def _get_prediction_for_ticker(
 
     pred_return = _normalize_predicted_return_pct(pred.get("predicted_return", 0))
     pred["predicted_return"] = pred_return
-    _daily_prediction_baseline[ticker] = dict(pred)
+    if freeze_baseline:
+        _daily_prediction_baseline[ticker] = dict(pred)
     return pred
 
 
 def _build_daily_analysis() -> dict:
     """Build the full daily analysis payload (called by background thread)."""
+    global _daily_prediction_baseline, _daily_prediction_baseline_date
     _capture_opening_prices()
     current_prices = _get_cached_prices()
     now_ist = datetime.now(IST)
     market = get_market_status()
     market_status = market.get("status", "")
+    window_type = _prediction_window_type(now_ist)
+    freeze_baseline = window_type == "market_open_locked"
+    today_str = now_ist.strftime("%Y-%m-%d")
+    if _daily_prediction_baseline_date != today_str:
+        _daily_prediction_baseline = {}
+        _daily_prediction_baseline_date = today_str
+    elif not freeze_baseline and _daily_prediction_baseline:
+        # Outside lock window, allow prices/predictions to fluctuate on refresh.
+        _daily_prediction_baseline = {}
     next_day_mode = (
         _is_next_day_prediction_window(now_ist) or market_status == "weekend"
     )
@@ -4243,7 +4273,6 @@ def _build_daily_analysis() -> dict:
     )
 
     # Get all predictions (from cache)
-    today_str = now_ist.strftime("%Y-%m-%d")
     log_file = PREDICTION_LOG_DIR / f"{today_str}.json"
     predictions = {}
     if log_file.exists():
@@ -4276,6 +4305,7 @@ def _build_daily_analysis() -> dict:
             predictions.get(ticker, {}),
             allow_live_refresh=refresh_budget > 0,
             baseline_price=open_price if open_price > 0 else current_price,
+            freeze_baseline=freeze_baseline,
         )
         if refresh_budget > 0 and ticker not in predictions:
             refresh_budget -= 1

@@ -70,9 +70,14 @@ webapp:
 ```
 
 Snapshot windows (IST, server-side):
-- `09:15-09:30`: `premarket_open` snapshot (frozen)
+- `00:00-09:15`: `after_hours_live` (AI/strategy can refresh and fluctuate)
+- `09:15-09:30`: `premarket_open` snapshot
 - `09:30-15:30`: `market_open_locked` strategy snapshot (frozen)
-- `15:30-next day 09:15`: `after_hours_live` (manual refresh can update)
+- `15:30-next day 00:00`: `after_hours_live` (AI/strategy can refresh and fluctuate)
+
+Timestamp behavior:
+- In live windows (`after_hours_live`), displayed prediction timestamps use real generation time.
+- During open-window fields (`*_at_open`) inside lock windows, timestamps are normalized to the 09:15-09:30 IST band.
 
 Use latest stored snapshot:
 ```bash
@@ -119,6 +124,10 @@ Returns strategy-only open-buy suggestions constrained by `budget` + estimated e
 - `est_trade_cost`, `stop_loss_price`, `risk_reward`
 - `liquidity_factor`, `avg_volume_30d`, `volatility_atr_pct`
 - `source = strategy`
+- Dynamic risk fields:
+  - `stop_loss_pct` (ATR + confidence policy)
+  - `target_price`
+  - `sentiment_weighted_score`
 
 ### `/api/simulate/trade` and `/api/simulate/portfolio`
 ```bash
@@ -130,7 +139,7 @@ curl -s -X POST 'http://localhost:5001/api/simulate/trade' \
 # Auto stop-loss/target checks
 curl -s -X POST 'http://localhost:5001/api/simulate/trade' \
   -H 'Content-Type: application/json' \
-  -d '{"action":"AUTO_CHECK"}' | jq
+  -d '{"action":"AUTO_CHECK","auto_buy":true}' | jq
 
 # Read simulated portfolio
 curl -s 'http://localhost:5001/api/simulate/portfolio' | jq
@@ -139,6 +148,12 @@ curl -s 'http://localhost:5001/api/simulate/portfolio' | jq
 Simulation state is persisted in:
 - `cache/portfolio_sim.json`
 - `cache/prediction_log/simulated_trades.jsonl`
+
+Simulation risk controls:
+- ATR + confidence dynamic stop-loss
+- position sizing by risk-per-trade and max-position cap
+- trailing-stop updates after favorable move
+- daily loss circuit breaker (`MAX_DAILY_LOSS`)
 
 Important: this is simulation only; no live brokerage order is sent.
 
@@ -231,6 +246,22 @@ Runs on `masters_trading_ai/**` changes:
 - `black --check`
 - `flake8`
 - `mypy`
+
+## 11.1) Groq API Usage Controls
+This codebase uses caching and hard limits to avoid Groq overuse:
+- UI explanation cache (`webapp/groq_explainer.py`): prompt cache + `MIN_CALL_INTERVAL=1s`
+- AI forecast cache (`webapp/server.py`): `GROQ_FORECAST_TTL=900s`
+- News-sentiment scoring cache (`src/inference/predictor.py`): `SENTIMENT_CACHE_TTL_SECONDS` (default 1800s)
+- News-sentiment call budget: `GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE` (default 8)
+- Toggle sentiment Groq usage: `ENABLE_GROQ_NEWS_SENTIMENT` (`1`/`0`)
+
+Recommended `.env` knobs:
+```bash
+GROQ_API_KEY=...
+ENABLE_GROQ_NEWS_SENTIMENT=1
+GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE=8
+SENTIMENT_CACHE_TTL_SECONDS=1800
+```
 
 ## 12) Branch workflow (feature -> main)
 From project root (`/Users/anto/Trading_Project`):

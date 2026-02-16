@@ -8,9 +8,10 @@ python webapp/server.py
 ```
 
 ## 2) Verify market-window snapshot behavior (IST)
-- `09:15-09:30`: `premarket_open` snapshot should stay fixed.
+- `00:00-09:15`: `after_hours_live` should refresh live AI/strategy values.
+- `09:15-09:30`: `premarket_open` snapshot window.
 - `09:30-15:30`: `market_open_locked` strategy snapshot should stay fixed.
-- `15:30-next day 09:15`: `after_hours_live` can refresh live AI/strategy values.
+- `15:30-next day 00:00`: `after_hours_live` should refresh live AI/strategy values.
 
 Checks:
 ```bash
@@ -22,11 +23,15 @@ curl -s 'http://localhost:5001/api/debug/prediction-status/INFY.NS' | jq '.predi
 - Default simulation cash should be `₹40,000`.
 - Open-buy list must respect budget + estimated fees.
 - Auto-check should trigger simulated sells when stop-loss/target is hit.
+- Auto-check can optionally trigger simulated auto-buys from snapshot candidates.
 
 Checks:
 ```bash
 curl -s 'http://localhost:5001/api/advisor/open-buy-list?n=10&budget=40000' | jq '.budget,.estimated_total_cost,.count'
 curl -s 'http://localhost:5001/api/simulate/portfolio' | jq '.cash,.equity_value,.open_positions_count'
+curl -s -X POST 'http://localhost:5001/api/simulate/trade' \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"AUTO_CHECK","auto_buy":true}' | jq '.triggered_count,.auto_buy_events,.events'
 ```
 
 ## 4) Expected vs Actual freeze checks
