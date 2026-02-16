@@ -4087,7 +4087,36 @@ def api_risk_analytics():
         )
 
         if data is None or data.empty:
-            return jsonify({"error": "Unable to fetch historical data"}), 500
+            return jsonify(
+                _sanitize(
+                    {
+                        "portfolio_tickers": portfolio_tickers,
+                        "portfolio_holdings": [
+                            r
+                            for r in portfolio_rows
+                            if r.get("ticker") in portfolio_tickers
+                        ],
+                        "initial_capital": round(
+                            float(sum(custom_weights.values()) or 100000.0), 2
+                        ),
+                        "ignored_tickers": ignored,
+                        "n_stocks": len(portfolio_tickers),
+                        "period": "0 days",
+                        "warning": "Unable to fetch historical data",
+                        "risk_metrics": {},
+                        "correlation_matrix": {},
+                        "sector_exposure": {},
+                        "statistical_tests": {},
+                        "monte_carlo": {
+                            "error": "Insufficient data for analytics",
+                            "initial_capital": round(
+                                float(sum(custom_weights.values()) or 100000.0), 2
+                            ),
+                        },
+                        "equity_curve": [],
+                    }
+                )
+            )
 
         # Extract closing prices
         if isinstance(data.columns, pd.MultiIndex):
@@ -4140,7 +4169,50 @@ def api_risk_analytics():
             c for c in returns.columns if c != "^NSEI" and c in surviving_tickers
         ]
         if not portfolio_cols:
-            return jsonify({"error": "Insufficient data for analytics"}), 500
+            return jsonify(
+                _sanitize(
+                    {
+                        "portfolio_tickers": surviving_tickers,
+                        "portfolio_holdings": [
+                            r
+                            for r in portfolio_rows
+                            if r.get("ticker") in surviving_tickers
+                        ],
+                        "initial_capital": round(
+                            float(
+                                sum(
+                                    custom_weights.get(t, 0.0)
+                                    for t in surviving_tickers
+                                )
+                                or 100000.0
+                            ),
+                            2,
+                        ),
+                        "ignored_tickers": ignored,
+                        "n_stocks": len(surviving_tickers),
+                        "period": f"{actual_period_days} days",
+                        "warning": "Insufficient data for analytics",
+                        "risk_metrics": {},
+                        "correlation_matrix": corr_data,
+                        "sector_exposure": sector_exposure,
+                        "statistical_tests": {},
+                        "monte_carlo": {
+                            "error": "Insufficient data for analytics",
+                            "initial_capital": round(
+                                float(
+                                    sum(
+                                        custom_weights.get(t, 0.0)
+                                        for t in surviving_tickers
+                                    )
+                                    or 100000.0
+                                ),
+                                2,
+                            ),
+                        },
+                        "equity_curve": [],
+                    }
+                )
+            )
 
         if custom_weights:
             total_cost = sum(custom_weights.get(t, 0.0) for t in portfolio_cols)
