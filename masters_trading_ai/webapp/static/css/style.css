@@ -929,17 +929,6 @@ a:hover { text-decoration: underline; }
 .pick-detail .label { color: var(--text-muted); }
 .pick-detail .value { font-weight: 600; }
 
-.after-hours-summary {
-    margin: 8px 0 12px;
-    padding: 10px 12px;
-    border-radius: 10px;
-    border: 1px solid rgba(240, 185, 11, 0.4);
-    background: rgba(240, 185, 11, 0.1);
-    color: var(--yellow);
-    font-size: 12px;
-    line-height: 1.5;
-}
-
 .premarket-panels {
     display: grid;
     grid-template-columns: 2fr 1fr;
@@ -1005,15 +994,6 @@ a:hover { text-decoration: underline; }
 
 .premarket-row.selected {
     background: rgba(91, 141, 239, 0.15);
-}
-
-.premarket-row.locked {
-    cursor: default;
-    opacity: 0.9;
-}
-
-.premarket-row.locked:hover {
-    background: transparent;
 }
 
 /* ── Expected vs Actual ─────────────────────────── */

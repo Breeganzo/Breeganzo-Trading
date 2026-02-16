@@ -19,7 +19,6 @@ let metricTooltipHideTimer = null;
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     checkStatus();
-    bindMetricPopoverTriggers();
     loadSectors();
     loadIndexPrices();
     loadPricesForSector('all');
@@ -157,8 +156,7 @@ async function showMetricTooltip(evt, term, context = '') {
     const tip = document.getElementById('metric-tooltip');
     const titleEl = document.getElementById('metric-tooltip-title');
     const bodyEl = document.getElementById('metric-tooltip-body');
-    return { tip, titleEl, bodyEl };
-}
+    if (!tip || !titleEl || !bodyEl) return;
 
     bindMetricTooltipInteractions();
     clearMetricTooltipHideTimer();
@@ -168,7 +166,6 @@ async function showMetricTooltip(evt, term, context = '') {
         moveMetricTooltip(evt);
     }
     tip.classList.remove('hidden');
-    tip.setAttribute('aria-hidden', 'false');
 
     const key = `${term}::${context}`;
     if (metricExplainCache[key]) {
@@ -244,8 +241,6 @@ async function loadDailyAnalysis() {
         }
         if (!res.ok) return;
         dailyAnalysisData = await res.json();
-        dashboardAfterHoursMode = Boolean(dailyAnalysisData?.after_hours_mode);
-        updateAfterHoursModeBanner();
 
         // Update market mood banner
         const mood = document.getElementById('market-mood');
@@ -265,18 +260,6 @@ async function loadDailyAnalysis() {
         }
     } catch (e) {
         console.error('Daily analysis failed:', e);
-    }
-}
-
-function updateAfterHoursModeBanner() {
-    const banner = document.getElementById('after-hours-summary');
-    if (!banner) return;
-    if (dashboardAfterHoursMode) {
-        banner.classList.remove('hidden');
-        banner.textContent = 'After-hours mode active: premarket widgets are locked until next market open, and Expected vs Actual uses end-of-day close.';
-    } else {
-        banner.classList.add('hidden');
-        banner.textContent = '';
     }
 }
 
@@ -649,7 +632,6 @@ async function showTopAnalysis() {
         html += '</div>';
 
         grid.innerHTML = html;
-        bindMetricPopoverTriggers(grid);
     } catch (e) {
         grid.innerHTML = `<div class="loading-spinner"><p>Error: ${e.message}</p></div>`;
     }
@@ -669,8 +651,6 @@ async function showTopPicks() {
     const section = document.getElementById('top-picks-section');
     section.classList.remove('hidden');
     updateTopPickFilterButtons();
-    dashboardAfterHoursMode = Boolean(dailyAnalysisData?.after_hours_mode || dashboardAfterHoursMode);
-    updateAfterHoursModeBanner();
 
     const grid = document.getElementById('picks-grid');
     grid.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>Running ML predictions across all sectors... This may take 2-5 minutes.</p></div>';
@@ -784,7 +764,6 @@ function renderTopPicks() {
         </div>`;
     }
     grid.innerHTML = html;
-    bindMetricPopoverTriggers(grid);
 }
 
 async function loadPremarketOutlook() {
@@ -843,7 +822,7 @@ function renderPremarketOutlookTable() {
         const badgeClass = aligned === null ? '' : (aligned ? 'correct' : 'wrong');
         const badgeText = aligned === null ? 'AI N/A' : (aligned ? 'Aligned' : 'Divergent');
         return `
-            <tr class="premarket-row ${selected} ${dashboardAfterHoursMode ? 'locked' : ''}" ${clickAction}>
+            <tr class="premarket-row ${selected}" onclick="selectPremarketTicker('${row.ticker}')">
                 <td><strong>${row.name || row.ticker.replace('.NS', '')}</strong><br><span class="muted-text">${row.ticker}</span></td>
                 <td>${formatPrice(row.current_price)}</td>
                 <td>${Number(row.strategy_price_at_open || 0) > 0 ? formatPrice(row.strategy_price_at_open) : '—'}</td>
@@ -856,7 +835,6 @@ function renderPremarketOutlookTable() {
 }
 
 function selectPremarketTicker(ticker) {
-    if (dashboardAfterHoursMode) return;
     highlightedPremarketTicker = ticker;
     renderPremarketOutlookTable();
     loadCurrentSecondSnapshot();
@@ -872,25 +850,6 @@ async function loadCurrentSecondSnapshot() {
     if (!ticker) {
         body.innerHTML = '<tr><td colspan="4" class="muted-text">Select a ticker from the premarket table.</td></tr>';
         if (label) label.textContent = '—';
-        return;
-    }
-
-    if (dashboardAfterHoursMode) {
-        const row = premarketOutlookData.find((r) => r.ticker === ticker) || {};
-        const strategyNow = Number(row.strategy_price_at_open || 0);
-        const aiNow = Number(row.ai_predicted_price || 0);
-        const current = Number(row.current_price || 0);
-        const strategyDir = strategyNow > current ? 'UP' : strategyNow < current ? 'DOWN' : 'FLAT';
-        const aiDir = aiNow > current ? 'UP' : aiNow < current ? 'DOWN' : 'FLAT';
-        const aligned = strategyDir === aiDir;
-        body.innerHTML = `
-            <tr>
-                <td>${formatPrice(current)}</td>
-                <td>${strategyNow > 0 ? formatPrice(strategyNow) : '—'}</td>
-                <td>${aiNow > 0 ? formatPrice(aiNow) : '—'}</td>
-                <td><span class="direction-badge ${aligned ? 'correct' : 'wrong'}">Frozen (${strategyDir}/${aiDir})</span></td>
-            </tr>
-        `;
         return;
     }
 

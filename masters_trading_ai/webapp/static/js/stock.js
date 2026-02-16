@@ -160,8 +160,7 @@ async function showMetricTooltip(evt, term, context = '') {
     const tip = document.getElementById('metric-tooltip');
     const titleEl = document.getElementById('metric-tooltip-title');
     const bodyEl = document.getElementById('metric-tooltip-body');
-    return { tip, titleEl, bodyEl };
-}
+    if (!tip || !titleEl || !bodyEl) return;
 
     bindMetricTooltipInteractions();
     clearMetricTooltipHideTimer();
@@ -171,7 +170,6 @@ async function showMetricTooltip(evt, term, context = '') {
         moveMetricTooltip(evt);
     }
     tip.classList.remove('hidden');
-    tip.setAttribute('aria-hidden', 'false');
 
     const key = `${term}::${context}`;
     if (metricExplainCache[key]) {

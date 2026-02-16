@@ -9,12 +9,6 @@ document.addEventListener('DOMContentLoaded', () => {
 const riskExplainCache = {};
 let riskTooltipHideTimer = null;
 
-const riskPopoverState = {
-    hideTimer: null,
-    activeTrigger: null,
-    cache: {},
-};
-
 async function loadRiskAnalytics() {
     const loading = document.getElementById('risk-loading');
     const content = document.getElementById('risk-content');
@@ -373,7 +367,6 @@ function bindRiskTermHover() {
         clearHideTimer();
         placeTooltip(el);
         tooltip.classList.remove('hidden');
-        tooltip.setAttribute('aria-hidden', 'false');
         titleEl.textContent = term;
         bodyEl.textContent = 'Loading explanation...';
         const cacheKey = `${term}::portfolio risk analytics`;
@@ -431,64 +424,6 @@ function bindRiskTermHover() {
         if (!event.target.closest('.risk-term')) return;
         scheduleHide();
     });
-
-    document.addEventListener('focusout', (event) => {
-        if (!event.target.closest('.risk-term')) return;
-        scheduleHide();
-    });
-
-    document.addEventListener('click', (event) => {
-        const trigger = event.target.closest('.risk-term');
-        const { tooltip } = getEls();
-        if (trigger) {
-            normalizeTrigger(trigger);
-            const term = trigger.dataset.riskTerm || trigger.textContent?.trim();
-            if (!term) return;
-            show(trigger, term);
-            return;
-        }
-        if (tooltip && !tooltip.contains(event.target)) {
-            hide();
-        }
-    });
-
-    document.addEventListener('keydown', (event) => {
-        const trigger = event.target.closest('.risk-term');
-        if (!trigger) return;
-        if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault();
-            const term = trigger.dataset.riskTerm || trigger.textContent?.trim();
-            if (term) show(trigger, term);
-        }
-        if (event.key === 'Escape') {
-            hide();
-        }
-    });
-
-    const { tooltip } = getEls();
-    if (!tooltip) return;
-    tooltip.setAttribute('tabindex', '0');
-    tooltip.addEventListener('mouseenter', cancelHide);
-    tooltip.addEventListener('mouseleave', scheduleHide);
-    tooltip.addEventListener('focusin', cancelHide);
-    tooltip.addEventListener('focusout', scheduleHide);
-    tooltip.addEventListener('keydown', (evt) => {
-        if (evt.key === 'Escape') hide();
-    });
-    tooltip.addEventListener(
-        'wheel',
-        (evt) => {
-            evt.stopPropagation();
-        },
-        { passive: true }
-    );
-    tooltip.addEventListener(
-        'touchstart',
-        () => {
-            cancelHide();
-        },
-        { passive: true }
-    );
 }
 
 // ── Utility ───────────────────────────────────────

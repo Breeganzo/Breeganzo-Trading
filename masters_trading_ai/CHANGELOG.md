@@ -1,31 +1,5 @@
 # Changelog
 
-## 2026-02-16 (UI/Risk/Premarket hardening)
-
-### Added
-- `tests/test_premarket_snapshot.py` for market-open snapshot typing/timing validation.
-- `tests/test_risk_monte_carlo.py` for equity-curve Monte Carlo and portfolio-only API validation.
-- `tests/test_tooltip_popover.py` for popover accessibility + scrollability checks.
-- `tests/test_artifact_cleanup.py` for tracked-file cleanup guardrails.
-- `DAILY_OPERATIONS.md` runbook with market-open and after-hours verification steps.
-
-### Changed
-- Market-open snapshot flow in `webapp/server.py`:
-  - new `snapshot_type` lifecycle (`pending_market_open`, `market_open`, `near_open_fallback`, `premarket_preview`),
-  - no reuse of stale/open-mismatched snapshots,
-  - richer `/api/premarket-outlook` metadata.
-- `PredictionTracker` schema upgraded to `SCHEMA_VERSION = 4` with persisted `snapshot_type`.
-- `/api/expected-vs-actual` now:
-  - prefers close-price path for same-day after-hours mode,
-  - uses market-open snapshot rows for `strategy_price_at_open` when available,
-  - returns `after_hours_mode` and `snapshot_type`.
-- Dashboard and risk popovers are now persistent, keyboard accessible, and scrollable.
-- Risk Monte Carlo now uses portfolio equity-curve-derived returns with minimum history checks.
-- Feature engineering lag/zscore generation now batches columns to avoid pandas fragmentation warnings.
-
-### Removed
-- `__pycache__`/temp/demo artifacts from tracked files are now blocked by test coverage.
-
 ## 2026-02-16
 
 ### Added

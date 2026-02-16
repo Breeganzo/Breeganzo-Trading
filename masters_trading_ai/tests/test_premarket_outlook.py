@@ -1,4 +1,3 @@
-import json
 from datetime import datetime
 
 from webapp import server
@@ -57,11 +56,6 @@ def test_api_premarket_outlook_shape(tmp_path, monkeypatch):
 
     assert "items" in payload
     assert payload["items"]
-    assert payload["snapshot_type"] in {
-        "market_open",
-        "near_open_fallback",
-        "premarket_preview",
-    }
     item = payload["items"][0]
     for key in (
         "ticker",
@@ -73,7 +67,6 @@ def test_api_premarket_outlook_shape(tmp_path, monkeypatch):
         "captured_at",
         "strategy_predicted_at_open",
         "ai_predicted_at_open",
-        "snapshot_type",
     ):
         assert key in item
     assert item["ticker"] == "ABC.NS"
@@ -135,29 +128,16 @@ def test_api_price_tracker_includes_times_and_close_label(tmp_path, monkeypatch)
     monkeypatch.setattr(
         server,
         "get_market_status",
-        lambda: {
-            "status": "after_hours",
-            "description": "",
-            "next_open": "",
-            "ist_now": datetime.now(server.IST),
-        },
+        lambda: {"status": "after_hours", "description": "", "next_open": "", "ist_now": datetime.now(server.IST)},
     )
     monkeypatch.setattr(server, "ticker_names", {"ABC.NS": "ABC"})
 
     logs_dir = tmp_path / "prediction_log"
     logs_dir.mkdir(parents=True, exist_ok=True)
     today = datetime.now(server.IST).strftime("%Y-%m-%d")
-    log_payload = {
-        "ABC.NS": {
-            "predicted_return": 2.0,
-            "predicted_price": 204.0,
-            "current_price": 202.0,
-            "signal": "BUY",
-            "confidence": 70.0,
-            "timestamp": "2026-02-16T10:15:00+05:30",
-        }
-    }
-    (logs_dir / f"{today}.json").write_text(json.dumps(log_payload))
+    (logs_dir / f"{today}.json").write_text(
+        '{"ABC.NS":{"predicted_return":2.0,"predicted_price":204.0,"current_price":202.0,"signal":"BUY","confidence":70.0,"timestamp":"2026-02-16T10:15:00+05:30"}}'
+    )
     monkeypatch.setattr(server, "PREDICTION_LOG_DIR", logs_dir)
 
     with server.app.test_client() as client:

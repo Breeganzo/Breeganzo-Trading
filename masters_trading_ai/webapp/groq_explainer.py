@@ -31,7 +31,6 @@ except ImportError:
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 if not GROQ_API_KEY:
     import warnings
-
     warnings.warn(
         "GROQ_API_KEY not set in .env — AI explanations will be unavailable. "
         "Get a key at https://console.groq.com/keys",
@@ -60,29 +59,6 @@ def _cache_key(prompt: str) -> str:
     return hashlib.md5(prompt.encode()).hexdigest()
 
 
-def _normalize_explanation_text(
-    text: str,
-    *,
-    max_chars: int = 2600,
-    max_sections: int = 12,
-) -> str:
-    """Clip and normalize long LLM output so UI popovers stay readable."""
-    if not isinstance(text, str):
-        return str(text)
-    cleaned = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    sections = [s.strip() for s in cleaned.split("\n\n") if s.strip()]
-    if len(sections) > max_sections:
-        cleaned = (
-            "\n\n".join(sections[:max_sections])
-            + "\n\n[Truncated to keep explanation readable in-app.]"
-        )
-    if len(cleaned) > max_chars:
-        clipped = cleaned[:max_chars].rsplit(" ", 1)[0]
-        cleaned = f"{clipped} ... [Truncated]"
-    return cleaned
-
-
 def _get_cached(key: str) -> Optional[str]:
     path = CACHE_DIR / f"{key}.json"
     if path.exists():
@@ -90,7 +66,7 @@ def _get_cached(key: str) -> Optional[str]:
             data = json.loads(path.read_text())
             # Cache valid for 24 hours
             if time.time() - data.get("ts", 0) < 86400:
-                return _normalize_explanation_text(data["text"])
+                return data["text"]
         except Exception:
             pass
     return None
@@ -98,9 +74,7 @@ def _get_cached(key: str) -> Optional[str]:
 
 def _set_cache(key: str, text: str):
     path = CACHE_DIR / f"{key}.json"
-    path.write_text(
-        json.dumps({"text": _normalize_explanation_text(text), "ts": time.time()})
-    )
+    path.write_text(json.dumps({"text": text, "ts": time.time()}))
 
 
 def _call_groq(prompt: str, max_tokens: int = 500) -> str:
@@ -114,9 +88,7 @@ def _call_groq(prompt: str, max_tokens: int = 500) -> str:
 
     client = _get_client()
     if client is None:
-        return _normalize_explanation_text(
-            "Groq API not available. Install: pip install groq"
-        )
+        return "Groq API not available. Install: pip install groq"
 
     # Rate limit
     elapsed = time.time() - _last_call_time
@@ -145,21 +117,17 @@ def _call_groq(prompt: str, max_tokens: int = 500) -> str:
         )
         _last_call_time = time.time()
         text = resp.choices[0].message.content.strip()
-        text = _normalize_explanation_text(text)
         _set_cache(key, text)
         return text
     except Exception as e:
-        return _normalize_explanation_text(f"Groq API error: {str(e)}")
+        return f"Groq API error: {str(e)}"
 
 
 # ════════════════════════════════════════════════════
 # Public API — Called from Flask routes
 # ════════════════════════════════════════════════════
 
-
-def explain_fundamental(
-    metric_name: str, value, ticker: str = "", stock_name: str = ""
-) -> str:
+def explain_fundamental(metric_name: str, value, ticker: str = "", stock_name: str = "") -> str:
     """Explain a fundamental metric (PE ratio, ROE, etc.) with current value context."""
     stock_ctx = f" for {stock_name} ({ticker})" if ticker else ""
     prompt = (
@@ -172,13 +140,8 @@ def explain_fundamental(
     return _call_groq(prompt)
 
 
-def explain_greek(
-    greek_name: str,
-    value: float,
-    option_type: str = "call",
-    ticker: str = "",
-    stock_name: str = "",
-) -> str:
+def explain_greek(greek_name: str, value: float, option_type: str = "call",
+                  ticker: str = "", stock_name: str = "") -> str:
     """Explain an option Greek and what its current value means for trading."""
     stock_ctx = f" for {stock_name} ({ticker})" if ticker else ""
     prompt = (
@@ -197,61 +160,56 @@ INDICATOR_THRESHOLDS = {
         "buy_below": 30,
         "sell_above": 70,
         "desc": "RSI (Relative Strength Index) measures momentum on a 0-100 scale.",
-        "interpretation": "Below 30 = oversold (potential buy), Above 70 = overbought (potential sell)",
+        "interpretation": "Below 30 = oversold (potential buy), Above 70 = overbought (potential sell)"
     },
     "MACD": {
         "buy_condition": "MACD crosses above signal line",
         "sell_condition": "MACD crosses below signal line",
         "desc": "MACD shows momentum by comparing two moving averages.",
-        "interpretation": "Positive = bullish momentum, Negative = bearish momentum",
+        "interpretation": "Positive = bullish momentum, Negative = bearish momentum"
     },
     "ADX": {
         "strong_trend": 25,
         "very_strong": 50,
         "desc": "ADX measures trend strength (not direction) on a 0-100 scale.",
-        "interpretation": "Below 20 = weak/no trend, 20-25 = potential trend, Above 25 = strong trend",
+        "interpretation": "Below 20 = weak/no trend, 20-25 = potential trend, Above 25 = strong trend"
     },
     "Stochastic": {
         "buy_below": 20,
         "sell_above": 80,
         "desc": "Stochastic compares closing price to price range over a period.",
-        "interpretation": "Below 20 = oversold (potential buy), Above 80 = overbought (potential sell)",
+        "interpretation": "Below 20 = oversold (potential buy), Above 80 = overbought (potential sell)"
     },
     "Bollinger Bands": {
         "buy_condition": "Price touches lower band",
         "sell_condition": "Price touches upper band",
         "desc": "Bollinger Bands show volatility with 2 standard deviations from moving average.",
-        "interpretation": "Price at lower band = potential buy, Price at upper band = potential sell",
+        "interpretation": "Price at lower band = potential buy, Price at upper band = potential sell"
     },
     "ATR": {
         "desc": "ATR (Average True Range) measures volatility in absolute terms.",
-        "interpretation": "Higher ATR = more volatile, use for stop-loss sizing (typically 1.5-2x ATR)",
+        "interpretation": "Higher ATR = more volatile, use for stop-loss sizing (typically 1.5-2x ATR)"
     },
     "Volume Ratio": {
         "high_volume": 1.5,
         "low_volume": 0.5,
         "desc": "Volume Ratio compares current volume to average volume.",
-        "interpretation": "Above 1.5 = high interest (confirms trend), Below 0.5 = low interest",
+        "interpretation": "Above 1.5 = high interest (confirms trend), Below 0.5 = low interest"
     },
     "RVOL": {
         "high_volume": 1.5,
         "desc": "RVOL (Relative Volume) compares current volume to historical average.",
-        "interpretation": "Above 1.5 = unusual activity, important for breakout confirmation",
+        "interpretation": "Above 1.5 = unusual activity, important for breakout confirmation"
     },
     "OBV": {
         "desc": "OBV (On-Balance Volume) tracks cumulative volume flow.",
-        "interpretation": "Rising OBV with rising price = bullish confirmation, Divergence = warning",
-    },
+        "interpretation": "Rising OBV with rising price = bullish confirmation, Divergence = warning"
+    }
 }
 
 
-def explain_indicator(
-    indicator_name: str,
-    app_value,
-    actual_value=None,
-    ticker: str = "",
-    stock_name: str = "",
-) -> str:
+def explain_indicator(indicator_name: str, app_value, actual_value=None,
+                      ticker: str = "", stock_name: str = "") -> str:
     """Explain a technical indicator with buy/sell thresholds and current value context."""
     stock_ctx = f" for {stock_name} ({ticker})" if ticker else ""
     value_ctx = f"The current value is {app_value}."
@@ -272,14 +230,10 @@ def explain_indicator(
             if "sell_condition" in thresholds:
                 threshold_info += f"• SELL condition: {thresholds['sell_condition']}\n"
             if "strong_trend" in thresholds:
-                threshold_info += (
-                    f"• Strong trend: Above {thresholds['strong_trend']}\n"
-                )
+                threshold_info += f"• Strong trend: Above {thresholds['strong_trend']}\n"
             if "high_volume" in thresholds:
                 threshold_info += f"• High volume: Above {thresholds['high_volume']}\n"
-            threshold_info += (
-                f"\nInterpretation: {thresholds.get('interpretation', '')}"
-            )
+            threshold_info += f"\nInterpretation: {thresholds.get('interpretation', '')}"
             break
 
     prompt = (
@@ -295,13 +249,8 @@ def explain_indicator(
     return _call_groq(prompt, max_tokens=600)
 
 
-def get_stock_overview(
-    ticker: str,
-    stock_name: str,
-    fundamentals: dict = None,
-    current_price: float = 0,
-    prediction_signal: str = "",
-) -> str:
+def get_stock_overview(ticker: str, stock_name: str, fundamentals: dict = None,
+                       current_price: float = 0, prediction_signal: str = "") -> str:
     """
     Get a comprehensive stock overview including what the company does,
     recent sentiment, and investment thesis.
@@ -315,7 +264,7 @@ def get_stock_overview(
         if fundamentals.get("pe_ratio"):
             fund_items.append(f"P/E: {fundamentals['pe_ratio']:.1f}")
         if fundamentals.get("market_cap"):
-            mc = fundamentals["market_cap"]
+            mc = fundamentals['market_cap']
             mc_str = f"₹{mc/1e12:.2f}T" if mc > 1e12 else f"₹{mc/1e9:.2f}B"
             fund_items.append(f"Market Cap: {mc_str}")
         if fundamentals.get("revenue_growth"):
@@ -325,13 +274,9 @@ def get_stock_overview(
         if fundamentals.get("debt_to_equity"):
             fund_items.append(f"Debt/Equity: {fundamentals['debt_to_equity']:.1f}")
         if fundamentals.get("fifty_two_high") and fundamentals.get("fifty_two_low"):
-            fund_items.append(
-                f"52W Range: ₹{fundamentals['fifty_two_low']:.0f} - ₹{fundamentals['fifty_two_high']:.0f}"
-            )
+            fund_items.append(f"52W Range: ₹{fundamentals['fifty_two_low']:.0f} - ₹{fundamentals['fifty_two_high']:.0f}")
         if fundamentals.get("analyst_upside"):
-            fund_items.append(
-                f"Analyst Target Upside: {fundamentals['analyst_upside']:.1f}%"
-            )
+            fund_items.append(f"Analyst Target Upside: {fundamentals['analyst_upside']:.1f}%")
         if fund_items:
             fund_ctx = "Key Metrics: " + ", ".join(fund_items)
 
@@ -384,43 +329,31 @@ def get_groq_strategy(ticker: str, stock_name: str, prediction_data: dict) -> st
     pred_return = prediction_data.get("predicted_return", 0)
     signal = prediction_data.get("signal", "HOLD")
     confidence = prediction_data.get("confidence", 50)
-    ctx_parts.append(
-        f"ML Prediction: {signal} (predicted return: {pred_return:.3f}%, confidence: {confidence:.0f}%)"
-    )
+    ctx_parts.append(f"ML Prediction: {signal} (predicted return: {pred_return:.3f}%, confidence: {confidence:.0f}%)")
 
     model_preds = prediction_data.get("model_predictions", {})
     if model_preds:
-        ctx_parts.append(
-            "Individual model predictions: "
-            + ", ".join(f"{k}: {v:.3f}%" for k, v in model_preds.items())
-        )
+        ctx_parts.append("Individual model predictions: " + ", ".join(
+            f"{k}: {v:.3f}%" for k, v in model_preds.items()
+        ))
 
     fund = prediction_data.get("fundamentals", {})
     if fund:
         fund_items = []
-        if fund.get("pe_ratio"):
-            fund_items.append(f"P/E: {fund['pe_ratio']:.1f}")
-        if fund.get("pb_ratio"):
-            fund_items.append(f"P/B: {fund['pb_ratio']:.1f}")
-        if fund.get("roe"):
-            fund_items.append(f"ROE: {fund['roe']*100:.1f}%")
-        if fund.get("debt_to_equity"):
-            fund_items.append(f"D/E: {fund['debt_to_equity']:.1f}")
-        if fund.get("dividend_yield"):
-            fund_items.append(f"Div Yield: {fund['dividend_yield']*100:.2f}%")
-        if fund.get("revenue_growth"):
-            fund_items.append(f"Rev Growth: {fund['revenue_growth']*100:.1f}%")
-        if fund.get("beta"):
-            fund_items.append(f"Beta: {fund['beta']:.2f}")
+        if fund.get("pe_ratio"): fund_items.append(f"P/E: {fund['pe_ratio']:.1f}")
+        if fund.get("pb_ratio"): fund_items.append(f"P/B: {fund['pb_ratio']:.1f}")
+        if fund.get("roe"): fund_items.append(f"ROE: {fund['roe']*100:.1f}%")
+        if fund.get("debt_to_equity"): fund_items.append(f"D/E: {fund['debt_to_equity']:.1f}")
+        if fund.get("dividend_yield"): fund_items.append(f"Div Yield: {fund['dividend_yield']*100:.2f}%")
+        if fund.get("revenue_growth"): fund_items.append(f"Rev Growth: {fund['revenue_growth']*100:.1f}%")
+        if fund.get("beta"): fund_items.append(f"Beta: {fund['beta']:.2f}")
         if fund_items:
             ctx_parts.append("Fundamentals: " + ", ".join(fund_items))
 
     current_price = prediction_data.get("current_price", 0)
     target = prediction_data.get("target_price", 0)
     sl = prediction_data.get("stop_loss", 0)
-    ctx_parts.append(
-        f"Current price: ₹{current_price:.2f}, Target: ₹{target:.2f}, Stop Loss: ₹{sl:.2f}"
-    )
+    ctx_parts.append(f"Current price: ₹{current_price:.2f}, Target: ₹{target:.2f}, Stop Loss: ₹{sl:.2f}")
 
     atr = prediction_data.get("atr_pct", 0)
     vol_ratio = prediction_data.get("volume_ratio", 1)
@@ -440,9 +373,8 @@ def get_groq_strategy(ticker: str, stock_name: str, prediction_data: dict) -> st
     return _call_groq(prompt, max_tokens=400)
 
 
-def get_combined_strategy(
-    ticker: str, stock_name: str, prediction_data: dict, groq_strategy: str
-) -> str:
+def get_combined_strategy(ticker: str, stock_name: str,
+                          prediction_data: dict, groq_strategy: str) -> str:
     """
     Get a combined recommendation merging ML prediction + Groq analysis.
 
@@ -517,15 +449,11 @@ def get_groq_price_forecast(
         return {
             "ai_predicted_price": None,
             "outlook": "Unavailable",
-            "rationale": (
-                raw[:240] if isinstance(raw, str) else "AI forecast unavailable"
-            ),
+            "rationale": raw[:240] if isinstance(raw, str) else "AI forecast unavailable",
             "source": "fallback_non_json",
         }
 
-    ai_price = payload.get(
-        "ai_predicted_price", strategy_predicted_price or current_price
-    )
+    ai_price = payload.get("ai_predicted_price", strategy_predicted_price or current_price)
     try:
         ai_price = float(ai_price)
     except Exception:
