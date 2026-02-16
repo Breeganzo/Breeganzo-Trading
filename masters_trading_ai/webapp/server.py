@@ -328,10 +328,14 @@ def _log_prediction(ticker: str, pred: dict):
         else "DOWN" if strategy_price_at_open < open_price else "FLAT"
     )
     ai_direction = (
-        "UP"
-        if ai_last_prediction > current_price
-        else "DOWN" if ai_last_prediction < current_price else "FLAT"
-    ) if ai_last_prediction > 0 else "N/A"
+        (
+            "UP"
+            if ai_last_prediction > current_price
+            else "DOWN" if ai_last_prediction < current_price else "FLAT"
+        )
+        if ai_last_prediction > 0
+        else "N/A"
+    )
     strategy_predicted_at_open = _normalize_open_window_timestamp(
         premarket_row.get("strategy_predicted_at_open")
         or premarket_row.get("captured_at"),
@@ -1372,7 +1376,9 @@ def api_expected_vs_actual():
             or pred_price_at_prediction
         )
         open_price = _rescale_logged_price(open_price, actual_price)
-        strategy_price_at_open = _rescale_logged_price(strategy_price_at_open, actual_price)
+        strategy_price_at_open = _rescale_logged_price(
+            strategy_price_at_open, actual_price
+        )
         if ai_last_prediction > 0:
             ai_last_prediction = _rescale_logged_price(ai_last_prediction, actual_price)
         if (
@@ -1427,13 +1433,10 @@ def api_expected_vs_actual():
         strategy_direction = tracker_row.get(
             "strategy_direction_at_open"
         ) or _direction_from_prices(open_price, strategy_price_at_open)
-        ai_direction = (
-            tracker_row.get("ai_direction_last")
-            or (
-                _direction_from_prices(pred_price_at_prediction, ai_last_prediction)
-                if ai_last_prediction > 0
-                else "N/A"
-            )
+        ai_direction = tracker_row.get("ai_direction_last") or (
+            _direction_from_prices(pred_price_at_prediction, ai_last_prediction)
+            if ai_last_prediction > 0
+            else "N/A"
         )
         actual_dir = _direction_from_prices(open_price, actual_price)
         strategy_vs_actual = strategy_direction == actual_dir
@@ -2010,9 +2013,7 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
     out["date"] = snap_date
     out["captured_at"] = snap_captured
     out["captured_at_actual"] = snap_captured_actual or snap_captured
-    out["buffer_minutes"] = int(
-        out.get("buffer_minutes", PREMARKET_MAX_BUFFER_MINUTES)
-    )
+    out["buffer_minutes"] = int(out.get("buffer_minutes", PREMARKET_MAX_BUFFER_MINUTES))
 
     parsed_actual = _parse_iso_datetime(out["captured_at_actual"])
     if snapshot_type in {"", "market_open"}:
@@ -2023,9 +2024,10 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
                 if parsed_actual > open_end
                 else "market_open_live"
             )
-            out["capture_cutoff"] = out.get("capture_cutoff") or (
-                open_start - timedelta(minutes=out["buffer_minutes"])
-            ).isoformat()
+            out["capture_cutoff"] = (
+                out.get("capture_cutoff")
+                or (open_start - timedelta(minutes=out["buffer_minutes"])).isoformat()
+            )
         else:
             snapshot_type = "market_open"
     elif snapshot_type not in {
@@ -2069,12 +2071,10 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
         row["captured_at"] = row_captured
         row["captured_at_actual"] = row_captured_actual or out["captured_at_actual"]
         row["snapshot_type"] = row.get("snapshot_type") or out["snapshot_type"]
-        row["strategy_predicted_at_open"] = (
-            _normalize_open_window_timestamp(
-                row.get("strategy_predicted_at_open") or row_captured,
-                date_hint=snap_date,
-                default_offset_minutes=5,
-            )
+        row["strategy_predicted_at_open"] = _normalize_open_window_timestamp(
+            row.get("strategy_predicted_at_open") or row_captured,
+            date_hint=snap_date,
+            default_offset_minutes=5,
         )
         row["ai_predicted_at_open"] = _normalize_open_window_timestamp(
             row.get("ai_predicted_at_open") or row_captured,
@@ -2086,7 +2086,9 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
         except Exception:
             ai_px = 0.0
         row["strategy_source"] = row.get("strategy_source") or "ensemble_models"
-        row["ai_source"] = row.get("ai_source") or ("groq_cache" if ai_px > 0 else "none")
+        row["ai_source"] = row.get("ai_source") or (
+            "groq_cache" if ai_px > 0 else "none"
+        )
         if ai_px <= 0:
             row["ai_direction"] = "N/A"
         if row.get("strategy_vs_ai_direction") not in (True, False):
@@ -2335,7 +2337,9 @@ def _capture_premarket_snapshot_if_due(force: bool = False) -> dict:
         )
     )
     snapshot["snapshot_type"] = snapshot_type
-    snapshot["captured_at_actual"] = snapshot.get("captured_at_actual") or now.isoformat()
+    snapshot["captured_at_actual"] = (
+        snapshot.get("captured_at_actual") or now.isoformat()
+    )
     snapshot["captured_at"] = _normalize_open_window_timestamp(
         snapshot.get("captured_at") or snapshot["captured_at_actual"],
         date_hint=today,
@@ -2630,9 +2634,7 @@ def _build_daily_analysis() -> dict:
             allow_generate=False,
         )
         ai_price_at_open = float(
-            premarket_row.get("ai_predicted_price")
-            or ai_meta_open.get("price")
-            or 0
+            premarket_row.get("ai_predicted_price") or ai_meta_open.get("price") or 0
         )
         ai_source_open = str(
             premarket_row.get("ai_source") or ai_meta_open.get("source", "none")
@@ -2679,9 +2681,8 @@ def _build_daily_analysis() -> dict:
             strategy_predicted_price = float(strategy_price_at_open or 0)
             ai_predicted_price = float(ai_price_at_open or 0)
             strategy_predicted_at = strategy_predicted_at_open
-            ai_predicted_at = (
-                ai_meta_open.get("generated_at_iso")
-                or (ai_predicted_at_open if ai_predicted_price > 0 else None)
+            ai_predicted_at = ai_meta_open.get("generated_at_iso") or (
+                ai_predicted_at_open if ai_predicted_price > 0 else None
             )
             ai_source = ai_source_open
             prediction_context = "market_open"
@@ -2754,7 +2755,9 @@ def _build_daily_analysis() -> dict:
                     round(ai_predicted_price, 2) if ai_predicted_price > 0 else None
                 ),
                 "strategy_price_at_open": round(strategy_price_at_open, 2),
-                "ai_price_at_open": round(ai_price_at_open, 2) if ai_price_at_open > 0 else None,
+                "ai_price_at_open": (
+                    round(ai_price_at_open, 2) if ai_price_at_open > 0 else None
+                ),
                 "current_price": round(current_price, 2),
                 "prev_close": round(prev_close, 2),
                 "display_price_label": price_label,
@@ -2949,9 +2952,7 @@ def api_price_tracker(ticker: str):
     ai_predicted_price = float(ai_meta_open.get("price") or 0)
     ai_available = ai_predicted_price > 0
     ai_open_price = float(
-        premarket_row.get("ai_predicted_price")
-        or ai_predicted_price
-        or 0
+        premarket_row.get("ai_predicted_price") or ai_predicted_price or 0
     )
     signal = pred.get("signal", "")
     confidence = pred.get("confidence", 0)
@@ -4086,7 +4087,36 @@ def api_risk_analytics():
         )
 
         if data is None or data.empty:
-            return jsonify({"error": "Unable to fetch historical data"}), 500
+            return jsonify(
+                _sanitize(
+                    {
+                        "portfolio_tickers": portfolio_tickers,
+                        "portfolio_holdings": [
+                            r
+                            for r in portfolio_rows
+                            if r.get("ticker") in portfolio_tickers
+                        ],
+                        "initial_capital": round(
+                            float(sum(custom_weights.values()) or 100000.0), 2
+                        ),
+                        "ignored_tickers": ignored,
+                        "n_stocks": len(portfolio_tickers),
+                        "period": "0 days",
+                        "warning": "Unable to fetch historical data",
+                        "risk_metrics": {},
+                        "correlation_matrix": {},
+                        "sector_exposure": {},
+                        "statistical_tests": {},
+                        "monte_carlo": {
+                            "error": "Insufficient data for analytics",
+                            "initial_capital": round(
+                                float(sum(custom_weights.values()) or 100000.0), 2
+                            ),
+                        },
+                        "equity_curve": [],
+                    }
+                )
+            )
 
         # Extract closing prices
         if isinstance(data.columns, pd.MultiIndex):
@@ -4139,7 +4169,50 @@ def api_risk_analytics():
             c for c in returns.columns if c != "^NSEI" and c in surviving_tickers
         ]
         if not portfolio_cols:
-            return jsonify({"error": "Insufficient data for analytics"}), 500
+            return jsonify(
+                _sanitize(
+                    {
+                        "portfolio_tickers": surviving_tickers,
+                        "portfolio_holdings": [
+                            r
+                            for r in portfolio_rows
+                            if r.get("ticker") in surviving_tickers
+                        ],
+                        "initial_capital": round(
+                            float(
+                                sum(
+                                    custom_weights.get(t, 0.0)
+                                    for t in surviving_tickers
+                                )
+                                or 100000.0
+                            ),
+                            2,
+                        ),
+                        "ignored_tickers": ignored,
+                        "n_stocks": len(surviving_tickers),
+                        "period": f"{actual_period_days} days",
+                        "warning": "Insufficient data for analytics",
+                        "risk_metrics": {},
+                        "correlation_matrix": corr_data,
+                        "sector_exposure": sector_exposure,
+                        "statistical_tests": {},
+                        "monte_carlo": {
+                            "error": "Insufficient data for analytics",
+                            "initial_capital": round(
+                                float(
+                                    sum(
+                                        custom_weights.get(t, 0.0)
+                                        for t in surviving_tickers
+                                    )
+                                    or 100000.0
+                                ),
+                                2,
+                            ),
+                        },
+                        "equity_curve": [],
+                    }
+                )
+            )
 
         if custom_weights:
             total_cost = sum(custom_weights.get(t, 0.0) for t in portfolio_cols)
