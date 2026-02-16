@@ -9,6 +9,7 @@ let lineSeries = null;
 let volumeSeries = null;
 let predictionData = null;
 let autoRefreshInterval = null;
+let latestLivePrice = 0;
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -18,8 +19,10 @@ document.addEventListener('DOMContentLoaded', () => {
     loadLivePrice();
     loadPrediction();
     loadPriceTracker();
+    loadGroqForecast();
     loadFeatureImportance();
     loadNews();
+    refreshPortfolioStatus();
 
     // Auto-refresh live price every 5 seconds
     autoRefreshInterval = setInterval(() => {
@@ -199,6 +202,7 @@ async function loadLivePrice() {
         const price = data[TICKER];
 
         if (!price) return;
+        latestLivePrice = Number(price.price || 0);
 
         // Update header
         document.getElementById('live-price').textContent = `₹${formatN(price.price)}`;
@@ -849,17 +853,21 @@ async function loadPriceTracker() {
         if (stock.error) return;
 
         const openPrice = stock.open_price;
-        const predPrice = stock.predicted_price;
+        const predPrice = stock.strategy_predicted_price || stock.predicted_price;
         const currPrice = stock.current_price;
+        const aiPrice = stock.ai_predicted_price || predPrice;
 
         // Update tracker cards
         document.getElementById('tracker-open').textContent = `₹${formatN(openPrice)}`;
         document.getElementById('tracker-predicted').textContent = `₹${formatN(predPrice)}`;
         document.getElementById('tracker-current').textContent = `₹${formatN(currPrice)}`;
+        const aiEl = document.getElementById('tracker-ai');
+        if (aiEl) aiEl.textContent = `₹${formatN(aiPrice)}`;
 
         // Percentage changes from open
         const predPct = stock.open_to_predicted_pct;
         const currPct = stock.open_to_current_pct;
+        const aiPct = stock.open_to_ai_predicted_pct ?? ((aiPrice - openPrice) / (openPrice || 1) * 100);
 
         const predEl = document.getElementById('tracker-predicted-pct');
         predEl.textContent = `${predPct >= 0 ? '+' : ''}${predPct}% from open`;
@@ -868,6 +876,12 @@ async function loadPriceTracker() {
         const currEl = document.getElementById('tracker-current-pct');
         currEl.textContent = `${currPct >= 0 ? '+' : ''}${currPct}% from open`;
         currEl.className = `tracker-change ${currPct >= 0 ? 'up-color' : 'down-color'}`;
+
+        const aiPctEl = document.getElementById('tracker-ai-pct');
+        if (aiPctEl) {
+            aiPctEl.textContent = `${aiPct >= 0 ? '+' : ''}${Number(aiPct).toFixed(3)}% from open`;
+            aiPctEl.className = `tracker-change ${aiPct >= 0 ? 'up-color' : 'down-color'}`;
+        }
 
         // Progress bar: how far current is toward predicted
         const range = Math.abs(predPrice - openPrice);
@@ -901,6 +915,86 @@ async function loadPriceTracker() {
         }
     } catch (e) {
         console.error('Price tracker failed:', e);
+    }
+}
+
+async function loadGroqForecast() {
+    const container = document.getElementById('groq-forecast-content');
+    if (!container) return;
+    try {
+        const res = await fetch(`/api/groq-price-forecast/${encodeURIComponent(TICKER)}`);
+        const data = await res.json();
+        if (!res.ok || data.error) {
+            if (res.status === 503) {
+                setTimeout(loadGroqForecast, 8000);
+            }
+            container.innerHTML = `<p class="muted-text">Groq AI forecast unavailable: ${data.error || res.status}</p>`;
+            return;
+        }
+        const aiPrice = Number(data.ai_predicted_price || 0);
+        const aiPct = Number(data.open_to_ai_predicted_pct || 0);
+        container.innerHTML = `
+            <div class="news-card">
+                <div class="news-body">
+                    <p><strong>Groq AI Predicted Price:</strong> ₹${formatN(aiPrice)}
+                    <span class="${aiPct >= 0 ? 'up-color' : 'down-color'}">(${aiPct >= 0 ? '+' : ''}${aiPct.toFixed(3)}% vs open)</span></p>
+                    <p><strong>Outlook:</strong> ${data.outlook || 'Neutral'}</p>
+                    <p>${formatAIText(data.rationale || '').replace(/^<p>|<\/p>$/g, '')}</p>
+                    <p class="muted-text">Generated: ${data.generated_at || 'now'}</p>
+                </div>
+            </div>`;
+        const aiTracker = document.getElementById('tracker-ai');
+        if (aiTracker && aiPrice > 0) aiTracker.textContent = `₹${formatN(aiPrice)}`;
+    } catch (e) {
+        container.innerHTML = `<p class="muted-text">Groq AI forecast failed: ${e.message}</p>`;
+    }
+}
+
+async function addToPortfolio() {
+    const qtyEl = document.getElementById('portfolio-qty');
+    const statusEl = document.getElementById('portfolio-add-status');
+    const qty = Number(qtyEl?.value || 0);
+    const entryPrice = Number(latestLivePrice || predictionData?.current_price || 0);
+    if (!qty || qty <= 0) {
+        if (statusEl) statusEl.textContent = 'Enter valid quantity (>0)';
+        return;
+    }
+    if (!entryPrice || entryPrice <= 0) {
+        if (statusEl) statusEl.textContent = 'Live price not available yet';
+        return;
+    }
+    try {
+        const res = await fetch('/api/portfolio', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ticker: TICKER, quantity: qty, entry_price: entryPrice }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+            if (statusEl) statusEl.textContent = `Portfolio update failed: ${data.error || res.status}`;
+            return;
+        }
+        if (statusEl) statusEl.textContent = `Added ${qty} @ ₹${formatN(entryPrice)} to portfolio`;
+        refreshPortfolioStatus();
+    } catch (e) {
+        if (statusEl) statusEl.textContent = `Portfolio update failed: ${e.message}`;
+    }
+}
+
+async function refreshPortfolioStatus() {
+    const statusEl = document.getElementById('portfolio-add-status');
+    if (!statusEl) return;
+    try {
+        const res = await fetch(`/api/portfolio?ticker=${encodeURIComponent(TICKER)}`);
+        const data = await res.json();
+        const row = (data.holdings || [])[0];
+        if (!row) {
+            statusEl.textContent = 'Not in portfolio yet';
+            return;
+        }
+        statusEl.textContent = `Holding: ${row.quantity} shares @ avg ₹${formatN(row.entry_price)}`;
+    } catch (e) {
+        statusEl.textContent = 'Portfolio status unavailable';
     }
 }
 

@@ -12,6 +12,7 @@ import os
 import json
 import time
 import hashlib
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -391,3 +392,74 @@ def get_combined_strategy(ticker: str, stock_name: str,
         f"End with a clear summary: Lean BUY, Lean SELL, or WAIT."
     )
     return _call_groq(prompt, max_tokens=350)
+
+
+def explain_risk_term(term: str, context: str = "") -> str:
+    """Explain a portfolio/risk analytics term in practical language."""
+    prompt = (
+        f"Explain the risk analytics term '{term}' for an Indian equity investor. "
+        f"Give: 1) simple definition, 2) how to read high/low values, "
+        f"3) one practical action point. "
+        f"Keep it concise but useful. Context: {context or 'Portfolio risk dashboard'}."
+    )
+    return _call_groq(prompt, max_tokens=350)
+
+
+def get_groq_price_forecast(
+    ticker: str,
+    stock_name: str,
+    open_price: float,
+    strategy_predicted_price: float,
+    current_price: float,
+    sentiment_text: str = "",
+) -> dict:
+    """
+    Ask Groq for a JSON-only AI price forecast from current context.
+    Returns dict with keys: ai_predicted_price, outlook, rationale.
+    """
+    prompt = (
+        f"You are analyzing {stock_name} ({ticker}) on NSE. "
+        f"Open price: {open_price:.2f}. "
+        f"Strategy predicted price (before market): {strategy_predicted_price:.2f}. "
+        f"Current price: {current_price:.2f}. "
+        f"News/sentiment context: {sentiment_text[:1200]}. "
+        f"Return ONLY valid JSON with keys: "
+        f"ai_predicted_price (number), outlook (Bullish/Bearish/Neutral), rationale (string <= 90 words). "
+        f"Keep ai_predicted_price realistic, within +/-8% of current price."
+    )
+    raw = _call_groq(prompt, max_tokens=350)
+
+    payload = None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        m = re.search(r"\{[\s\S]*\}", raw)
+        if m:
+            try:
+                payload = json.loads(m.group(0))
+            except Exception:
+                payload = None
+
+    if not isinstance(payload, dict):
+        return {
+            "ai_predicted_price": round(strategy_predicted_price, 2) if strategy_predicted_price else round(current_price, 2),
+            "outlook": "Neutral",
+            "rationale": raw[:240] if isinstance(raw, str) else "AI forecast unavailable",
+        }
+
+    ai_price = payload.get("ai_predicted_price", strategy_predicted_price or current_price)
+    try:
+        ai_price = float(ai_price)
+    except Exception:
+        ai_price = float(strategy_predicted_price or current_price or 0.0)
+
+    base = current_price if current_price > 0 else strategy_predicted_price
+    if base > 0:
+        lo, hi = base * 0.92, base * 1.08
+        ai_price = min(max(ai_price, lo), hi)
+
+    return {
+        "ai_predicted_price": round(ai_price, 2),
+        "outlook": str(payload.get("outlook", "Neutral"))[:20],
+        "rationale": str(payload.get("rationale", ""))[:600],
+    }

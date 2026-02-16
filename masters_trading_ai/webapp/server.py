@@ -53,6 +53,7 @@ from webapp.groq_explainer import (
     explain_fundamental, explain_greek, explain_indicator,
     get_groq_strategy, get_combined_strategy,
     get_stock_overview, get_news_sentiment,
+    explain_risk_term, get_groq_price_forecast,
 )
 from webapp.prediction_tracker import PredictionTracker
 
@@ -114,10 +115,12 @@ IST = ZoneInfo("Asia/Kolkata")
 CONFIG_DIR = PROJECT_ROOT / "config"
 CACHE_DIR = PROJECT_ROOT / "cache"
 PREDICTION_LOG_DIR = CACHE_DIR / "prediction_log"
+PORTFOLIO_FILE = CACHE_DIR / "portfolio.json"
 PREDICTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # Thread-safe lock for file I/O
 _log_lock = threading.Lock()
+_portfolio_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Global state (loaded once at startup)
@@ -132,6 +135,9 @@ load_error = ""
 models_loading = False
 models_load_started_at: float | None = None
 models_load_completed_at: float | None = None
+_groq_forecast_cache: dict[str, dict] = {}
+_groq_forecast_cache_time: dict[str, float] = {}
+GROQ_FORECAST_TTL = 900  # 15m
 
 
 def _clean_name(ticker: str) -> str:
@@ -230,6 +236,27 @@ def _log_prediction(ticker: str, pred: dict):
         PredictionTracker.record_prediction(ticker, pred)
     except Exception as e:
         log.warning(f"Prediction tracking failed for {ticker}: {e}")
+
+
+def _read_portfolio() -> list[dict]:
+    """Read user portfolio entries from cache file."""
+    with _portfolio_lock:
+        if not PORTFOLIO_FILE.exists():
+            return []
+        try:
+            data = json.loads(PORTFOLIO_FILE.read_text())
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+        return []
+
+
+def _write_portfolio(entries: list[dict]) -> None:
+    """Persist user portfolio entries to cache file."""
+    with _portfolio_lock:
+        PORTFOLIO_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PORTFOLIO_FILE.write_text(json.dumps(entries, indent=2))
 
 
 def _get_live_prices_batch(tickers: list[str]) -> dict:
@@ -1075,12 +1102,15 @@ def api_price_tracker(ticker: str):
     current_price = curr.get("price", 0)
     predicted_return = _normalize_predicted_return_pct(pred.get("predicted_return", 0))
     strategy_predicted_price = round(open_price * (1 + predicted_return / 100.0), 2) if open_price > 0 else pred.get("predicted_price", 0)
-    ai_predicted_price = strategy_predicted_price
+    cached_forecast = _groq_forecast_cache.get(ticker, {})
+    ai_predicted_price = float(cached_forecast.get("ai_predicted_price", strategy_predicted_price) or strategy_predicted_price)
     signal = pred.get("signal", "")
     confidence = pred.get("confidence", 0)
 
     open_to_current_pct = ((current_price - open_price) / open_price * 100) if open_price > 0 else 0
     open_to_predicted_pct = ((strategy_predicted_price - open_price) / open_price * 100) if open_price > 0 and strategy_predicted_price > 0 else 0
+
+    open_to_ai_predicted_pct = ((ai_predicted_price - open_price) / open_price * 100) if open_price > 0 and ai_predicted_price > 0 else 0
 
     return jsonify({
         "ticker": ticker,
@@ -1093,6 +1123,7 @@ def api_price_tracker(ticker: str):
         "prev_close": round(prev_close, 2),
         "open_to_current_pct": round(open_to_current_pct, 3),
         "open_to_predicted_pct": round(open_to_predicted_pct, 3),
+        "open_to_ai_predicted_pct": round(open_to_ai_predicted_pct, 3),
         "predicted_return": round(predicted_return, 3),
         "signal": signal,
         "confidence": round(confidence, 1),
@@ -1114,6 +1145,136 @@ def api_news(ticker: str):
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/groq-price-forecast/<ticker>")
+def api_groq_price_forecast(ticker: str):
+    """Return Groq-based AI price forecast using strategy + current context."""
+    if not models_loaded or predictor is None:
+        return jsonify({"error": "Models still loading..."}), 503
+
+    now = time.time()
+    if ticker in _groq_forecast_cache and (now - _groq_forecast_cache_time.get(ticker, 0)) < GROQ_FORECAST_TTL:
+        return jsonify(_groq_forecast_cache[ticker])
+
+    try:
+        tracker = api_price_tracker(ticker)
+        if isinstance(tracker, tuple):
+            tracker_payload = tracker[0].get_json()
+            status = tracker[1]
+            if status != 200:
+                return jsonify(tracker_payload), status
+        else:
+            tracker_payload = tracker.get_json()
+
+        if tracker_payload.get("error"):
+            return jsonify(tracker_payload), 404
+
+        stock_name = ticker_names.get(ticker, _clean_name(ticker))
+        sentiment = get_news_sentiment(ticker, stock_name)
+        forecast = get_groq_price_forecast(
+            ticker=ticker,
+            stock_name=stock_name,
+            open_price=float(tracker_payload.get("open_price") or 0),
+            strategy_predicted_price=float(tracker_payload.get("strategy_predicted_price") or tracker_payload.get("predicted_price") or 0),
+            current_price=float(tracker_payload.get("current_price") or 0),
+            sentiment_text=sentiment or "",
+        )
+        ai_price = float(forecast.get("ai_predicted_price") or tracker_payload.get("strategy_predicted_price") or 0)
+        open_price = float(tracker_payload.get("open_price") or 0)
+        open_to_ai_pct = ((ai_price - open_price) / open_price * 100) if open_price > 0 else 0.0
+
+        payload = {
+            "ticker": ticker,
+            "name": stock_name,
+            "strategy_predicted_price": tracker_payload.get("strategy_predicted_price"),
+            "current_price": tracker_payload.get("current_price"),
+            "ai_predicted_price": round(ai_price, 2),
+            "open_price": tracker_payload.get("open_price"),
+            "open_to_ai_predicted_pct": round(open_to_ai_pct, 3),
+            "outlook": forecast.get("outlook", "Neutral"),
+            "rationale": forecast.get("rationale", ""),
+            "news_sentiment": sentiment,
+            "generated_at": datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST"),
+        }
+        _groq_forecast_cache[ticker] = payload
+        _groq_forecast_cache_time[ticker] = now
+        return jsonify(payload)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/explain-risk-term")
+def api_explain_risk_term():
+    """Get Groq explanation for a risk metric/term."""
+    term = request.args.get("term", "").strip()
+    context = request.args.get("context", "").strip()
+    if not term:
+        return jsonify({"error": "term is required"}), 400
+    try:
+        explanation = explain_risk_term(term, context)
+        return jsonify({"term": term, "explanation": explanation})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/portfolio", methods=["GET", "POST", "DELETE"])
+def api_portfolio():
+    """Simple persistent portfolio: add ticker/qty/price and list holdings."""
+    if request.method == "GET":
+        entries = _read_portfolio()
+        ticker = request.args.get("ticker", "").strip()
+        if ticker:
+            entries = [e for e in entries if e.get("ticker") == ticker]
+        return jsonify({"holdings": entries, "count": len(entries)})
+
+    if request.method == "DELETE":
+        ticker = request.args.get("ticker", "").strip()
+        if not ticker:
+            _write_portfolio([])
+            return jsonify({"ok": True, "holdings": [], "count": 0})
+        entries = [e for e in _read_portfolio() if e.get("ticker") != ticker]
+        _write_portfolio(entries)
+        return jsonify({"ok": True, "holdings": entries, "count": len(entries)})
+
+    payload = request.get_json(silent=True) or {}
+    ticker = str(payload.get("ticker", "")).strip().upper()
+    qty = payload.get("quantity")
+    entry_price = payload.get("entry_price")
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        qty = float(qty)
+        entry_price = float(entry_price)
+    except (TypeError, ValueError):
+        return jsonify({"error": "quantity and entry_price must be numeric"}), 400
+    if qty <= 0 or entry_price <= 0:
+        return jsonify({"error": "quantity and entry_price must be > 0"}), 400
+
+    entries = _read_portfolio()
+    merged = False
+    for row in entries:
+        if row.get("ticker") == ticker:
+            old_qty = float(row.get("quantity", 0))
+            old_price = float(row.get("entry_price", 0))
+            total_qty = old_qty + qty
+            row["entry_price"] = round(((old_qty * old_price) + (qty * entry_price)) / max(total_qty, 1e-9), 2)
+            row["quantity"] = round(total_qty, 4)
+            row["name"] = ticker_names.get(ticker, _clean_name(ticker))
+            row["updated_at"] = datetime.now(IST).isoformat()
+            merged = True
+            break
+    if not merged:
+        entries.append({
+            "ticker": ticker,
+            "name": ticker_names.get(ticker, _clean_name(ticker)),
+            "quantity": round(qty, 4),
+            "entry_price": round(entry_price, 2),
+            "created_at": datetime.now(IST).isoformat(),
+            "updated_at": datetime.now(IST).isoformat(),
+        })
+    _write_portfolio(entries)
+    return jsonify({"ok": True, "holdings": entries, "count": len(entries)})
 
 
 @app.route("/api/feature-importance/<ticker>")
@@ -1243,19 +1404,34 @@ def api_risk_analytics():
     )
 
     try:
+        # Use explicit portfolio if user has added holdings, else fallback to model picks
+        portfolio_rows = _read_portfolio()
+
+        custom_weights = {}
+        portfolio_tickers = []
+        if portfolio_rows:
+            for row in portfolio_rows:
+                t = row.get("ticker")
+                q = float(row.get("quantity", 0) or 0)
+                p = float(row.get("entry_price", 0) or 0)
+                if t and q > 0 and p > 0:
+                    portfolio_tickers.append(t)
+                    custom_weights[t] = custom_weights.get(t, 0.0) + (q * p)
+
         # Use top picks or daily analysis stocks for portfolio analytics
         with _daily_analysis_lock:
             stocks = _daily_analysis_cache.get("all_stocks", [])
 
-        if not stocks:
+        if not stocks and not portfolio_tickers:
             return jsonify({"error": "Daily analysis not ready yet"}), 202
 
-        # Get buy-signal stocks as the "portfolio" — use top composite-scored stocks
-        portfolio_tickers = [s["ticker"] for s in stocks
-                             if s.get("signal") in ("BUY", "STRONG_BUY")][:20]
-        if len(portfolio_tickers) < 5:
-            # Fall back to top 10 by composite score
-            portfolio_tickers = [s["ticker"] for s in stocks[:10]]
+        if not portfolio_tickers:
+            # Get buy-signal stocks as the "portfolio" — use top composite-scored stocks
+            portfolio_tickers = [s["ticker"] for s in stocks
+                                 if s.get("signal") in ("BUY", "STRONG_BUY")][:20]
+            if len(portfolio_tickers) < 5:
+                # Fall back to top 10 by composite score
+                portfolio_tickers = [s["ticker"] for s in stocks[:10]]
 
         # Download 6 months of history for robust risk calcs
         ticker_str = " ".join(portfolio_tickers + ["^NSEI"])
@@ -1310,12 +1486,23 @@ def api_risk_analytics():
                     "weight_pct": round(len(overlap) / len(portfolio_tickers) * 100, 1),
                 }
 
-        # --- Portfolio-level returns (equal-weighted) ---
+        # --- Portfolio-level returns (weighted by user holdings if available) ---
         portfolio_cols = [c for c in returns.columns if c != "^NSEI" and c in surviving_tickers]
         if not portfolio_cols:
             return jsonify({"error": "Insufficient data for analytics"}), 500
 
-        port_returns = returns[portfolio_cols].mean(axis=1)
+        if custom_weights:
+            total_cost = sum(custom_weights.get(t, 0.0) for t in portfolio_cols)
+            if total_cost > 0:
+                normalized = {t: custom_weights.get(t, 0.0) / total_cost for t in portfolio_cols}
+            else:
+                normalized = {t: 1.0 / len(portfolio_cols) for t in portfolio_cols}
+            weighted = pd.Series(0.0, index=returns.index)
+            for t in portfolio_cols:
+                weighted = weighted + returns[t] * normalized.get(t, 0.0)
+            port_returns = weighted
+        else:
+            port_returns = returns[portfolio_cols].mean(axis=1)
         port_equity = (1 + port_returns).cumprod() * 100000
 
         benchmark_returns = returns["^NSEI"] if "^NSEI" in returns.columns else None
@@ -1367,6 +1554,7 @@ def api_risk_analytics():
 
         return jsonify(_sanitize({
             "portfolio_tickers": surviving_tickers,
+            "portfolio_holdings": [r for r in portfolio_rows if r.get("ticker") in surviving_tickers],
             "n_stocks": len(surviving_tickers),
             "period": f"{actual_period_days} days",
             "risk_metrics": risk_metrics,

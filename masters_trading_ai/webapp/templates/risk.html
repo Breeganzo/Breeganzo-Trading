@@ -43,6 +43,7 @@
         <!-- Row 1: Key Risk Metrics -->
         <section class="risk-section">
             <h2 class="section-title">Key Risk Metrics</h2>
+            <p class="section-desc">Hover any metric card to get Groq explanation. Long explanations are scrollable.</p>
             <div class="risk-metrics-grid" id="risk-metrics-grid"></div>
         </section>
 
@@ -90,6 +91,11 @@
             <h2 class="section-title">Portfolio Holdings</h2>
             <div id="portfolio-holdings"></div>
         </section>
+    </div>
+
+    <div id="risk-tooltip" class="risk-tooltip hidden">
+        <div class="risk-tooltip-title" id="risk-tooltip-title">Loading...</div>
+        <div class="risk-tooltip-body" id="risk-tooltip-body">Loading explanation...</div>
     </div>
 
     <script src="/static/js/risk.js"></script>

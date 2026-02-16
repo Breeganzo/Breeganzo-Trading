@@ -7,6 +7,7 @@ let allStockData = {};
 let dailyAnalysisData = null;
 let currentSector = 'all';
 let sectorsData = {};
+let sectorTickerOrder = {};
 let autoRefreshTimer = null;
 let topPickFilter = 'top_buy';
 let groupedTopPicks = { top_buy: [], top_sell: [], top_hold: [] };
@@ -166,6 +167,15 @@ async function loadSectors() {
     try {
         const res = await fetch('/api/sectors');
         sectorsData = await res.json();
+        sectorTickerOrder = {};
+        for (const [sector, payload] of Object.entries(sectorsData || {})) {
+            sectorTickerOrder[sector] = (payload.tickers || []).map(t => t.symbol);
+        }
+        const allOrdered = [];
+        for (const sec of ['large_cap', 'banking', 'mid_cap', 'high_volatility', 'commodities']) {
+            if (sectorTickerOrder[sec]) allOrdered.push(...sectorTickerOrder[sec]);
+        }
+        sectorTickerOrder.all = [...new Set(allOrdered)];
     } catch (e) {
         console.error('Sectors load failed:', e);
     }
@@ -253,11 +263,14 @@ function renderStockGrid(sector) {
 
     let tickers;
     if (sector === 'all') {
-        tickers = Object.keys(allStockData).filter(t => !t.startsWith('^') && t !== 'USDINR=X' && t !== 'GC=F' && t !== 'CL=F');
+        tickers = (sectorTickerOrder.all || []).filter(t => allStockData[t]);
+        if (!tickers.length) {
+            tickers = Object.keys(allStockData).filter(t => !t.startsWith('^') && t !== 'USDINR=X' && t !== 'GC=F' && t !== 'CL=F').sort();
+        }
     } else if (sectorsData[sector]) {
-        tickers = sectorsData[sector].tickers.map(t => t.symbol);
+        tickers = (sectorTickerOrder[sector] || sectorsData[sector].tickers.map(t => t.symbol)).filter(t => allStockData[t]);
     } else {
-        tickers = Object.keys(allStockData);
+        tickers = Object.keys(allStockData).sort();
     }
 
     if (searchTerm) {
@@ -266,12 +279,6 @@ function renderStockGrid(sector) {
             return t.toLowerCase().includes(searchTerm) || name.toLowerCase().includes(searchTerm);
         });
     }
-
-    tickers.sort((a, b) => {
-        const aChg = Math.abs(allStockData[a]?.change_pct || 0);
-        const bChg = Math.abs(allStockData[b]?.change_pct || 0);
-        return bChg - aChg;
-    });
 
     let html = '';
     for (const ticker of tickers) {
@@ -516,9 +523,8 @@ function setTopPickFilter(filterKey) {
 }
 
 function updateTopPickFilterButtons() {
-    document.querySelectorAll('.pick-filter-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.pickFilter === topPickFilter);
-    });
+    const filterEl = document.getElementById('top-picks-filter');
+    if (filterEl) filterEl.value = topPickFilter;
 }
 
 function renderTopPicks() {

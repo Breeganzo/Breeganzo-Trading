@@ -90,9 +90,12 @@
             <h2 class="section-title">🎯 AI Top Picks</h2>
             <p class="section-subtitle">ML model predictions ranked by composite score</p>
             <div class="top-picks-controls">
-                <button class="pick-filter-btn active" data-pick-filter="top_buy" onclick="setTopPickFilter('top_buy')">Top 10 BUY</button>
-                <button class="pick-filter-btn" data-pick-filter="top_sell" onclick="setTopPickFilter('top_sell')">Top 10 SELL</button>
-                <button class="pick-filter-btn" data-pick-filter="top_hold" onclick="setTopPickFilter('top_hold')">Top 10 HOLD</button>
+                <label for="top-picks-filter" class="pick-filter-label">Show:</label>
+                <select id="top-picks-filter" class="pick-filter-select" onchange="setTopPickFilter(this.value)">
+                    <option value="top_buy">Top 10 BUY</option>
+                    <option value="top_sell">Top 10 SELL</option>
+                    <option value="top_hold">Top 10 HOLD</option>
+                </select>
             </div>
             <div class="picks-grid" id="picks-grid">
                 <div class="loading-spinner"><div class="spinner"></div><p>Generating predictions...</p></div>

@@ -844,6 +844,22 @@ a:hover { text-decoration: underline; }
     gap: 8px;
     margin-bottom: 14px;
     flex-wrap: wrap;
+    align-items: center;
+}
+
+.pick-filter-label {
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+.pick-filter-select {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 13px;
+    min-width: 160px;
 }
 
 .pick-filter-btn {
@@ -1477,6 +1493,38 @@ a:hover { text-decoration: underline; }
     font-weight: 700;
 }
 
+.portfolio-add-inline {
+    margin-top: 8px;
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+.portfolio-qty-input {
+    width: 92px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    border-radius: 8px;
+    padding: 6px 8px;
+}
+
+.portfolio-add-btn {
+    border: 1px solid var(--blue);
+    background: var(--blue-bg);
+    color: var(--blue);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.portfolio-add-status {
+    margin-top: 6px;
+    font-size: 12px;
+    text-align: right;
+}
+
 /* Progress bar */
 .price-progress-bar {
     margin-top: 8px;
@@ -1925,6 +1973,10 @@ a:hover { text-decoration: underline; }
     border-color: var(--blue);
 }
 
+.risk-term {
+    cursor: help;
+}
+
 .rmc-icon {
     font-size: 20px;
     margin-bottom: 6px;
@@ -2226,6 +2278,33 @@ a:hover { text-decoration: underline; }
     border-color: var(--blue);
     background: var(--blue-bg);
     color: var(--blue);
+}
+
+.risk-tooltip {
+    position: absolute;
+    z-index: 300;
+    width: min(360px, 92vw);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    padding: 10px 12px;
+}
+
+.risk-tooltip-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--blue);
+    margin-bottom: 6px;
+}
+
+.risk-tooltip-body {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.55;
+    max-height: 220px;
+    overflow-y: auto;
+    white-space: pre-wrap;
 }
 
 /* ── Risk Page Responsive ──────────────────────── */

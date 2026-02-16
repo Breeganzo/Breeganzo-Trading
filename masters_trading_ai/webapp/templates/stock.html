@@ -38,6 +38,11 @@
         <div class="stock-header-right">
             <div class="stock-price-big" id="live-price">---</div>
             <div class="stock-change-big" id="live-change">---</div>
+            <div class="portfolio-add-inline">
+                <input id="portfolio-qty" type="number" min="1" step="1" value="1" class="portfolio-qty-input" />
+                <button class="portfolio-add-btn" onclick="addToPortfolio()">Add to Portfolio</button>
+            </div>
+            <div class="portfolio-add-status muted-text" id="portfolio-add-status"></div>
         </div>
     </div>
 
@@ -52,7 +57,7 @@
             </div>
             <div class="price-tracker-arrow">→</div>
             <div class="price-tracker-card predicted">
-                <div class="tracker-label">AI Predicted</div>
+                <div class="tracker-label">Strategy Predicted</div>
                 <div class="tracker-price" id="tracker-predicted">---</div>
                 <div class="tracker-change" id="tracker-predicted-pct">---</div>
             </div>
@@ -61,6 +66,12 @@
                 <div class="tracker-label">Current Price</div>
                 <div class="tracker-price" id="tracker-current">---</div>
                 <div class="tracker-change" id="tracker-current-pct">---</div>
+            </div>
+            <div class="price-tracker-arrow">→</div>
+            <div class="price-tracker-card predicted">
+                <div class="tracker-label">AI Predicted (Groq)</div>
+                <div class="tracker-price" id="tracker-ai">---</div>
+                <div class="tracker-change" id="tracker-ai-pct">---</div>
             </div>
         </div>
         <div class="price-progress-bar">
@@ -201,7 +212,7 @@
             <div class="strategy-card">
                 <div class="strategy-header prediction-strategy">
                     <span class="strategy-icon">📊</span>
-                    <span>ML Prediction Strategy</span>
+                    <span>Strategy Prediction</span>
                 </div>
                 <div class="strategy-body" id="ml-strategy">
                     <p class="muted-text">Loading prediction analysis...</p>
@@ -259,6 +270,9 @@
         <h3 class="section-heading">📰 Real-World News & Sentiment</h3>
         <div class="news-content" id="news-content">
             <div class="loading-spinner"><div class="spinner"></div><p>Fetching latest news...</p></div>
+        </div>
+        <div class="news-content" id="groq-forecast-content" style="margin-top:12px;">
+            <div class="loading-spinner"><div class="spinner"></div><p>Loading Groq AI market impact forecast...</p></div>
         </div>
     </div>
 

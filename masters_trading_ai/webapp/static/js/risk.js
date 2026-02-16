@@ -4,6 +4,7 @@
 
 document.addEventListener('DOMContentLoaded', () => {
     loadRiskAnalytics();
+    bindRiskTermHover();
 });
 
 async function loadRiskAnalytics() {
@@ -31,7 +32,7 @@ async function loadRiskAnalytics() {
         renderMonteCarlo(data.monte_carlo);
         renderStatTests(data.statistical_tests);
         renderCorrelationMatrix(data.correlation_matrix);
-        renderHoldings(data.portfolio_tickers);
+        renderHoldings(data.portfolio_tickers, data.portfolio_holdings || []);
 
     } catch (e) {
         loading.innerHTML = `<p class="error-text">⚠️ ${e.message}</p><p class="muted-text">Ensure models are loaded and daily analysis has run.</p>`;
@@ -61,7 +62,7 @@ function renderRiskMetrics(metrics) {
     let html = '';
     for (const c of cards) {
         html += `
-        <div class="risk-metric-card">
+        <div class="risk-metric-card risk-term" data-risk-term="${c.label}">
             <div class="rmc-icon">${c.icon}</div>
             <div class="rmc-value" style="color:${c.color}">${c.value}</div>
             <div class="rmc-label">${c.label}</div>
@@ -204,11 +205,11 @@ function renderMonteCarlo(mc) {
             <h4>Probability Analysis</h4>
             <div class="mc-distributions">
                 <div class="mc-row highlight">
-                    <span class="mc-label">Prob(Profit)</span>
+                    <span class="mc-label risk-term" data-risk-term="Probability of Profit">Prob(Profit)</span>
                     <span class="mc-val ${mc.probability_of_profit > 0.5 ? 'up-color' : 'down-color'}">${(mc.probability_of_profit * 100).toFixed(1)}%</span>
                 </div>
                 <div class="mc-row">
-                    <span class="mc-label">Prob(Loss > 10%)</span>
+                    <span class="mc-label risk-term" data-risk-term="Probability of Loss greater than 10%">Prob(Loss > 10%)</span>
                     <span class="mc-val down-color">${(mc.probability_of_loss_gt_10pct * 100).toFixed(1)}%</span>
                 </div>
                 <div class="mc-row">
@@ -307,7 +308,7 @@ function corrColor(val) {
 }
 
 // ── Holdings List ─────────────────────────────────
-function renderHoldings(tickers) {
+function renderHoldings(tickers, holdings = []) {
     const container = document.getElementById('portfolio-holdings');
     if (!tickers || !tickers.length) {
         container.innerHTML = '<p class="muted-text">No holdings data</p>';
@@ -316,11 +317,47 @@ function renderHoldings(tickers) {
 
     let html = '<div class="holdings-chips">';
     for (const t of tickers) {
-        const name = t.replace('.NS', '');
-        html += `<a href="/stock/${encodeURIComponent(t)}" class="holding-chip">${name}</a>`;
+        const row = holdings.find(h => h.ticker === t);
+        const name = (row?.name || t.replace('.NS', ''));
+        const suffix = row ? ` • Qty ${row.quantity} @ ₹${Number(row.entry_price).toFixed(2)}` : '';
+        html += `<a href="/stock/${encodeURIComponent(t)}" class="holding-chip">${name}${suffix}</a>`;
     }
     html += '</div>';
     container.innerHTML = html;
+}
+
+function bindRiskTermHover() {
+    document.addEventListener('mouseover', async (event) => {
+        const el = event.target.closest('.risk-term');
+        if (!el) return;
+        const term = el.dataset.riskTerm || el.textContent?.trim();
+        if (!term) return;
+        const tooltip = document.getElementById('risk-tooltip');
+        const titleEl = document.getElementById('risk-tooltip-title');
+        const bodyEl = document.getElementById('risk-tooltip-body');
+        if (!tooltip || !titleEl || !bodyEl) return;
+
+        const rect = el.getBoundingClientRect();
+        tooltip.style.top = `${window.scrollY + rect.bottom + 10}px`;
+        tooltip.style.left = `${Math.min(window.scrollX + rect.left, window.scrollX + window.innerWidth - 380)}px`;
+        tooltip.classList.remove('hidden');
+        titleEl.textContent = term;
+        bodyEl.textContent = 'Loading explanation...';
+
+        try {
+            const res = await fetch(`/api/explain-risk-term?term=${encodeURIComponent(term)}&context=${encodeURIComponent('portfolio risk analytics')}`);
+            const data = await res.json();
+            bodyEl.textContent = data.explanation || data.error || 'No explanation available';
+        } catch (e) {
+            bodyEl.textContent = `Explanation unavailable: ${e.message}`;
+        }
+    });
+
+    document.addEventListener('mouseout', (event) => {
+        if (!event.target.closest('.risk-term')) return;
+        const tooltip = document.getElementById('risk-tooltip');
+        if (tooltip) tooltip.classList.add('hidden');
+    });
 }
 
 // ── Utility ───────────────────────────────────────
