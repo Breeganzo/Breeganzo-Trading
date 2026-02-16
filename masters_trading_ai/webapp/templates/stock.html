@@ -68,18 +68,36 @@
                 <div class="tracker-label">Strategy Predicted</div>
                 <div class="tracker-price" id="tracker-predicted">---</div>
                 <div class="tracker-change" id="tracker-predicted-pct">---</div>
+                <div class="tracker-sub" id="tracker-strategy-open-time">Predicted at ---</div>
             </div>
             <div class="price-tracker-arrow">→</div>
             <div class="price-tracker-card current">
-                <div class="tracker-label">Current Price</div>
+                <div class="tracker-label" id="tracker-current-label">Current Price</div>
                 <div class="tracker-price" id="tracker-current">---</div>
                 <div class="tracker-change" id="tracker-current-pct">---</div>
+                <div class="tracker-sub" id="tracker-current-time">Updated ---</div>
             </div>
             <div class="price-tracker-arrow">→</div>
             <div class="price-tracker-card predicted">
                 <div class="tracker-label">AI Predicted (Groq)</div>
                 <div class="tracker-price" id="tracker-ai">---</div>
                 <div class="tracker-change" id="tracker-ai-pct">---</div>
+                <div class="tracker-sub" id="tracker-ai-open-time">Predicted at ---</div>
+            </div>
+        </div>
+        <div class="current-second-panel">
+            <div class="current-second-title">CURRENT SECOND COMPARISON</div>
+            <div class="current-second-grid">
+                <div class="current-second-card">
+                    <span class="current-second-label">Strategy Prediction (Now)</span>
+                    <span class="current-second-price" id="current-strategy-price">---</span>
+                    <span class="current-second-time" id="current-strategy-time">---</span>
+                </div>
+                <div class="current-second-card">
+                    <span class="current-second-label">AI Prediction (Now)</span>
+                    <span class="current-second-price" id="current-ai-price">---</span>
+                    <span class="current-second-time" id="current-ai-time">---</span>
+                </div>
             </div>
         </div>
         <div class="price-progress-bar">
@@ -191,11 +209,11 @@
                     <span class="pred-value" id="pred-price">---</span>
                 </div>
                 <div class="pred-card">
-                    <span class="pred-label">Confidence</span>
+                    <span class="pred-label explainable-label" id="pred-confidence-label">Confidence ℹ️</span>
                     <span class="pred-value" id="pred-confidence">---</span>
                 </div>
                 <div class="pred-card">
-                    <span class="pred-label">Model Agreement</span>
+                    <span class="pred-label explainable-label" id="pred-agreement-label">Model Agreement ℹ️</span>
                     <span class="pred-value" id="pred-agreement">---</span>
                 </div>
             </div>
@@ -331,6 +349,10 @@
                 <p>Getting AI explanation...</p>
             </div>
         </div>
+    </div>
+    <div class="risk-tooltip hidden" id="metric-tooltip">
+        <div class="risk-tooltip-title" id="metric-tooltip-title">Loading...</div>
+        <div class="risk-tooltip-body" id="metric-tooltip-body">Loading explanation...</div>
     </div>
 
     <!-- Disclaimer footer -->

@@ -34,7 +34,7 @@ for d in [TRACKING_DIR, DAILY_DIR, MONTHLY_DIR]:
 class PredictionTracker:
     """Track whether each predicted price threshold was hit during the day."""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     @staticmethod
     def _to_float(value, default: float = 0.0) -> float:
@@ -101,11 +101,28 @@ class PredictionTracker:
             prediction_data.get("ai_last_prediction", predicted_price),
             default=predicted_price,
         )
+        strategy_predicted_at_open = str(
+            prediction_data.get("strategy_predicted_at_open", "")
+            or prediction_data.get("timestamp", "")
+            or datetime.now(IST).isoformat()
+        )
+        ai_predicted_at_open = str(
+            prediction_data.get("ai_predicted_at_open", "")
+            or prediction_data.get("timestamp", "")
+            or datetime.now(IST).isoformat()
+        )
+        ai_last_prediction_at = str(
+            prediction_data.get("ai_last_prediction_at", "")
+            or prediction_data.get("timestamp", "")
+            or datetime.now(IST).isoformat()
+        )
         strategy_direction = PredictionTracker._direction(
             open_price, strategy_price_at_open
         )
         ai_direction = PredictionTracker._direction(current_price, ai_last_prediction)
-        direction_comparison = strategy_direction == ai_direction
+        direction_comparison = bool(
+            prediction_data.get("direction_comparison", strategy_direction == ai_direction)
+        )
 
         # Threshold: the predicted price level that needs to be hit
         # For BUY: stock needs to reach at or above predicted_price
@@ -119,6 +136,9 @@ class PredictionTracker:
             "open_price": round(open_price, 2),
             "strategy_price_at_open": round(strategy_price_at_open, 2),
             "ai_last_prediction": round(ai_last_prediction, 2),
+            "strategy_predicted_at_open": strategy_predicted_at_open,
+            "ai_predicted_at_open": ai_predicted_at_open,
+            "ai_last_prediction_at": ai_last_prediction_at,
             "strategy_direction_at_open": strategy_direction,
             "ai_direction_last": ai_direction,
             "direction_comparison": bool(direction_comparison),
@@ -148,7 +168,7 @@ class PredictionTracker:
         """
         Check if predictions for a given date hit their threshold.
 
-        Uses end-of-day close and compares AI direction vs strategy-open direction.
+        Uses end-of-day close and compares strategy-open direction vs actual direction.
 
         Returns dict of {ticker: outcome_data}
         """
@@ -243,6 +263,17 @@ class PredictionTracker:
                         ),
                         default=price_at_pred,
                     )
+                    strategy_predicted_at_open = str(
+                        pred.get("strategy_predicted_at_open", "")
+                        or pred.get("timestamp", "")
+                    )
+                    ai_predicted_at_open = str(
+                        pred.get("ai_predicted_at_open", "")
+                        or pred.get("timestamp", "")
+                    )
+                    ai_last_prediction_at = str(
+                        pred.get("ai_last_prediction_at", "") or pred.get("timestamp", "")
+                    )
                     strategy_direction = pred.get(
                         "strategy_direction_at_open"
                     ) or PredictionTracker._direction(
@@ -251,11 +282,11 @@ class PredictionTracker:
                     ai_direction = pred.get(
                         "ai_direction_last"
                     ) or PredictionTracker._direction(price_at_pred, ai_last_prediction)
-                    direction_comparison = strategy_direction == ai_direction
                     actual_direction = PredictionTracker._direction(
-                        price_at_pred, actual_close
+                        open_price, actual_close
                     )
                     actual_return = (actual_close - price_at_pred) / price_at_pred * 100
+                    direction_comparison = strategy_direction == actual_direction
                     direction_vs_actual = ai_direction == actual_direction
 
                     outcome = "HIT" if direction_comparison else "MISS"
@@ -270,6 +301,9 @@ class PredictionTracker:
                     pred["strategy_price_at_open"] = round(strategy_price_at_open, 2)
                     pred["open_price"] = round(open_price, 2)
                     pred["ai_last_prediction"] = round(ai_last_prediction, 2)
+                    pred["strategy_predicted_at_open"] = strategy_predicted_at_open
+                    pred["ai_predicted_at_open"] = ai_predicted_at_open
+                    pred["ai_last_prediction_at"] = ai_last_prediction_at
                     pred["strategy_direction_at_open"] = strategy_direction
                     pred["ai_direction_last"] = ai_direction
                     pred["direction_comparison"] = bool(direction_comparison)
@@ -287,9 +321,13 @@ class PredictionTracker:
                         "predicted_price": pred["predicted_price"],
                         "strategy_price_at_open": round(strategy_price_at_open, 2),
                         "ai_last_prediction": round(ai_last_prediction, 2),
+                        "open_price": round(open_price, 2),
                         "actual_close": round(actual_close, 2),
                         "actual_high": round(actual_high, 2),
                         "actual_low": round(actual_low, 2),
+                        "strategy_predicted_at_open": strategy_predicted_at_open,
+                        "ai_predicted_at_open": ai_predicted_at_open,
+                        "ai_last_prediction_at": ai_last_prediction_at,
                         "strategy_direction_at_open": strategy_direction,
                         "ai_direction_last": ai_direction,
                         "actual_direction": actual_direction,
@@ -504,8 +542,16 @@ class PredictionTracker:
                             "outcome": pred["outcome"],
                             "signal": pred.get("signal", "HOLD"),
                             "confidence": pred.get("confidence", 50),
+                            "open_price": round(
+                                PredictionTracker._to_float(pred.get("open_price", 0)), 2
+                            ),
                             "strategy_price_at_open": round(strategy_price_at_open, 2),
                             "ai_last_prediction": round(ai_last_prediction, 2),
+                            "strategy_predicted_at_open": pred.get(
+                                "strategy_predicted_at_open"
+                            ),
+                            "ai_predicted_at_open": pred.get("ai_predicted_at_open"),
+                            "ai_last_prediction_at": pred.get("ai_last_prediction_at"),
                             "actual_close": round(actual_close, 2),
                             "direction_comparison": direction_comparison,
                             "direction_correct": direction_comparison,
@@ -610,6 +656,9 @@ class PredictionTracker:
                     "open_price": pred.get("open_price"),
                     "strategy_price_at_open": pred.get("strategy_price_at_open"),
                     "ai_last_prediction": pred.get("ai_last_prediction"),
+                    "strategy_predicted_at_open": pred.get("strategy_predicted_at_open"),
+                    "ai_predicted_at_open": pred.get("ai_predicted_at_open"),
+                    "ai_last_prediction_at": pred.get("ai_last_prediction_at"),
                     "strategy_direction_at_open": pred.get(
                         "strategy_direction_at_open"
                     ),

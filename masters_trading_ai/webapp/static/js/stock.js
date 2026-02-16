@@ -18,6 +18,7 @@ let drawingSeries = [];
 let currentPeriod = '1d';
 let currentInterval = '1m';
 let chartRefreshTimer = null;
+let metricExplainCache = {};
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -31,6 +32,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadFeatureImportance();
     loadNews();
     refreshPortfolioStatus();
+    bindPredictionMetricExplainers();
 
     // Auto-refresh live quote every 3 seconds.
     autoRefreshInterval = setInterval(() => {
@@ -67,6 +69,88 @@ async function checkStatus() {
         }
     } catch (e) {
         console.error('Status check failed:', e);
+    }
+}
+
+function formatTimestamp(value) {
+    if (!value) return '—';
+    const d = new Date(value);
+    if (!Number.isNaN(d.getTime())) {
+        return d.toLocaleString('en-IN', {
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true,
+            timeZone: 'Asia/Kolkata',
+        }) + ' IST';
+    }
+    return String(value);
+}
+
+function moveMetricTooltip(evt) {
+    const tip = document.getElementById('metric-tooltip');
+    if (!tip || !evt) return;
+    tip.style.left = `${evt.pageX + 14}px`;
+    tip.style.top = `${evt.pageY + 14}px`;
+}
+
+async function showMetricTooltip(evt, term, context = '') {
+    const tip = document.getElementById('metric-tooltip');
+    const titleEl = document.getElementById('metric-tooltip-title');
+    const bodyEl = document.getElementById('metric-tooltip-body');
+    if (!tip || !titleEl || !bodyEl) return;
+
+    titleEl.textContent = term;
+    bodyEl.textContent = 'Loading explanation...';
+    moveMetricTooltip(evt);
+    tip.classList.remove('hidden');
+
+    const key = `${term}::${context}`;
+    if (metricExplainCache[key]) {
+        bodyEl.textContent = metricExplainCache[key];
+        return;
+    }
+
+    try {
+        const res = await fetch(`/api/explain-risk-term?term=${encodeURIComponent(term)}&context=${encodeURIComponent(context || 'stock page metric')}`);
+        const data = await res.json();
+        const text = data.explanation || data.error || 'No explanation';
+        metricExplainCache[key] = text;
+        bodyEl.textContent = text;
+    } catch (e) {
+        bodyEl.textContent = `Explanation unavailable: ${e.message}`;
+    }
+}
+
+function hideMetricTooltip() {
+    const tip = document.getElementById('metric-tooltip');
+    if (tip) tip.classList.add('hidden');
+}
+
+function bindPredictionMetricExplainers() {
+    const bindings = [
+        {
+            id: 'pred-confidence-label',
+            term: 'Confidence',
+            context: 'Stock AI prediction confidence',
+        },
+        {
+            id: 'pred-agreement-label',
+            term: 'Model Agreement',
+            context: 'Stock AI prediction model agreement',
+        },
+    ];
+
+    for (const b of bindings) {
+        const el = document.getElementById(b.id);
+        if (!el) continue;
+        el.addEventListener('mouseenter', (evt) => showMetricTooltip(evt, b.term, b.context));
+        el.addEventListener('mousemove', moveMetricTooltip);
+        el.addEventListener('mouseleave', hideMetricTooltip);
+        el.addEventListener('click', (evt) => showMetricTooltip(evt, b.term, b.context));
     }
 }
 
@@ -484,8 +568,10 @@ async function loadPrediction() {
 
         document.getElementById('pred-return').innerHTML = `<span class="${retColor}">${retSign}${predReturn?.toFixed(3)}%</span>`;
         document.getElementById('pred-price').textContent = `₹${formatN(data.predicted_price)}`;
-        document.getElementById('pred-confidence').textContent = `${data.confidence?.toFixed(0)}%`;
-        document.getElementById('pred-agreement').textContent = `${data.model_agreement?.toFixed(0)}%`;
+        const confVal = Number(data.confidence);
+        const agreementVal = Number(data.model_agreement);
+        document.getElementById('pred-confidence').textContent = Number.isFinite(confVal) ? `${confVal.toFixed(0)}%` : '—';
+        document.getElementById('pred-agreement').textContent = Number.isFinite(agreementVal) ? `${agreementVal.toFixed(0)}%` : '—';
 
         // Show generated-at timestamp
         const genEl = document.getElementById('pred-generated-at');
@@ -598,85 +684,103 @@ async function loadStockEVA() {
     const container = document.getElementById('stock-eva-content');
 
     try {
+        const trackerRes = await fetch(`/api/price-tracker/${encodeURIComponent(TICKER)}`);
+        const trackerData = trackerRes.ok ? await trackerRes.json() : null;
         const datesRes = await fetch('/api/prediction-dates');
         const dates = await datesRes.json();
-
-        if (!dates.length) {
-            container.innerHTML = '<p class="muted-text">No past predictions logged yet. Predictions made today will be compared with actual close at end of day.</p>';
-            return;
-        }
-
-        // Check today's prediction and actual
         let html = '<div style="margin-top: 12px;">';
 
-        // Show current prediction vs current price
-        if (predictionData) {
-            const predRet = predictionData.predicted_return;
-            const predPrice = predictionData.predicted_price;
-            const currPrice = predictionData.current_price;
+        if (trackerData && !trackerData.error) {
+            const openPx = Number(trackerData.open_price || 0);
+            const strategyOpenPx = Number(trackerData.strategy_predicted_price || trackerData.predicted_price || 0);
+            const currentPx = Number(trackerData.current_price || 0);
+            const label = trackerData.display_price_label || 'Current Price';
+            const direction = strategyOpenPx > openPx ? 'UP' : strategyOpenPx < openPx ? 'DOWN' : 'FLAT';
 
             html += `
             <div class="pred-grid">
                 <div class="pred-card">
-                    <span class="pred-label">Price When Predicted</span>
-                    <span class="pred-value">₹${formatN(currPrice)}</span>
+                    <span class="pred-label">Market Open Price</span>
+                    <span class="pred-value">₹${formatN(openPx)}</span>
+                    <span class="muted-text">${trackerData.open_price_captured_at ? formatTimestamp(trackerData.open_price_captured_at) : 'Market Open (09:15 IST)'}</span>
                 </div>
                 <div class="pred-card">
-                    <span class="pred-label">AI Predicted Price</span>
-                    <span class="pred-value ${predRet >= 0 ? 'up-color' : 'down-color'}">₹${formatN(predPrice)}</span>
+                    <span class="pred-label">Strategy @ Open</span>
+                    <span class="pred-value ${strategyOpenPx >= openPx ? 'up-color' : 'down-color'}">₹${formatN(strategyOpenPx)}</span>
+                    <span class="muted-text">${formatTimestamp(trackerData.strategy_predicted_at_open)}</span>
                 </div>
                 <div class="pred-card">
-                    <span class="pred-label">Expected Return</span>
-                    <span class="pred-value ${predRet >= 0 ? 'up-color' : 'down-color'}">${predRet >= 0 ? '+' : ''}${predRet?.toFixed(3)}%</span>
+                    <span class="pred-label">${label}</span>
+                    <span class="pred-value ${currentPx >= openPx ? 'up-color' : 'down-color'}">₹${formatN(currentPx)}</span>
+                    <span class="muted-text">${formatTimestamp(trackerData.current_snapshot_at)}</span>
+                </div>
+                <div class="pred-card">
+                    <span class="pred-label">Strategy Direction</span>
+                    <span class="pred-value ${direction === 'UP' ? 'up-color' : direction === 'DOWN' ? 'down-color' : ''}">${direction}</span>
+                    <span class="muted-text">Based on Open vs Strategy@Open</span>
                 </div>
             </div>
             <p class="muted-text" style="margin-top: 12px;">
-                At end of day, this will show: Actual Close → Actual Return → Alpha generated
+                Expected vs Actual is evaluated as Strategy-at-Open direction versus actual market direction.
             </p>`;
         }
 
-        // Show historical comparison if we have past data
-        const latestDate = dates[0];
-        try {
-            const evaRes = await fetch(`/api/expected-vs-actual?date=${latestDate}`);
-            const evaData = await evaRes.json();
+        if (dates.length) {
+            const latestDate = dates[0];
+            try {
+                const evaRes = await fetch(`/api/expected-vs-actual?date=${latestDate}`);
+                const evaData = await evaRes.json();
 
-            if (!evaData.error && evaData.results) {
-                const stockResult = evaData.results.find(r => r.ticker === TICKER);
-                if (stockResult) {
-                    const dirClass = stockResult.direction_correct ? 'correct' : 'wrong';
-                    html += `
-                    <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
-                        <h4 class="sub-heading">Last Prediction (${latestDate})</h4>
-                        <div class="pred-grid">
-                            <div class="pred-card">
-                                <span class="pred-label">Predicted</span>
-                                <span class="pred-value ${stockResult.predicted_return_pct >= 0 ? 'up-color' : 'down-color'}">
-                                    ${stockResult.predicted_return_pct >= 0 ? '+' : ''}${stockResult.predicted_return_pct}%
-                                </span>
+                if (!evaData.error && evaData.results) {
+                    const stockResult = evaData.results.find(r => r.ticker === TICKER);
+                    if (stockResult) {
+                        const dirClass = stockResult.direction_correct ? 'correct' : 'wrong';
+                        const todayIst = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+                        const closeLabel = latestDate === todayIst
+                            ? (stockResult.actual_close ? 'Current / Close Price' : 'Current Price')
+                            : 'Close Price';
+                        html += `
+                        <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
+                            <h4 class="sub-heading">Last Prediction (${latestDate})</h4>
+                            <div class="pred-grid">
+                                <div class="pred-card">
+                                    <span class="pred-label">Market Open Price</span>
+                                    <span class="pred-value">₹${formatN(stockResult.market_open_price || stockResult.open_price)}</span>
+                                </div>
+                                <div class="pred-card">
+                                    <span class="pred-label">Strategy @ Open</span>
+                                    <span class="pred-value ${Number(stockResult.strategy_price_at_open || 0) >= Number(stockResult.market_open_price || stockResult.open_price || 0) ? 'up-color' : 'down-color'}">₹${formatN(stockResult.strategy_price_at_open)}</span>
+                                    <span class="muted-text">${formatTimestamp(stockResult.strategy_predicted_at_open)}</span>
+                                </div>
+                                <div class="pred-card">
+                                    <span class="pred-label">${closeLabel}</span>
+                                    <span class="pred-value ${Number(stockResult.actual_close || 0) >= Number(stockResult.market_open_price || stockResult.open_price || 0) ? 'up-color' : 'down-color'}">₹${formatN(stockResult.actual_close)}</span>
+                                </div>
+                                <div class="pred-card">
+                                    <span class="pred-label">Actual vs Strategy Price</span>
+                                    <span class="pred-value ${Number(stockResult.strategy_vs_actual_price_diff || 0) >= 0 ? 'up-color' : 'down-color'}">
+                                        ${Number(stockResult.strategy_vs_actual_price_diff || 0) >= 0 ? '+' : ''}₹${formatN(stockResult.strategy_vs_actual_price_diff)}
+                                    </span>
+                                </div>
+                                <div class="pred-card">
+                                    <span class="pred-label">Direction Check</span>
+                                    <span class="pred-value"><span class="direction-badge ${dirClass}">${stockResult.direction_correct ? '✓ Strategy Correct' : '✗ Strategy Wrong'}</span></span>
+                                </div>
+                                <div class="pred-card">
+                                    <span class="pred-label">Alpha Generated</span>
+                                    <span class="pred-value ${Number(stockResult.alpha_pct || 0) >= 0 ? 'up-color' : 'down-color'}">
+                                        ${Number(stockResult.alpha_pct || 0) >= 0 ? '+' : ''}${Number(stockResult.alpha_pct || 0).toFixed(3)}%
+                                    </span>
+                                </div>
                             </div>
-                            <div class="pred-card">
-                                <span class="pred-label">Actual</span>
-                                <span class="pred-value ${stockResult.actual_return_pct >= 0 ? 'up-color' : 'down-color'}">
-                                    ${stockResult.actual_return_pct >= 0 ? '+' : ''}${stockResult.actual_return_pct}%
-                                </span>
-                            </div>
-                            <div class="pred-card">
-                                <span class="pred-label">Direction</span>
-                                <span class="pred-value"><span class="direction-badge ${dirClass}">${stockResult.direction_correct ? '✓ Correct' : '✗ Wrong'}</span></span>
-                            </div>
-                            <div class="pred-card">
-                                <span class="pred-label">Alpha</span>
-                                <span class="pred-value ${stockResult.alpha_pct >= 0 ? 'up-color' : 'down-color'}">
-                                    ${stockResult.alpha_pct >= 0 ? '+' : ''}${stockResult.alpha_pct}%
-                                </span>
-                            </div>
-                        </div>
-                    </div>`;
+                        </div>`;
+                    }
                 }
+            } catch (e) {
+                // Ignore — no past data for this stock
             }
-        } catch (e) {
-            // Ignore — no past data for this stock
+        } else {
+            html += '<p class="muted-text">No past predictions logged yet. End-of-day close and alpha will appear after market data is available.</p>';
         }
 
         html += '</div>';
@@ -1067,32 +1171,72 @@ async function loadPriceTracker() {
         const stock = await res.json();
         if (stock.error) return;
 
-        const openPrice = stock.open_price;
-        const predPrice = stock.strategy_predicted_price || stock.predicted_price;
-        const currPrice = stock.current_price;
+        const openPrice = Number(stock.open_price || 0);
+        const predPrice = Number(stock.strategy_predicted_price || stock.predicted_price || 0);
+        const currPrice = Number(stock.current_price || 0);
         const aiPrice = Number(stock.ai_predicted_price || 0);
+        const currentStrategyPrice = Number(stock.current_strategy_predicted_price || predPrice || 0);
+        const currentAiPrice = Number(stock.current_ai_predicted_price || aiPrice || 0);
         const aiAvailable = aiPrice > 0;
+        const currentAiAvailable = currentAiPrice > 0;
 
         // Update tracker cards
         document.getElementById('tracker-open').textContent = `₹${formatN(openPrice)}`;
         document.getElementById('tracker-predicted').textContent = `₹${formatN(predPrice)}`;
         document.getElementById('tracker-current').textContent = `₹${formatN(currPrice)}`;
+        const currentLabelEl = document.getElementById('tracker-current-label');
+        if (currentLabelEl) currentLabelEl.textContent = stock.display_price_label || 'Current Price';
         const aiEl = document.getElementById('tracker-ai');
         if (aiEl) aiEl.textContent = aiAvailable ? `₹${formatN(aiPrice)}` : '—';
+        const openTimeEl = document.getElementById('tracker-open-time');
+        if (openTimeEl) {
+            openTimeEl.textContent = stock.open_price_captured_at
+                ? `Captured: ${formatTimestamp(stock.open_price_captured_at)}`
+                : 'Market Open (09:15 IST)';
+        }
+        const strategyOpenTimeEl = document.getElementById('tracker-strategy-open-time');
+        if (strategyOpenTimeEl) {
+            strategyOpenTimeEl.textContent = `Predicted: ${formatTimestamp(stock.strategy_predicted_at_open)}`;
+        }
+        const aiOpenTimeEl = document.getElementById('tracker-ai-open-time');
+        if (aiOpenTimeEl) {
+            aiOpenTimeEl.textContent = `Predicted: ${formatTimestamp(stock.ai_predicted_at_open)}`;
+        }
+        const currentTimeEl = document.getElementById('tracker-current-time');
+        if (currentTimeEl) {
+            currentTimeEl.textContent = `Updated: ${formatTimestamp(stock.current_snapshot_at)}`;
+        }
+
+        const currentStrategyPriceEl = document.getElementById('current-strategy-price');
+        if (currentStrategyPriceEl) {
+            currentStrategyPriceEl.textContent = currentStrategyPrice > 0 ? `₹${formatN(currentStrategyPrice)}` : '—';
+        }
+        const currentStrategyTimeEl = document.getElementById('current-strategy-time');
+        if (currentStrategyTimeEl) {
+            currentStrategyTimeEl.textContent = formatTimestamp(stock.current_strategy_predicted_at);
+        }
+        const currentAiPriceEl = document.getElementById('current-ai-price');
+        if (currentAiPriceEl) {
+            currentAiPriceEl.textContent = currentAiAvailable ? `₹${formatN(currentAiPrice)}` : '—';
+        }
+        const currentAiTimeEl = document.getElementById('current-ai-time');
+        if (currentAiTimeEl) {
+            currentAiTimeEl.textContent = formatTimestamp(stock.current_ai_predicted_at);
+        }
 
         // Percentage changes from open
-        const predPct = stock.open_to_predicted_pct;
-        const currPct = stock.open_to_current_pct;
+        const predPct = Number(stock.open_to_predicted_pct || 0);
+        const currPct = Number(stock.open_to_current_pct || 0);
         const aiPct = aiAvailable
             ? Number(stock.open_to_ai_predicted_pct ?? ((aiPrice - openPrice) / (openPrice || 1) * 100))
             : null;
 
         const predEl = document.getElementById('tracker-predicted-pct');
-        predEl.textContent = `${predPct >= 0 ? '+' : ''}${predPct}% from open`;
+        predEl.textContent = `${predPct >= 0 ? '+' : ''}${predPct.toFixed(3)}% from open`;
         predEl.className = `tracker-change ${predPct >= 0 ? 'up-color' : 'down-color'}`;
 
         const currEl = document.getElementById('tracker-current-pct');
-        currEl.textContent = `${currPct >= 0 ? '+' : ''}${currPct}% from open`;
+        currEl.textContent = `${currPct >= 0 ? '+' : ''}${currPct.toFixed(3)}% from open`;
         currEl.className = `tracker-change ${currPct >= 0 ? 'up-color' : 'down-color'}`;
 
         const aiPctEl = document.getElementById('tracker-ai-pct');
@@ -1184,6 +1328,10 @@ async function loadGroqForecast() {
             </div>`;
         const aiTracker = document.getElementById('tracker-ai');
         if (aiTracker) aiTracker.textContent = `₹${formatN(aiPrice)}`;
+        const currentAiEl = document.getElementById('current-ai-price');
+        if (currentAiEl) currentAiEl.textContent = `₹${formatN(aiPrice)}`;
+        const currentAiTimeEl = document.getElementById('current-ai-time');
+        if (currentAiTimeEl) currentAiTimeEl.textContent = formatTimestamp(data.generated_at_iso || data.generated_at);
     } catch (e) {
         container.innerHTML = `<p class="muted-text">Groq AI forecast failed: ${e.message}</p>`;
     }

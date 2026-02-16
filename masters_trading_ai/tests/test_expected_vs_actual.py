@@ -130,3 +130,53 @@ def test_api_expected_vs_actual_includes_training_fields(tmp_path: Path, monkeyp
     assert row["ai_last_prediction"] == 102.0
     assert row["actual_close"] == 103.0
     assert row["direction_comparison"] is True
+
+
+def test_api_expected_vs_actual_direction_uses_strategy_vs_open(
+    tmp_path: Path, monkeypatch
+):
+    logs_dir = tmp_path / "prediction_log"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    date_str = "2026-02-12"
+    (logs_dir / f"{date_str}.json").write_text(
+        json.dumps(
+            {
+                "XYZ.NS": {
+                    "predicted_return": 10.0,
+                    "predicted_price": 110.0,
+                    "current_price": 100.0,
+                    "open_price": 100.0,
+                    "strategy_price_at_open": 110.0,
+                    "signal": "BUY",
+                    "confidence": 75.0,
+                    "timestamp": "2026-02-12T09:00:00+05:30",
+                }
+            }
+        )
+    )
+
+    monkeypatch.setattr(server, "PREDICTION_LOG_DIR", logs_dir)
+    monkeypatch.setattr(server, "ticker_names", {"XYZ.NS": "XYZ"})
+    monkeypatch.setattr(
+        server,
+        "_get_close_prices_for_date",
+        lambda tickers, _date: {"XYZ.NS": 90.0},
+    )
+    monkeypatch.setattr(
+        server,
+        "_get_live_prices_batch",
+        lambda tickers: {"^NSEI": {"price": 20000.0, "prev_close": 19900.0}},
+    )
+    monkeypatch.setattr(
+        server.PredictionTracker, "check_outcomes", staticmethod(lambda _date: {})
+    )
+
+    with server.app.test_client() as client:
+        resp = client.get(f"/api/expected-vs-actual?date={date_str}")
+        assert resp.status_code == 200
+        payload = resp.get_json()
+
+    row = payload["results"][0]
+    assert row["strategy_direction_at_open"] == "UP"
+    assert row["direction_actual"] == "DOWN"
+    assert row["direction_comparison"] is False

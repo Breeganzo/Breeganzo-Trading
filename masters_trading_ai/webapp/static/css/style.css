@@ -1553,12 +1553,69 @@ a:hover { text-decoration: underline; }
 .tracker-sub {
     font-size: 11px;
     color: var(--text-muted);
+    margin-top: 4px;
 }
 
 .price-tracker-arrow {
     font-size: 20px;
     color: var(--text-muted);
     font-weight: 700;
+}
+
+.current-second-panel {
+    margin-top: 8px;
+    margin-bottom: 16px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+}
+
+.current-second-title {
+    font-size: 11px;
+    letter-spacing: 0.7px;
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+}
+
+.current-second-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.current-second-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    background: var(--bg-card);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.current-second-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.current-second-price {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.current-second-time {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.explainable-label {
+    cursor: pointer;
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
 }
 
 .portfolio-add-inline {
@@ -1970,6 +2027,7 @@ a:hover { text-decoration: underline; }
     .overview-section { margin: 16px; }
     .price-tracker-grid { flex-direction: column; }
     .price-tracker-arrow { transform: rotate(90deg); }
+    .current-second-grid { grid-template-columns: 1fr; }
     .top10-cards { grid-template-columns: 1fr; }
     .top10-prices { grid-template-columns: 1fr; }
     .premarket-panels { grid-template-columns: 1fr; }
