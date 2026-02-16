@@ -139,11 +139,15 @@ CACHE_DIR = PROJECT_ROOT / "cache"
 PREDICTION_LOG_DIR = CACHE_DIR / "prediction_log"
 PORTFOLIO_FILE = CACHE_DIR / "portfolio.json"
 PORTFOLIO_TRADES_FILE = CACHE_DIR / "portfolio_trades.json"
+PORTFOLIO_SIM_FILE = CACHE_DIR / "portfolio_sim.json"
+SIMULATED_TRADE_LOG_FILE = PREDICTION_LOG_DIR / "simulated_trades.jsonl"
 DELISTED_TICKERS_FILE = CACHE_DIR / "delisted_tickers.csv"
 PREMARKET_OUTLOOK_FILE = CACHE_DIR / "premarket_outlook.json"
 PREDICTION_SNAPSHOTS_FILE = CACHE_DIR / "prediction_snapshots.json"
 SNAPSHOT_SCHEMA_VERSION = 1
 PREDICTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
+SIMULATION_DEFAULT_CASH = float(os.environ.get("SIMULATION_DEFAULT_CASH", "40000"))
+SIMULATION_DEFAULT_CASH = max(1000.0, SIMULATION_DEFAULT_CASH)
 
 
 def _load_settings() -> dict:
@@ -238,6 +242,7 @@ ALPHA_DEFAULT_BETA = float(
 # Thread-safe lock for file I/O
 _log_lock = threading.Lock()
 _portfolio_lock = threading.Lock()
+_portfolio_sim_lock = threading.Lock()
 _delisted_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
@@ -693,6 +698,195 @@ def _validate_trade_sequence(trades: list[dict]) -> tuple[bool, str]:
                 return False, f"SELL exceeds open quantity for {ticker}"
             qty_open[ticker] = have - qty
     return True, ""
+
+
+def _simulation_state_template(cash: float = SIMULATION_DEFAULT_CASH) -> dict:
+    start_cash = max(1000.0, float(cash or SIMULATION_DEFAULT_CASH))
+    return {
+        "schema_version": 1,
+        "initial_cash": round(start_cash, 2),
+        "cash": round(start_cash, 2),
+        "open_positions": {},
+        "closed_trades": [],
+        "trade_history": [],
+        "updated_at": datetime.now(IST).isoformat(),
+    }
+
+
+def _read_portfolio_sim_state() -> dict:
+    with _portfolio_sim_lock:
+        if not PORTFOLIO_SIM_FILE.exists():
+            state = _simulation_state_template()
+            PORTFOLIO_SIM_FILE.parent.mkdir(parents=True, exist_ok=True)
+            PORTFOLIO_SIM_FILE.write_text(json.dumps(state, indent=2, default=str))
+            return state
+        try:
+            state = json.loads(PORTFOLIO_SIM_FILE.read_text())
+            if isinstance(state, dict):
+                state.setdefault("schema_version", 1)
+                state.setdefault("initial_cash", SIMULATION_DEFAULT_CASH)
+                state.setdefault("cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH))
+                state.setdefault("open_positions", {})
+                state.setdefault("closed_trades", [])
+                state.setdefault("trade_history", [])
+                return state
+        except Exception:
+            pass
+        return _simulation_state_template()
+
+
+def _write_portfolio_sim_state(state: dict) -> None:
+    with _portfolio_sim_lock:
+        payload = dict(state or {})
+        payload["updated_at"] = datetime.now(IST).isoformat()
+        PORTFOLIO_SIM_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PORTFOLIO_SIM_FILE.write_text(json.dumps(payload, indent=2, default=str))
+
+
+def _log_simulated_trade(event: dict) -> None:
+    try:
+        SIMULATED_TRADE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(SIMULATED_TRADE_LOG_FILE, "a") as f:
+            f.write(json.dumps(event, default=str) + "\n")
+    except Exception as exc:
+        log.warning("Failed to append simulated trade log: %s", exc)
+
+
+def _infer_trade_type_for_exit(entry_ts: str, exit_ts: str) -> str:
+    try:
+        in_dt = datetime.fromisoformat(str(entry_ts))
+        out_dt = datetime.fromisoformat(str(exit_ts))
+        if in_dt.tzinfo is None:
+            in_dt = in_dt.replace(tzinfo=IST)
+        if out_dt.tzinfo is None:
+            out_dt = out_dt.replace(tzinfo=IST)
+        return (
+            "equity_intraday"
+            if in_dt.astimezone(IST).date() == out_dt.astimezone(IST).date()
+            else "equity_delivery"
+        )
+    except Exception:
+        return "equity_delivery"
+
+
+def _estimate_entry_fee(buy_value: float, trade_type: str = "equity_delivery") -> float:
+    value = max(0.0, float(buy_value or 0))
+    if value <= 0:
+        return 0.0
+    if _groww_cost_calculator is None:
+        return round(value * 0.0008, 2)
+    try:
+        return round(float(_groww_cost_calculator.buy_cost(value, trade_type).total), 2)
+    except Exception:
+        return round(value * 0.0008, 2)
+
+
+def _estimate_exit_fee(sell_value: float, trade_type: str = "equity_delivery") -> float:
+    value = max(0.0, float(sell_value or 0))
+    if value <= 0:
+        return 0.0
+    if _groww_cost_calculator is None:
+        return round(value * 0.0008, 2)
+    try:
+        return round(float(_groww_cost_calculator.sell_cost(value, trade_type).total), 2)
+    except Exception:
+        return round(value * 0.0008, 2)
+
+
+def _next_recommended_sell_time(
+    current_price: float, stop_loss_price: float, target_price: float
+) -> str:
+    cp = float(current_price or 0)
+    sl = float(stop_loss_price or 0)
+    tp = float(target_price or 0)
+    now = datetime.now(IST)
+    if cp <= 0 or sl <= 0 or tp <= 0:
+        return "N/A"
+    distance = min(abs(cp - sl), abs(tp - cp)) / max(cp, 1e-9)
+    if distance <= 0.003:
+        return (now + timedelta(minutes=5)).isoformat()
+    if distance <= 0.01:
+        return (now + timedelta(minutes=15)).isoformat()
+    return (now + timedelta(minutes=45)).isoformat()
+
+
+def _execute_sim_sell(
+    state: dict,
+    ticker: str,
+    quantity: float,
+    price: float,
+    reason: str = "manual_sell",
+    timestamp: str | None = None,
+) -> tuple[dict, dict | None, str | None]:
+    t = str(ticker or "").strip().upper()
+    qty = float(quantity or 0)
+    px = float(price or 0)
+    ts = timestamp or datetime.now(IST).isoformat()
+    if qty <= 0 or px <= 0:
+        return state, None, "quantity and price must be > 0"
+    open_positions = dict(state.get("open_positions", {}))
+    pos = dict(open_positions.get(t, {}))
+    if not pos:
+        return state, None, f"No open simulated position for {t}"
+    open_qty = float(pos.get("quantity", 0) or 0)
+    if open_qty + 1e-9 < qty:
+        return state, None, f"Cannot SELL {qty}; open simulated quantity is {open_qty}"
+
+    entry_price = float(pos.get("avg_entry_price", 0) or 0)
+    entry_fees_total = float(pos.get("total_entry_fees", 0) or 0)
+    allocated_entry_fees = entry_fees_total * (qty / max(open_qty, 1e-9))
+    trade_type = _infer_trade_type_for_exit(pos.get("opened_at", ts), ts)
+    sell_value = round(px * qty, 2)
+    sell_fee = _estimate_exit_fee(sell_value, trade_type=trade_type)
+    realized_pnl = (px - entry_price) * qty - allocated_entry_fees - sell_fee
+
+    cash = float(state.get("cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH)) or 0)
+    state["cash"] = round(cash + sell_value - sell_fee, 2)
+
+    remaining_qty = open_qty - qty
+    if remaining_qty <= 1e-9:
+        open_positions.pop(t, None)
+    else:
+        pos["quantity"] = round(remaining_qty, 4)
+        pos["total_entry_fees"] = round(
+            max(0.0, entry_fees_total - allocated_entry_fees), 2
+        )
+        pos["last_price"] = round(px, 2)
+        pos["last_updated"] = ts
+        open_positions[t] = pos
+
+    state["open_positions"] = open_positions
+    state.setdefault("closed_trades", []).append(
+        {
+            "id": uuid4().hex[:12],
+            "ticker": t,
+            "quantity": round(qty, 4),
+            "entry_price": round(entry_price, 2),
+            "exit_price": round(px, 2),
+            "entry_fees_allocated": round(allocated_entry_fees, 2),
+            "exit_fee": round(sell_fee, 2),
+            "realized_pnl": round(realized_pnl, 2),
+            "trade_type": trade_type,
+            "reason": reason,
+            "closed_at": ts,
+        }
+    )
+    event = {
+        "id": uuid4().hex[:12],
+        "timestamp": ts,
+        "action": "SELL",
+        "reason": reason,
+        "ticker": t,
+        "quantity": round(qty, 4),
+        "price": round(px, 2),
+        "trade_type": trade_type,
+        "notional": round(sell_value, 2),
+        "fee": round(sell_fee, 2),
+        "realized_pnl": round(realized_pnl, 2),
+        "cash_after": round(state["cash"], 2),
+    }
+    state.setdefault("trade_history", []).append(event)
+    return state, event, None
 
 
 def _sanitize_portfolio_storage() -> dict:
@@ -1313,6 +1507,7 @@ def api_predict(ticker: str):
         _log_prediction(ticker, pred)
 
         pred["name"] = ticker_names.get(ticker, _clean_name(ticker))
+        pred["source"] = "ml"
         pred["cache_policy"] = (
             "force_refresh"
             if force
@@ -1363,7 +1558,7 @@ def api_strategy_price(ticker: str):
                 "rr_ratio": rr_ratio,
                 "strategy_generated_at": strategy_generated_at,
                 "predicted_return_decimal": predicted_return_decimal,
-                "source": "strategy_snapshot",
+                "source": "strategy",
                 "open_price": round(open_price, 2) if open_price > 0 else None,
                 "current_price": round(current_price, 2) if current_price > 0 else None,
                 "snapshot_type": row.get("snapshot_type", window_type),
@@ -1383,6 +1578,7 @@ def api_strategy_price(ticker: str):
         if not strategy:
             return jsonify({"error": f"Strategy price unavailable for {ticker}"}), 404
 
+        strategy["source"] = "strategy"
         strategy["snapshot_type"] = window_type
         strategy["cache_policy"] = (
             "force_refresh"
@@ -1394,6 +1590,474 @@ def api_strategy_price(ticker: str):
         return jsonify({"error": str(exc)}), 500
 
 
+@app.route("/api/advisor/open-buy-list")
+def api_advisor_open_buy_list():
+    """
+    Trading-desk advisor picks for market-open simulation.
+    Returns strategy-driven buy ideas constrained by budget + estimated fees.
+    """
+    if not models_loaded or predictor is None:
+        return jsonify({"error": "Models still loading..."}), 503
+
+    state = _read_portfolio_sim_state()
+    budget_arg = request.args.get("budget")
+    try:
+        n = int(request.args.get("n", 10))
+    except Exception:
+        n = 10
+    n = max(1, min(n, 10))
+
+    try:
+        budget = (
+            float(budget_arg)
+            if budget_arg not in (None, "")
+            else float(state.get("cash", SIMULATION_DEFAULT_CASH))
+        )
+    except Exception:
+        budget = float(state.get("cash", SIMULATION_DEFAULT_CASH))
+    budget = max(1000.0, budget)
+
+    sectors = request.args.getlist("sectors") or [
+        "large_cap",
+        "banking",
+        "mid_cap",
+        "high_volatility",
+        "commodities",
+    ]
+    trade_type = str(request.args.get("trade_type", "equity_delivery")).strip().lower()
+    if trade_type not in {"equity_delivery", "equity_intraday"}:
+        trade_type = "equity_delivery"
+
+    try:
+        grouped = predictor.predict_top_picks_grouped(sectors=sectors, top_n=50)
+        raw_buys = grouped.get("top_buy", []) if isinstance(grouped, dict) else []
+        buy_candidates = [
+            p
+            for p in raw_buys
+            if _safe_float(p.get("current_price")) > 0
+            and _safe_float(p.get("predicted_return")) > 0
+        ]
+        if not buy_candidates:
+            return jsonify(
+                {
+                    "source": "strategy",
+                    "generated_at": datetime.now(IST).isoformat(),
+                    "budget": round(budget, 2),
+                    "count": 0,
+                    "picks": [],
+                    "estimated_total_cost": 0.0,
+                    "remaining_budget": round(budget, 2),
+                    "error": "No strategy BUY candidates available right now.",
+                }
+            )
+
+        # Rank by strategy edge with volatility control and liquidity preference.
+        ranked: list[dict] = []
+        for row in buy_candidates:
+            conf = max(0.0, min(100.0, _safe_float(row.get("confidence")))) / 100.0
+            agree = max(0.0, min(100.0, _safe_float(row.get("model_agreement")))) / 100.0
+            pred_ret_dec = abs(_safe_float(row.get("predicted_return"))) / 100.0
+            atr_pct = abs(_safe_float(row.get("atr_pct")))
+            liq_raw = _safe_float(row.get("liquidity_factor"))
+            liq = max(0.5, min(1.5, liq_raw if liq_raw > 0 else 1.0))
+            if atr_pct >= 8:
+                volatility_factor = 0.65
+            elif atr_pct >= 5:
+                volatility_factor = 0.8
+            elif atr_pct <= 1:
+                volatility_factor = 0.9
+            else:
+                volatility_factor = 1.05
+            edge_score = pred_ret_dec * conf * agree * liq * volatility_factor
+            ranked.append(
+                {
+                    **row,
+                    "_edge_score": edge_score,
+                    "_volatility_factor": volatility_factor,
+                }
+            )
+        ranked.sort(
+            key=lambda x: (
+                _safe_float(x.get("confidence")),
+                _safe_float(x.get("_edge_score")),
+            ),
+            reverse=True,
+        )
+
+        picks: list[dict] = []
+        remaining_budget = float(budget)
+        total_cost = 0.0
+        warnings: list[str] = []
+
+        for row in ranked:
+            if len(picks) >= n or remaining_budget <= 0:
+                break
+            ticker = str(row.get("ticker", "")).upper()
+            current_price = _safe_float(row.get("current_price"))
+            strategy_price = _safe_float(row.get("target_price") or row.get("predicted_price"))
+            if strategy_price <= 0:
+                strategy_price = current_price
+            if strategy_price <= 0:
+                continue
+            rr_raw = _safe_float(row.get("risk_reward"))
+            rr = max(0.1, rr_raw if rr_raw > 0 else 1.2)
+            if strategy_price >= current_price:
+                risk_amount = abs(strategy_price - current_price) / rr
+                stop_loss = max(0.01, current_price - risk_amount)
+            else:
+                risk_amount = abs(current_price - strategy_price) / rr
+                stop_loss = current_price + risk_amount
+
+            slots_left = max(1, n - len(picks))
+            per_pick_budget = min(remaining_budget, remaining_budget / slots_left)
+            qty = int(per_pick_budget // strategy_price)
+            while qty > 0:
+                notional = qty * strategy_price
+                fee = _estimate_entry_fee(notional, trade_type=trade_type)
+                total_trade = notional + fee
+                if total_trade <= remaining_budget + 1e-9:
+                    break
+                qty -= 1
+            if qty <= 0:
+                continue
+
+            notional = round(qty * strategy_price, 2)
+            fee = _estimate_entry_fee(notional, trade_type=trade_type)
+            est_trade_cost = round(notional + fee, 2)
+            if est_trade_cost > remaining_budget + 1e-9:
+                continue
+
+            liq_factor = _safe_float(row.get("liquidity_factor"))
+            if liq_factor <= 0:
+                liq_factor = 1.0
+            avg_volume_30d = _safe_float(row.get("avg_volume_30d"))
+            if liq_factor < 0.8:
+                warnings.append(
+                    f"{ticker} has lower liquidity (factor={liq_factor:.2f}, avg_volume_30d={avg_volume_30d:.0f})."
+                )
+
+            remaining_budget = round(remaining_budget - est_trade_cost, 2)
+            total_cost = round(total_cost + est_trade_cost, 2)
+            picks.append(
+                {
+                    "ticker": ticker,
+                    "name": ticker_names.get(ticker, _clean_name(ticker)),
+                    "source": "strategy",
+                    "strategy_price_at_open": round(strategy_price, 2),
+                    "current_price": round(current_price, 2),
+                    "suggested_qty": int(qty),
+                    "estimated_notional": round(notional, 2),
+                    "estimated_fee": round(fee, 2),
+                    "est_trade_cost": est_trade_cost,
+                    "stop_loss_price": round(stop_loss, 2),
+                    "risk_reward": round(rr, 2),
+                    "predicted_return_pct": round(_safe_float(row.get("predicted_return")), 3),
+                    "confidence": round(_safe_float(row.get("confidence")), 1),
+                    "model_agreement": round(_safe_float(row.get("model_agreement")), 1),
+                    "liquidity_factor": round(liq_factor, 3),
+                    "avg_volume_30d": round(avg_volume_30d, 2) if avg_volume_30d > 0 else None,
+                    "volatility_atr_pct": round(abs(_safe_float(row.get("atr_pct"))), 2),
+                    "edge_score": round(_safe_float(row.get("_edge_score")), 6),
+                    "next_recommended_sell_time": _next_recommended_sell_time(
+                        current_price, stop_loss, strategy_price
+                    ),
+                    "strategy_generated_at": row.get("timestamp") or datetime.now(IST).isoformat(),
+                }
+            )
+
+        return jsonify(
+            {
+                "source": "strategy",
+                "schema_version": 1,
+                "generated_at": datetime.now(IST).isoformat(),
+                "budget": round(budget, 2),
+                "trade_type": trade_type,
+                "count": len(picks),
+                "picks": picks,
+                "estimated_total_cost": round(total_cost, 2),
+                "remaining_budget": round(remaining_budget, 2),
+                "warnings": sorted(set(warnings)),
+                "simulation_cash_available": round(
+                    float(state.get("cash", SIMULATION_DEFAULT_CASH) or 0), 2
+                ),
+            }
+        )
+    except Exception as exc:
+        log.exception("Advisor open-buy-list failed")
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/simulate/portfolio")
+def api_simulate_portfolio():
+    """Return simulated trading-desk portfolio state."""
+    state = _read_portfolio_sim_state()
+    open_positions = dict(state.get("open_positions", {}))
+    tickers = sorted(open_positions.keys())
+    live_prices = _get_live_prices_batch(tickers) if tickers else {}
+
+    holdings = []
+    invested = 0.0
+    mtm_value = 0.0
+    for ticker in tickers:
+        pos = dict(open_positions.get(ticker, {}))
+        qty = _safe_float(pos.get("quantity"))
+        if qty <= 0:
+            continue
+        entry = _safe_float(pos.get("avg_entry_price"))
+        live = _safe_float(live_prices.get(ticker, {}).get("price"))
+        strategy_target = _safe_float(pos.get("target_price"))
+        stop_loss = _safe_float(pos.get("stop_loss_price"))
+        entry_value = qty * entry
+        mark = qty * (live if live > 0 else entry)
+        invested += entry_value
+        mtm_value += mark
+        holdings.append(
+            {
+                "ticker": ticker,
+                "name": ticker_names.get(ticker, _clean_name(ticker)),
+                "quantity": round(qty, 4),
+                "entry_price": round(entry, 2),
+                "current_price": round(live, 2) if live > 0 else None,
+                "target_price": round(strategy_target, 2) if strategy_target > 0 else None,
+                "stop_loss_price": round(stop_loss, 2) if stop_loss > 0 else None,
+                "unrealized_pnl": round(mark - entry_value, 2),
+                "next_recommended_sell_time": _next_recommended_sell_time(
+                    live if live > 0 else entry, stop_loss, strategy_target
+                ),
+                "source": "strategy",
+                "opened_at": pos.get("opened_at"),
+            }
+        )
+    cash = float(state.get("cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH)) or 0)
+    return jsonify(
+        {
+            "schema_version": int(state.get("schema_version", 1)),
+            "source": "strategy_simulation",
+            "initial_cash": round(float(state.get("initial_cash", SIMULATION_DEFAULT_CASH)), 2),
+            "cash": round(cash, 2),
+            "invested_value": round(invested, 2),
+            "mark_to_market_value": round(mtm_value, 2),
+            "equity_value": round(cash + mtm_value, 2),
+            "open_positions_count": len(holdings),
+            "closed_trades_count": len(state.get("closed_trades", [])),
+            "holdings": holdings,
+            "trade_history": state.get("trade_history", [])[-50:],
+            "updated_at": state.get("updated_at"),
+        }
+    )
+
+
+@app.route("/api/simulate/trade", methods=["POST"])
+def api_simulate_trade():
+    """
+    Simulated trade execution (no live orders).
+    Supports BUY, SELL, AUTO_CHECK, RESET.
+    """
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get("action", payload.get("side", "BUY"))).strip().upper()
+    if action not in {"BUY", "SELL", "AUTO_CHECK", "RESET"}:
+        return jsonify({"error": "action must be BUY, SELL, AUTO_CHECK, or RESET"}), 400
+
+    state = _read_portfolio_sim_state()
+    now_iso = datetime.now(IST).isoformat()
+
+    if action == "RESET":
+        budget = _safe_float(payload.get("budget"))
+        if budget <= 0:
+            budget = SIMULATION_DEFAULT_CASH
+        if budget <= 0:
+            budget = SIMULATION_DEFAULT_CASH
+        state = _simulation_state_template(cash=budget)
+        _write_portfolio_sim_state(state)
+        _log_simulated_trade(
+            {
+                "timestamp": now_iso,
+                "action": "RESET",
+                "budget": round(budget, 2),
+                "source": "strategy_simulation",
+            }
+        )
+        return jsonify(
+            {
+                "ok": True,
+                "message": "Simulation portfolio reset.",
+                "state": state,
+            }
+        )
+
+    if action == "AUTO_CHECK":
+        open_positions = dict(state.get("open_positions", {}))
+        tickers = sorted(open_positions.keys())
+        live = _get_live_prices_batch(tickers) if tickers else {}
+        events = []
+        for ticker in tickers:
+            pos = dict(open_positions.get(ticker, {}))
+            qty = _safe_float(pos.get("quantity"))
+            if qty <= 0:
+                continue
+            cp = _safe_float(live.get(ticker, {}).get("price"))
+            if cp <= 0:
+                continue
+            stop_loss = _safe_float(pos.get("stop_loss_price"))
+            target = _safe_float(pos.get("target_price"))
+            reason = None
+            if stop_loss > 0 and cp <= stop_loss:
+                reason = "auto_stop_loss"
+            elif target > 0 and cp >= target:
+                reason = "auto_target_hit"
+            if not reason:
+                continue
+            state, event, err = _execute_sim_sell(
+                state,
+                ticker=ticker,
+                quantity=qty,
+                price=cp,
+                reason=reason,
+                timestamp=now_iso,
+            )
+            if err:
+                log.warning("AUTO_CHECK skipped %s: %s", ticker, err)
+                continue
+            if event:
+                events.append(event)
+                _log_simulated_trade(
+                    {
+                        **event,
+                        "source": "strategy_simulation",
+                        "auto": True,
+                    }
+                )
+        _write_portfolio_sim_state(state)
+        return jsonify(
+            {
+                "ok": True,
+                "action": "AUTO_CHECK",
+                "triggered_count": len(events),
+                "events": events,
+                "state": state,
+                "source": "strategy_simulation",
+            }
+        )
+
+    ticker = str(payload.get("ticker", "")).strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    if not _is_tradeable_ticker(ticker):
+        return jsonify({"error": f"{ticker} is not in configured ticker universe"}), 400
+    try:
+        quantity = float(payload.get("quantity", 0) or 0)
+    except Exception:
+        quantity = 0.0
+    if quantity <= 0:
+        return jsonify({"error": "quantity must be > 0"}), 400
+
+    price = _safe_float(payload.get("price"))
+    if price <= 0:
+        price = _safe_float(_get_live_prices_batch([ticker]).get(ticker, {}).get("price"))
+    if price <= 0:
+        return jsonify({"error": f"price not available for {ticker}"}), 400
+
+    trade_type = str(payload.get("trade_type", "equity_delivery")).strip().lower()
+    if trade_type not in {"equity_delivery", "equity_intraday"}:
+        trade_type = "equity_delivery"
+
+    if action == "BUY":
+        notional = round(price * quantity, 2)
+        entry_fee = _estimate_entry_fee(notional, trade_type=trade_type)
+        total_debit = round(notional + entry_fee, 2)
+        cash = float(state.get("cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH)) or 0)
+        if total_debit > cash + 1e-9:
+            return (
+                jsonify(
+                    {
+                        "error": f"Insufficient simulated cash. Need ₹{total_debit:.2f}, available ₹{cash:.2f}",
+                        "required": round(total_debit, 2),
+                        "available_cash": round(cash, 2),
+                    }
+                ),
+                400,
+            )
+
+        strategy_entry = _safe_float(payload.get("strategy_entry_price"))
+        if strategy_entry <= 0:
+            strategy_entry = price
+        stop_loss = _safe_float(payload.get("stop_loss_price"))
+        target_price = _safe_float(payload.get("target_price"))
+        rr_ratio = _safe_float(payload.get("risk_reward"))
+        if rr_ratio <= 0:
+            rr_ratio = 1.5
+        if stop_loss <= 0:
+            risk = abs(max(strategy_entry, price) - min(strategy_entry, price)) / max(rr_ratio, 1.0)
+            stop_loss = max(0.01, price - max(risk, price * 0.012))
+        if target_price <= 0:
+            target_price = price + max(abs(price - stop_loss) * max(rr_ratio, 1.0), price * 0.01)
+
+        open_positions = dict(state.get("open_positions", {}))
+        pos = dict(open_positions.get(ticker, {}))
+        prev_qty = _safe_float(pos.get("quantity"))
+        prev_avg = _safe_float(pos.get("avg_entry_price"))
+        prev_fees = _safe_float(pos.get("total_entry_fees"))
+        new_qty = prev_qty + quantity
+        avg_entry = (
+            ((prev_avg * prev_qty) + (price * quantity)) / new_qty
+            if new_qty > 0
+            else price
+        )
+        pos.update(
+            {
+                "ticker": ticker,
+                "name": ticker_names.get(ticker, _clean_name(ticker)),
+                "quantity": round(new_qty, 4),
+                "avg_entry_price": round(avg_entry, 2),
+                "total_entry_fees": round(prev_fees + entry_fee, 2),
+                "strategy_entry_price": round(strategy_entry, 2),
+                "stop_loss_price": round(stop_loss, 2),
+                "target_price": round(target_price, 2),
+                "trade_type_hint": trade_type,
+                "opened_at": pos.get("opened_at") or now_iso,
+                "last_buy_at": now_iso,
+                "source": "strategy",
+            }
+        )
+        open_positions[ticker] = pos
+        state["open_positions"] = open_positions
+        state["cash"] = round(cash - total_debit, 2)
+        event = {
+            "id": uuid4().hex[:12],
+            "timestamp": now_iso,
+            "action": "BUY",
+            "ticker": ticker,
+            "quantity": round(quantity, 4),
+            "price": round(price, 2),
+            "trade_type": trade_type,
+            "notional": round(notional, 2),
+            "fee": round(entry_fee, 2),
+            "cash_after": round(state["cash"], 2),
+            "source": "strategy_simulation",
+        }
+        state.setdefault("trade_history", []).append(event)
+        _write_portfolio_sim_state(state)
+        _log_simulated_trade(event)
+        return jsonify({"ok": True, "event": event, "state": state})
+
+    # SELL
+    state, event, err = _execute_sim_sell(
+        state,
+        ticker=ticker,
+        quantity=quantity,
+        price=price,
+        reason="manual_sell",
+        timestamp=now_iso,
+    )
+    if err:
+        return jsonify({"error": err}), 400
+    if event:
+        event["source"] = "strategy_simulation"
+        _log_simulated_trade(event)
+    _write_portfolio_sim_state(state)
+    return jsonify({"ok": True, "event": event, "state": state})
+
+
 @app.route("/api/top-picks")
 def api_top_picks():
     """Get top ML picks across sectors."""
@@ -1401,7 +2065,11 @@ def api_top_picks():
         return jsonify({"error": "Models still loading..."}), 503
 
     sectors = request.args.getlist("sectors") or ["large_cap", "banking"]
-    top_n = int(request.args.get("n", 20))
+    try:
+        top_n = int(request.args.get("n", 20))
+    except Exception:
+        top_n = 20
+    top_n = max(1, min(top_n, 50))
     grouped = request.args.get("grouped", "").lower() in ("1", "true", "yes")
     portfolio_tickers = {
         str(row.get("ticker", "")).upper()
@@ -1433,6 +2101,8 @@ def api_top_picks():
         p["target_price"] = round(strategy_px, 2) if strategy_px > 0 else None
         p["ai_predicted_price"] = round(ai_px, 2) if ai_px > 0 else None
         p["ai_source"] = ai_meta.get("source", "none")
+        p["source"] = "strategy"
+        p["ai_value_source"] = "ai"
         return p
 
     try:
@@ -2377,21 +3047,33 @@ def _get_prediction_snapshot(
         if latest:
             return _normalize_prediction_snapshot(latest)
 
-    if not force and target_type in snapshots and snapshots[target_type].get("items"):
+    if (
+        target_type in {"premarket_open", "market_open_locked"}
+        and not force
+        and target_type in snapshots
+        and snapshots[target_type].get("items")
+    ):
         return _normalize_prediction_snapshot(snapshots[target_type], target_type)
 
     if target_type == "market_open_locked":
-        pre = snapshots.get("premarket_open", {})
-        if pre.get("items") and not force:
-            built = _normalize_prediction_snapshot(dict(pre), "market_open_locked")
-            built["captured_at"] = _market_lock_start_dt(now).isoformat()
-        else:
-            built = _build_prediction_snapshot("market_open_locked")
+        # Market-open snapshot must be first computed at/after 09:30 and then frozen.
+        built = _build_prediction_snapshot("market_open_locked")
     elif target_type == "premarket_open":
-        built = _build_prediction_snapshot("premarket_open")
+        # Premarket snapshot is fixed for 09:15–09:30 once created.
+        if not force and snapshots.get("premarket_open", {}).get("items"):
+            built = _normalize_prediction_snapshot(
+                snapshots.get("premarket_open", {}), "premarket_open"
+            )
+        else:
+            built = _build_prediction_snapshot("premarket_open")
     else:
-        # After-hours: updates are intentionally volatile on manual refresh only.
-        if not force and snapshots.get("after_hours_live", {}).get("items"):
+        # After-hours AI view is intentionally live unless caller explicitly asks
+        # for latest stored snapshot.
+        if (
+            not force
+            and use_latest_stored
+            and snapshots.get("after_hours_live", {}).get("items")
+        ):
             built = _normalize_prediction_snapshot(
                 snapshots.get("after_hours_live", {}), "after_hours_live"
             )

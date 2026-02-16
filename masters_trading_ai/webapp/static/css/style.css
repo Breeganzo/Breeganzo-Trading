@@ -947,6 +947,77 @@ a:hover { text-decoration: underline; }
     min-width: 0;
 }
 
+.advisor-panel {
+    background: linear-gradient(145deg, rgba(38, 70, 83, 0.22), rgba(42, 157, 143, 0.16));
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px;
+    margin-bottom: 14px;
+}
+
+.advisor-panel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.advisor-panel-head h3 {
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.advisor-controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.advisor-controls input {
+    width: 120px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    border-radius: 8px;
+    padding: 6px 10px;
+}
+
+.advisor-kpis {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px;
+    margin: 10px 0;
+}
+
+.advisor-kpi {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 2px;
+    background: rgba(0, 0, 0, 0.12);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+
+.advisor-kpi-label {
+    display: inline-block;
+    min-width: 100%;
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.advisor-table-wrap {
+    overflow-x: auto;
+}
+
+.advisor-table td:last-child {
+    white-space: nowrap;
+}
+
 .premarket-panel-head {
     display: flex;
     justify-content: space-between;
@@ -2134,6 +2205,9 @@ a:hover { text-decoration: underline; }
     .top10-cards { grid-template-columns: 1fr; }
     .top10-prices { grid-template-columns: 1fr; }
     .premarket-panels { grid-template-columns: 1fr; }
+    .advisor-panel-head { align-items: flex-start; }
+    .advisor-controls { width: 100%; }
+    .advisor-controls input { width: 100%; max-width: 180px; }
     .feature-cards { grid-template-columns: 1fr; }
     .price-tracker-section, .feature-importance-section, .news-section { margin: 16px; padding: 16px; }
 }

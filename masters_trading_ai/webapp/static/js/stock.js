@@ -696,6 +696,20 @@ async function loadPrediction(options = {}) {
         const agreementVal = Number(data.model_agreement);
         document.getElementById('pred-confidence').textContent = Number.isFinite(confVal) ? `${confVal.toFixed(0)}%` : '—';
         document.getElementById('pred-agreement').textContent = Number.isFinite(agreementVal) ? `${agreementVal.toFixed(0)}%` : '—';
+        const atrPct = Number(data.atr_pct || 0);
+        const avgVol = Number(data.avg_volume_30d || 0);
+        const liqFactor = Number(data.liquidity_factor || 0);
+        const atrEl = document.getElementById('stat-atr');
+        const liqEl = document.getElementById('stat-liquidity');
+        if (atrEl) atrEl.textContent = Number.isFinite(atrPct) && atrPct > 0 ? `${atrPct.toFixed(2)}%` : '—';
+        if (liqEl) {
+            if (Number.isFinite(avgVol) && avgVol > 0) {
+                const liqTxt = Number.isFinite(liqFactor) && liqFactor > 0 ? ` (${liqFactor.toFixed(2)}x)` : '';
+                liqEl.textContent = `${formatVolume(avgVol)}${liqTxt}`;
+            } else {
+                liqEl.textContent = '—';
+            }
+        }
 
         // Show generated-at timestamp
         const genEl = document.getElementById('pred-generated-at');

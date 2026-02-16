@@ -240,6 +240,16 @@ function handleMetricLabelKey(evt, term, context = '') {
     }
 }
 
+function showAlphaFormulaTooltip(evt) {
+    const alphaContext = [
+        'Simplified Alpha: alpha = actual_return - benchmark_return.',
+        'CAPM Alpha: alpha = R_p - [R_f + beta × (R_m - R_f)].',
+        'In this dashboard, simplified alpha is primary for daily trading; CAPM alpha is shown as a risk-adjusted reference.',
+        'Click the metric again to keep the popover open and scroll for full explanation.',
+    ].join(' ');
+    showMetricTooltip(evt, 'Alpha Formula Used', alphaContext);
+}
+
 // ── Index Prices ──────────────────────────────────
 async function loadIndexPrices() {
     try {
@@ -675,9 +685,10 @@ async function showTopAnalysis() {
 }
 
 // ── Top Picks ─────────────────────────────────────
-async function showTopPicks() {
+async function showTopPicks(evt = null) {
     document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
-    event.target.classList.add('active');
+    const trigger = evt?.target || (typeof event !== 'undefined' ? event.target : null);
+    if (trigger && trigger.classList) trigger.classList.add('active');
 
     document.getElementById('stock-grid').style.display = 'none';
     document.getElementById('expected-actual-section').classList.add('hidden');
@@ -693,7 +704,7 @@ async function showTopPicks() {
     grid.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>Running ML predictions across all sectors... This may take 2-5 minutes.</p></div>';
 
     try {
-        const res = await fetch('/api/top-picks?sectors=large_cap&sectors=banking&sectors=mid_cap&n=30&grouped=true');
+        const res = await fetch('/api/top-picks?sectors=large_cap&sectors=banking&sectors=mid_cap&sectors=high_volatility&sectors=commodities&n=50&grouped=true');
         const data = await res.json();
 
         if (data.error) {
@@ -709,9 +720,19 @@ async function showTopPicks() {
         highlightedPremarketTicker = selected.length ? selected[0].ticker : null;
         await loadPremarketOutlook();
         renderTopPicks();
+        if (typeof loadAdvisorOpenBuyList === 'function') {
+            await loadAdvisorOpenBuyList();
+        }
+        if (typeof refreshAdvisorSummary === 'function') {
+            await refreshAdvisorSummary();
+        }
     } catch (e) {
         grid.innerHTML = `<div class="loading-spinner"><p>Error: ${e.message}</p></div>`;
     }
+}
+
+async function refreshTopPicksAndSnapshots() {
+    await showTopPicks();
 }
 
 function setTopPickFilter(filterKey) {
@@ -755,6 +776,8 @@ function renderTopPicks() {
         const signalClass = signalLower.includes('buy') ? 'buy' : signalLower.includes('sell') ? 'sell' : 'hold';
         const returnSign = isUp ? '+' : '';
         const strategyTarget = Number(pick.target_price || pick.predicted_price || 0);
+        const scoreVal = Number(pick._score || 0);
+        const liqVal = Number(pick.liquidity_factor || 0);
 
         html += `
         <div class="pick-card" onclick="window.location='/stock/${encodeURIComponent(pick.ticker)}'">
@@ -801,6 +824,20 @@ function renderTopPicks() {
                           onblur="hideMetricTooltip()"
                           onkeydown="handleMetricLabelKey(event, 'Model Agreement', 'Top picks model agreement')">Agreement</span>
                     <span class="value">${Number(pick.model_agreement || 0).toFixed(0)}%</span>
+                </div>
+                <div class="pick-detail">
+                    <span class="label clickable-metric" tabindex="0" role="button"
+                          onmouseenter="showMetricTooltip(event, 'Composite Score', 'score = |predicted_return_decimal| × (confidence/100) × (agreement/100) × liquidity_factor')"
+                          onmousemove="moveMetricTooltip(event)"
+                          onmouseleave="hideMetricTooltip()"
+                          onfocus="showMetricTooltip(event, 'Composite Score', 'score = |predicted_return_decimal| × (confidence/100) × (agreement/100) × liquidity_factor')"
+                          onblur="hideMetricTooltip()"
+                          onkeydown="handleMetricLabelKey(event, 'Composite Score', 'score = |predicted_return_decimal| × (confidence/100) × (agreement/100) × liquidity_factor')">Score</span>
+                    <span class="value">${Number.isFinite(scoreVal) ? scoreVal.toFixed(4) : '—'}</span>
+                </div>
+                <div class="pick-detail">
+                    <span class="label">Liquidity</span>
+                    <span class="value">${Number.isFinite(liqVal) && liqVal > 0 ? `${liqVal.toFixed(2)}x` : '—'}</span>
                 </div>
             </div>
         </div>`;
@@ -1011,7 +1048,13 @@ async function loadExpectedVsActual() {
                 <span class="sc-value ${hitColor}">${data.hit_rate_pct}%</span>
             </div>
             <div class="summary-card">
-                <span class="sc-label">Avg Alpha</span>
+                <span class="sc-label clickable-metric" tabindex="0" role="button"
+                      onmouseenter="showAlphaFormulaTooltip(event)"
+                      onmousemove="moveMetricTooltip(event)"
+                      onmouseleave="hideMetricTooltip()"
+                      onfocus="showAlphaFormulaTooltip(event)"
+                      onblur="hideMetricTooltip()"
+                      onkeydown="handleMetricLabelKey(event, 'Alpha Formula Used', 'Simplified alpha = actual return minus benchmark return; CAPM alpha adjusts for beta and risk-free rate.')">Avg Alpha</span>
                 <span class="sc-value ${alphaColor}">${data.avg_alpha_pct >= 0 ? '+' : ''}${data.avg_alpha_pct}%</span>
             </div>
             <div class="summary-card">
@@ -1047,7 +1090,15 @@ async function loadExpectedVsActual() {
                 <td>${formatPrice(r.actual_price)}</td>
                 <td class="${actColor}">${r.actual_return_pct >= 0 ? '+' : ''}${r.actual_return_pct}%</td>
                 <td><span class="direction-badge ${dirClass}">${dirText}</span></td>
-                <td class="${alpColor}">${r.alpha_pct >= 0 ? '+' : ''}${r.alpha_pct}%${capmText}</td>
+                <td class="${alpColor}">
+                    <span class="clickable-metric" tabindex="0" role="button"
+                          onmouseenter="showMetricTooltip(event, 'Alpha (Ticker)', 'Simplified alpha is actual_return - benchmark_return. CAPM alpha adjusts for beta and risk-free rate. Ticker: ${r.ticker}.')"
+                          onmousemove="moveMetricTooltip(event)"
+                          onmouseleave="hideMetricTooltip()"
+                          onfocus="showMetricTooltip(event, 'Alpha (Ticker)', 'Simplified alpha is actual_return - benchmark_return. CAPM alpha adjusts for beta and risk-free rate. Ticker: ${r.ticker}.')"
+                          onblur="hideMetricTooltip()"
+                          onkeydown="handleMetricLabelKey(event, 'Alpha (Ticker)', 'Simplified alpha is actual_return - benchmark_return. CAPM alpha adjusts for beta and risk-free rate. Ticker: ${r.ticker}.')">${r.alpha_pct >= 0 ? '+' : ''}${r.alpha_pct}%</span>${capmText}
+                </td>
             </tr>`;
         }
 
@@ -1064,7 +1115,13 @@ async function loadExpectedVsActual() {
                     <th>Actual Price</th>
                     <th>Actual Return</th>
                     <th>Strategy vs Actual</th>
-                    <th>Alpha</th>
+                    <th><span class="clickable-metric" tabindex="0" role="button"
+                              onmouseenter="showAlphaFormulaTooltip(event)"
+                              onmousemove="moveMetricTooltip(event)"
+                              onmouseleave="hideMetricTooltip()"
+                              onfocus="showAlphaFormulaTooltip(event)"
+                              onblur="hideMetricTooltip()"
+                              onkeydown="handleMetricLabelKey(event, 'Alpha Formula Used', 'Simplified alpha = actual return minus benchmark return; CAPM alpha adjusts for beta and risk-free rate.')">Alpha ℹ️</span></th>
                 </tr>
             </thead>
             <tbody>${rows}</tbody>

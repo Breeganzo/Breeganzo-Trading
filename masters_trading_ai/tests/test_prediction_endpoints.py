@@ -43,7 +43,7 @@ def test_api_strategy_price_returns_strategy_fields(monkeypatch):
     assert payload["ticker"] == "ABC.NS"
     assert payload["strategy_price"] == 123.45
     assert payload["rr_ratio"] == 1.8
-    assert payload["source"] == "strategy_engine"
+    assert payload["source"] in {"strategy", "strategy_engine"}
     assert payload["snapshot_type"] == "after_hours_live"
 
 

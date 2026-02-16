@@ -4,6 +4,7 @@ Production-focused NSE trading dashboard with:
 - live yfinance prices,
 - ensemble model predictions,
 - premarket strategy snapshots,
+- trading-desk advisor simulation (budget + fee constrained),
 - expected-vs-actual tracking,
 - portfolio-only risk analytics,
 - Groq-assisted explainability.
@@ -104,6 +105,42 @@ Guarantees:
 - rows with `current_price <= 0` are filtered out
 - `abs(predicted_return) <= 50`
 - `predicted_price` aligns with return contract
+- max `n` is capped at `50`
+- ranking is confidence-first, then score:
+  - `score = |predicted_return_decimal| × (confidence/100) × (model_agreement/100) × liquidity_factor`
+
+### `/api/advisor/open-buy-list`
+```bash
+curl -s 'http://localhost:5001/api/advisor/open-buy-list?n=10&budget=40000' | jq
+```
+
+Returns strategy-only open-buy suggestions constrained by `budget` + estimated entry fees:
+- `ticker`, `strategy_price_at_open`, `suggested_qty`
+- `est_trade_cost`, `stop_loss_price`, `risk_reward`
+- `liquidity_factor`, `avg_volume_30d`, `volatility_atr_pct`
+- `source = strategy`
+
+### `/api/simulate/trade` and `/api/simulate/portfolio`
+```bash
+# Buy simulation
+curl -s -X POST 'http://localhost:5001/api/simulate/trade' \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"BUY","ticker":"INFY.NS","quantity":5,"price":1400,"stop_loss_price":1360,"target_price":1450}' | jq
+
+# Auto stop-loss/target checks
+curl -s -X POST 'http://localhost:5001/api/simulate/trade' \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"AUTO_CHECK"}' | jq
+
+# Read simulated portfolio
+curl -s 'http://localhost:5001/api/simulate/portfolio' | jq
+```
+
+Simulation state is persisted in:
+- `cache/portfolio_sim.json`
+- `cache/prediction_log/simulated_trades.jsonl`
+
+Important: this is simulation only; no live brokerage order is sent.
 
 ### `/api/expected-vs-actual`
 ```bash
@@ -145,9 +182,16 @@ curl -s 'http://localhost:5001/api/training-feedback' | jq
 Export schema is retraining-friendly and includes direction comparison fields.
 
 ## 7) Dashboard behavior
-- Top Picks supports dropdown: `Top 10 BUY`, `Top 10 SELL`, `Top 10 HOLD`.
+- Top Picks supports dropdown: `BUY`, `SELL`, `HOLD` (SELL/HOLD restricted to portfolio symbols).
+- Top Picks and Top-10 Analysis are separate:
+  - Top Picks: actionable ranked list (up to 50).
+  - Top-10 Analysis: deep analytics cards and context.
 - New table: **Premarket vs Current**.
 - New table: **Current Second Snapshot** for highlighted ticker.
+- New **Trading Desk Advisor** panel:
+  - default simulation cash ₹40,000,
+  - open-buy list constrained by budget + estimated fees,
+  - simulated BUY/SELL and auto stop-loss/target checks.
 - `0/null` prices render as `—` (not fake `₹0`).
 
 ## 8) Risk analytics behavior
@@ -236,7 +280,8 @@ Early retrain triggers:
 - Sustained alpha degradation for 10+ trading sessions.
 - Portfolio risk metrics degrade (Sharpe collapse / drawdown regime shift).
 
-See `docs/DAILY_OPERATIONS.md` for detailed runbook.
+See `DAILY_OPERATIONS.md` for detailed runbook.
 
 ## 15) Trading disclaimer
 This system supports decision quality, not guaranteed profit. Use risk limits, monitor regime shifts, and keep ongoing retraining/backtesting in loop.
+All advisor automation paths in this app are simulation-only.

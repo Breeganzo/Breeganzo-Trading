@@ -681,6 +681,17 @@ class LivePredictor:
         if current_price <= 0:
             return None
 
+        avg_volume_30d = 0.0
+        try:
+            if "Volume" in feat_df.columns:
+                vol_series = pd.to_numeric(feat_df["Volume"], errors="coerce").dropna()
+                if not vol_series.empty:
+                    avg_volume_30d = float(vol_series.tail(30).mean())
+            if avg_volume_30d <= 0 and current_volume > 0:
+                avg_volume_30d = float(current_volume)
+        except Exception:
+            avg_volume_30d = float(current_volume or 0)
+
         # --- Base model predictions ---
         base_preds = {}
 
@@ -941,6 +952,8 @@ class LivePredictor:
             "atr_pct": round(atr_pct * 100, 2),
             "volume_ratio": round(volume_ratio, 2),
             "rvol": round(rvol, 2),
+            "avg_volume_30d": round(avg_volume_30d, 2) if avg_volume_30d > 0 else 0.0,
+            "liquidity_factor": 1.0,
         }
 
         # --- Add technical indicators ---
@@ -1163,11 +1176,35 @@ class LivePredictor:
 
     @staticmethod
     def _score_prediction(pred: dict) -> float:
-        pred_ret = abs(pred.get("predicted_return", 0))
-        conf = pred.get("confidence", 50)
-        agreement = pred.get("model_agreement", 50)
-        rr = max(pred.get("risk_reward", 0), 0)
-        return pred_ret * (conf / 100) * (agreement / 100) * (1 + rr * 0.1)
+        """
+        Composite ranking score for top picks.
+
+        score = |predicted_return_decimal| × (confidence/100) ×
+                (model_agreement/100) × liquidity_factor
+        """
+        pred_ret_decimal = abs(float(pred.get("predicted_return", 0) or 0)) / 100.0
+        conf = max(0.0, min(100.0, float(pred.get("confidence", 50) or 50))) / 100.0
+        agreement = (
+            max(0.0, min(100.0, float(pred.get("model_agreement", 50) or 50))) / 100.0
+        )
+        liq = float(pred.get("liquidity_factor", 1.0) or 1.0)
+        if not np.isfinite(liq) or liq <= 0:
+            liq = 1.0
+        return pred_ret_decimal * conf * agreement * liq
+
+    @staticmethod
+    def _compute_liquidity_factor(avg_volume_30d: float, median_volume_30d: float) -> float:
+        """
+        Liquidity normalization based on 30-day average volume.
+        Clipped to avoid overweighting outliers.
+        """
+        avg_vol = float(avg_volume_30d or 0)
+        med_vol = float(median_volume_30d or 0)
+        if not np.isfinite(avg_vol) or avg_vol <= 0:
+            return 0.6
+        if not np.isfinite(med_vol) or med_vol <= 0:
+            return 1.0
+        return float(np.clip(avg_vol / med_vol, 0.6, 1.5))
 
     def predict_top_picks_grouped(
         self,
@@ -1175,6 +1212,7 @@ class LivePredictor:
         top_n: int = 10,
         sectors: list[str] | None = None,
     ) -> dict[str, list[dict]]:
+        top_n = max(1, min(int(top_n), 50))
         if not self._loaded:
             self.load_models()
 
@@ -1188,10 +1226,30 @@ class LivePredictor:
                     continue
                 if pred.get("current_price", 0) <= 0:
                     continue
-                pred["_score"] = self._score_prediction(pred)
                 results.append(pred)
             except Exception:
                 continue
+
+        volume_samples = [
+            float(r.get("avg_volume_30d", 0) or 0)
+            for r in results
+            if float(r.get("avg_volume_30d", 0) or 0) > 0
+        ]
+        median_volume_30d = (
+            float(np.median(volume_samples))
+            if volume_samples
+            else 0.0
+        )
+        for pred in results:
+            liq_factor = self._compute_liquidity_factor(
+                avg_volume_30d=float(pred.get("avg_volume_30d", 0) or 0),
+                median_volume_30d=median_volume_30d,
+            )
+            pred["liquidity_factor"] = round(liq_factor, 4)
+            pred["median_volume_30d"] = (
+                round(median_volume_30d, 2) if median_volume_30d > 0 else None
+            )
+            pred["_score"] = self._score_prediction(pred)
 
         buy_signals = {"BUY", "STRONG_BUY"}
         sell_signals = {"SELL", "STRONG_SELL"}
@@ -1200,19 +1258,25 @@ class LivePredictor:
             [r for r in results if str(r.get("signal", "")).upper() in buy_signals],
             key=lambda x: (
                 x.get("confidence", 0),
-                x.get("predicted_return", 0),
                 x.get("_score", 0),
+                x.get("predicted_return", 0),
             ),
             reverse=True,
         )[:top_n]
         sells = sorted(
             [r for r in results if str(r.get("signal", "")).upper() in sell_signals],
-            key=lambda x: x["_score"],
+            key=lambda x: (
+                x.get("confidence", 0),
+                x.get("_score", 0),
+            ),
             reverse=True,
         )[:top_n]
         holds = sorted(
             [r for r in results if str(r.get("signal", "")).upper() == "HOLD"],
-            key=lambda x: (x.get("confidence", 0), -abs(x.get("predicted_return", 0))),
+            key=lambda x: (
+                x.get("confidence", 0),
+                x.get("_score", 0),
+            ),
             reverse=True,
         )[:top_n]
 
@@ -1251,17 +1315,25 @@ class LivePredictor:
         -------
         list[dict] — top_n results sorted by score (best first).
         """
+        top_n = max(1, min(int(top_n), 50))
         if n is not None:
-            top_n = n
+            top_n = max(1, min(int(n), 50))
 
         grouped = self.predict_top_picks_grouped(
             tickers=tickers,
             top_n=top_n,
             sectors=sectors,
         )
-        return (
-            grouped["top_buy"] + grouped["top_sell"][: min(3, len(grouped["top_sell"]))]
+        actionable = grouped["top_buy"] + grouped["top_sell"]
+        actionable = sorted(
+            actionable,
+            key=lambda x: (
+                x.get("confidence", 0),
+                x.get("_score", 0),
+            ),
+            reverse=True,
         )
+        return actionable[:top_n]
 
     def get_after_hours_review(self) -> dict:
         """
