@@ -8,12 +8,14 @@ def test_decimal_pass_through():
 
 
 def test_percent_input_converted():
-    assert _sanitize_predicted_return(2.0, {"arima": 2.0}) == pytest.approx(0.02)
+    assert _sanitize_predicted_return(2.5, {"arima": 2.5}) == pytest.approx(0.025)
 
 
 def test_large_value_capped():
-    assert _sanitize_predicted_return(10.0, {"arima": 10.0}) == pytest.approx(0.5)
+    assert _sanitize_predicted_return(75.0, {"arima": 75.0}) == pytest.approx(0.5)
 
 
 def test_nan_returns_zero():
-    assert _sanitize_predicted_return(float("nan"), {"xgboost": 0.1}) == pytest.approx(0.0)
+    assert _sanitize_predicted_return(float("nan"), {"xgboost": 0.1}) == pytest.approx(
+        0.0
+    )

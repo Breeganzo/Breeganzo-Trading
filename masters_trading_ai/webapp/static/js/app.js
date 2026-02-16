@@ -12,6 +12,8 @@ let autoRefreshTimer = null;
 let topPickFilter = 'top_buy';
 let groupedTopPicks = { top_buy: [], top_sell: [], top_hold: [] };
 let metricExplainCache = {};
+let premarketOutlookData = [];
+let highlightedPremarketTicker = null;
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -562,6 +564,9 @@ async function showTopPicks() {
             top_sell: data.top_sell || [],
             top_hold: data.top_hold || [],
         };
+        const selected = groupedTopPicks[topPickFilter] || [];
+        highlightedPremarketTicker = selected.length ? selected[0].ticker : null;
+        await loadPremarketOutlook();
         renderTopPicks();
     } catch (e) {
         grid.innerHTML = `<div class="loading-spinner"><p>Error: ${e.message}</p></div>`;
@@ -571,7 +576,13 @@ async function showTopPicks() {
 function setTopPickFilter(filterKey) {
     topPickFilter = filterKey;
     updateTopPickFilterButtons();
+    const picks = groupedTopPicks[topPickFilter] || [];
+    if (!highlightedPremarketTicker || !picks.some(p => p.ticker === highlightedPremarketTicker)) {
+        highlightedPremarketTicker = picks.length ? picks[0].ticker : null;
+    }
     renderTopPicks();
+    renderPremarketOutlookTable();
+    loadCurrentSecondSnapshot();
 }
 
 function updateTopPickFilterButtons() {
@@ -591,10 +602,13 @@ function renderTopPicks() {
 
     let html = '';
     for (const pick of picks) {
-        const isUp = Number(pick.predicted_return) >= 0;
+        const predictedReturn = Number(pick.predicted_return);
+        const hasPredictedReturn = Number.isFinite(predictedReturn);
+        const isUp = hasPredictedReturn ? predictedReturn >= 0 : true;
         const signalLower = String(pick.signal || '').toLowerCase();
         const signalClass = signalLower.includes('buy') ? 'buy' : signalLower.includes('sell') ? 'sell' : 'hold';
         const returnSign = isUp ? '+' : '';
+        const strategyTarget = Number(pick.target_price || pick.predicted_price || 0);
 
         html += `
         <div class="pick-card" onclick="window.location='/stock/${encodeURIComponent(pick.ticker)}'">
@@ -612,11 +626,11 @@ function renderTopPicks() {
                 </div>
                 <div class="pick-detail">
                     <span class="label">Predicted Return</span>
-                    <span class="value ${isUp ? 'up-color' : 'down-color'}">${returnSign}${Number(pick.predicted_return || 0).toFixed(3)}%</span>
+                    <span class="value ${hasPredictedReturn ? (isUp ? 'up-color' : 'down-color') : ''}">${hasPredictedReturn ? `${returnSign}${predictedReturn.toFixed(3)}%` : '—'}</span>
                 </div>
                 <div class="pick-detail">
                     <span class="label">Strategy Target</span>
-                    <span class="value">${formatPrice(pick.target_price || pick.predicted_price)}</span>
+                    <span class="value">${strategyTarget > 0 ? formatPrice(strategyTarget) : '—'}</span>
                 </div>
                 <div class="pick-detail">
                     <span class="label">AI Predicted</span>
@@ -640,6 +654,115 @@ function renderTopPicks() {
         </div>`;
     }
     grid.innerHTML = html;
+}
+
+async function loadPremarketOutlook() {
+    const table = document.getElementById('premarket-table-body');
+    const header = document.getElementById('premarket-captured-at');
+    if (!table) return;
+
+    table.innerHTML = '<tr><td colspan="6" class="muted-text">Loading premarket snapshot...</td></tr>';
+    try {
+        const res = await fetch('/api/premarket-outlook');
+        const data = await res.json();
+        if (!res.ok || data.error) {
+            table.innerHTML = `<tr><td colspan="6" class="muted-text">${data.error || 'Premarket snapshot unavailable'}</td></tr>`;
+            premarketOutlookData = [];
+            if (header) header.textContent = 'Premarket snapshot unavailable';
+            return;
+        }
+        premarketOutlookData = data.items || [];
+        if (!highlightedPremarketTicker && premarketOutlookData.length) {
+            highlightedPremarketTicker = premarketOutlookData[0].ticker;
+        }
+        if (header) {
+            const capturedAt = data.captured_at ? new Date(data.captured_at).toLocaleString('en-IN') : '—';
+            const bufferLabel = data.captured_within_buffer === false ? ' (captured after buffer cutoff)' : '';
+            header.textContent = `Captured: ${capturedAt}${bufferLabel}`;
+        }
+        renderPremarketOutlookTable();
+        loadCurrentSecondSnapshot();
+    } catch (e) {
+        table.innerHTML = `<tr><td colspan="6" class="muted-text">Premarket fetch failed: ${e.message}</td></tr>`;
+        if (header) header.textContent = 'Premarket snapshot unavailable';
+    }
+}
+
+function renderPremarketOutlookTable() {
+    const table = document.getElementById('premarket-table-body');
+    if (!table) return;
+    if (!premarketOutlookData.length) {
+        table.innerHTML = '<tr><td colspan="6" class="muted-text">No premarket rows available.</td></tr>';
+        return;
+    }
+
+    const currentFilterSet = new Set((groupedTopPicks[topPickFilter] || []).map(p => p.ticker));
+    const rows = premarketOutlookData.filter(row => currentFilterSet.size === 0 || currentFilterSet.has(row.ticker));
+    const viewRows = rows.length ? rows : premarketOutlookData;
+
+    table.innerHTML = viewRows.map(row => {
+        const selected = row.ticker === highlightedPremarketTicker ? 'selected' : '';
+        const aligned = row.strategy_direction === row.ai_direction;
+        return `
+            <tr class="premarket-row ${selected}" onclick="selectPremarketTicker('${row.ticker}')">
+                <td><strong>${row.name || row.ticker.replace('.NS', '')}</strong><br><span class="muted-text">${row.ticker}</span></td>
+                <td>${formatPrice(row.current_price)}</td>
+                <td>${Number(row.strategy_price_at_open || 0) > 0 ? formatPrice(row.strategy_price_at_open) : '—'}</td>
+                <td>${Number(row.ai_predicted_price || 0) > 0 ? formatPrice(row.ai_predicted_price) : '—'}</td>
+                <td>${row.strategy_direction || 'FLAT'} / ${row.ai_direction || 'FLAT'}</td>
+                <td><span class="direction-badge ${aligned ? 'correct' : 'wrong'}">${aligned ? 'Aligned' : 'Divergent'}</span></td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function selectPremarketTicker(ticker) {
+    highlightedPremarketTicker = ticker;
+    renderPremarketOutlookTable();
+    loadCurrentSecondSnapshot();
+}
+
+async function loadCurrentSecondSnapshot() {
+    const body = document.getElementById('current-second-body');
+    const label = document.getElementById('current-second-ticker');
+    if (!body) return;
+
+    const fallbackTicker = (groupedTopPicks[topPickFilter] || [])[0]?.ticker;
+    const ticker = highlightedPremarketTicker || fallbackTicker;
+    if (!ticker) {
+        body.innerHTML = '<tr><td colspan="4" class="muted-text">Select a ticker from the premarket table.</td></tr>';
+        if (label) label.textContent = '—';
+        return;
+    }
+
+    body.innerHTML = '<tr><td colspan="4" class="muted-text">Loading live snapshot...</td></tr>';
+    if (label) label.textContent = ticker;
+    try {
+        const res = await fetch(`/api/price-tracker/${encodeURIComponent(ticker)}`);
+        const data = await res.json();
+        if (!res.ok || data.error) {
+            body.innerHTML = `<tr><td colspan="4" class="muted-text">${data.error || 'Snapshot unavailable'}</td></tr>`;
+            return;
+        }
+
+        const strategyNow = Number(data.strategy_predicted_price || data.predicted_price || 0);
+        const aiNow = Number(data.ai_predicted_price || 0);
+        const current = Number(data.current_price || 0);
+        const strategyDir = strategyNow > current ? 'UP' : strategyNow < current ? 'DOWN' : 'FLAT';
+        const aiDir = aiNow > current ? 'UP' : aiNow < current ? 'DOWN' : 'FLAT';
+        const aligned = strategyDir === aiDir;
+
+        body.innerHTML = `
+            <tr>
+                <td>${formatPrice(current)}</td>
+                <td>${strategyNow > 0 ? formatPrice(strategyNow) : '—'}</td>
+                <td>${aiNow > 0 ? formatPrice(aiNow) : '—'}</td>
+                <td><span class="direction-badge ${aligned ? 'correct' : 'wrong'}">${strategyDir}/${aiDir}</span></td>
+            </tr>
+        `;
+    } catch (e) {
+        body.innerHTML = `<tr><td colspan="4" class="muted-text">Snapshot fetch failed: ${e.message}</td></tr>`;
+    }
 }
 
 // ── Expected vs Actual ────────────────────────────
@@ -718,8 +841,8 @@ async function loadExpectedVsActual() {
 
         let rows = '';
         for (const r of data.results) {
-            const dirClass = r.direction_correct ? 'correct' : 'wrong';
-            const dirText = r.direction_correct ? '✓ Correct' : '✗ Wrong';
+            const dirClass = r.direction_comparison ? 'correct' : 'wrong';
+            const dirText = r.direction_comparison ? '✓ Aligned' : '✗ Divergent';
             const predColor = r.predicted_return_pct >= 0 ? 'up-color' : 'down-color';
             const actColor = r.actual_return_pct >= 0 ? 'up-color' : 'down-color';
             const alpColor = r.alpha_pct >= 0 ? 'up-color' : 'down-color';
@@ -730,6 +853,8 @@ async function loadExpectedVsActual() {
                 <td>${r.signal}</td>
                 <td class="${predColor}">${r.predicted_return_pct >= 0 ? '+' : ''}${r.predicted_return_pct}%</td>
                 <td>${formatPrice(r.predicted_price)}</td>
+                <td>${Number(r.strategy_price_at_open || 0) > 0 ? formatPrice(r.strategy_price_at_open) : '—'}</td>
+                <td>${Number(r.ai_last_prediction || 0) > 0 ? formatPrice(r.ai_last_prediction) : '—'}</td>
                 <td>${formatPrice(r.actual_price)}</td>
                 <td class="${actColor}">${r.actual_return_pct >= 0 ? '+' : ''}${r.actual_return_pct}%</td>
                 <td><span class="direction-badge ${dirClass}">${dirText}</span></td>
@@ -745,9 +870,11 @@ async function loadExpectedVsActual() {
                     <th>Signal</th>
                     <th>Predicted</th>
                     <th>Pred. Price</th>
+                    <th>Strategy@Open</th>
+                    <th>AI Last</th>
                     <th>Actual Price</th>
                     <th>Actual Return</th>
-                    <th>Direction</th>
+                    <th>Open vs AI</th>
                     <th>Alpha</th>
                 </tr>
             </thead>

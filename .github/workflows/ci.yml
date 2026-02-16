@@ -1,0 +1,58 @@
+name: Masters Trading AI CI
+
+on:
+  pull_request:
+    paths:
+      - "masters_trading_ai/**"
+      - ".github/workflows/ci.yml"
+  push:
+    branches:
+      - feature/predictor-productionize
+      - fix/predictor-sanity
+    paths:
+      - "masters_trading_ai/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+jobs:
+  test-and-lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: masters_trading_ai
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install black flake8 mypy
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Black check
+        run: |
+          black --check \
+            src/inference/predictor.py \
+            webapp/server.py \
+            webapp/prediction_tracker.py \
+            tests/test_predictor_sanity.py \
+            tests/test_api_top_picks.py \
+            tests/test_premarket_outlook.py \
+            tests/test_expected_vs_actual.py \
+            tests/test_backtest_costs.py
+
+      - name: Flake8
+        run: flake8 tests --max-line-length=120 --extend-ignore=E203,W503,E501
+
+      - name: Mypy
+        run: mypy webapp/prediction_tracker.py --ignore-missing-imports --follow-imports=silent --disable-error-code=import-untyped --namespace-packages --explicit-package-bases

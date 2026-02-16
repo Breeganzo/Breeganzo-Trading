@@ -99,6 +99,52 @@
                     <option value="top_hold">Top 10 HOLD</option>
                 </select>
             </div>
+            <div class="premarket-panels">
+                <div class="premarket-panel">
+                    <div class="premarket-panel-head">
+                        <h3>Premarket vs Current</h3>
+                        <span id="premarket-captured-at" class="muted-text">Loading snapshot...</span>
+                    </div>
+                    <div class="premarket-table-wrap">
+                        <table class="premarket-table">
+                            <thead>
+                                <tr>
+                                    <th>Ticker</th>
+                                    <th>Current Price</th>
+                                    <th>Strategy Price (Open)</th>
+                                    <th>AI Predicted (Now)</th>
+                                    <th>Directions</th>
+                                    <th>Comparison</th>
+                                </tr>
+                            </thead>
+                            <tbody id="premarket-table-body">
+                                <tr><td colspan="6" class="muted-text">Loading premarket snapshot...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="premarket-panel compact">
+                    <div class="premarket-panel-head">
+                        <h3>Current Second Snapshot</h3>
+                        <span id="current-second-ticker" class="muted-text">—</span>
+                    </div>
+                    <div class="premarket-table-wrap">
+                        <table class="premarket-table">
+                            <thead>
+                                <tr>
+                                    <th>Current Price</th>
+                                    <th>Strategy Prediction (Now)</th>
+                                    <th>AI Prediction (Now)</th>
+                                    <th>Direction Comparison</th>
+                                </tr>
+                            </thead>
+                            <tbody id="current-second-body">
+                                <tr><td colspan="4" class="muted-text">Select a ticker to view current-second comparison.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
             <div class="picks-grid" id="picks-grid">
                 <div class="loading-spinner"><div class="spinner"></div><p>Generating predictions...</p></div>
             </div>

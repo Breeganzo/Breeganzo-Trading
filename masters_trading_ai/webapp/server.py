@@ -29,10 +29,15 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 # ── Validate critical environment variables at startup ──
 _REQUIRED_ENV = []  # Add keys here if they should be mandatory
-_OPTIONAL_ENV = {"GROQ_API_KEY": "AI explanations disabled", "FLASK_SECRET_KEY": "Using dev fallback"}
+_OPTIONAL_ENV = {
+    "GROQ_API_KEY": "AI explanations disabled",
+    "FLASK_SECRET_KEY": "Using dev fallback",
+}
 for _key in _REQUIRED_ENV:
     if not os.environ.get(_key):
-        raise EnvironmentError(f"Missing required env var: {_key}. Copy .env.example → .env and fill in values.")
+        raise EnvironmentError(
+            f"Missing required env var: {_key}. Copy .env.example → .env and fill in values."
+        )
 for _key, _msg in _OPTIONAL_ENV.items():
     if not os.environ.get(_key):
         print(f"⚠️  {_key} not set — {_msg}. See .env.example")
@@ -53,12 +58,21 @@ from src.tracking.prediction_logger import PredictionLogger
 from src.tracking.performance_reporter import PerformanceReporter
 
 from webapp.groq_explainer import (
-    explain_fundamental, explain_greek, explain_indicator,
-    get_groq_strategy, get_combined_strategy,
-    get_stock_overview, get_news_sentiment,
-    explain_risk_term, get_groq_price_forecast,
-    explain_model, stock_chat_response, portfolio_profit_suggestion,
-    suggest_ticker_shortlist, review_trade_plan, ai_risk_assessment,
+    explain_fundamental,
+    explain_greek,
+    explain_indicator,
+    get_groq_strategy,
+    get_combined_strategy,
+    get_stock_overview,
+    get_news_sentiment,
+    explain_risk_term,
+    get_groq_price_forecast,
+    explain_model,
+    stock_chat_response,
+    portfolio_profit_suggestion,
+    suggest_ticker_shortlist,
+    review_trade_plan,
+    ai_risk_assessment,
 )
 from webapp.prediction_tracker import PredictionTracker
 
@@ -101,6 +115,7 @@ class NumpyEncoder(json.JSONEncoder):
 # Flask 3.0+ removed json_encoder; use json_provider_class instead
 from flask.json.provider import DefaultJSONProvider
 
+
 class NumpyJSONProvider(DefaultJSONProvider):
     def default(self, obj):
         if isinstance(obj, (np.integer,)):
@@ -113,6 +128,7 @@ class NumpyJSONProvider(DefaultJSONProvider):
             return obj.tolist()
         return super().default(obj)
 
+
 app.json_provider_class = NumpyJSONProvider
 app.json = NumpyJSONProvider(app)
 
@@ -123,7 +139,37 @@ PREDICTION_LOG_DIR = CACHE_DIR / "prediction_log"
 PORTFOLIO_FILE = CACHE_DIR / "portfolio.json"
 PORTFOLIO_TRADES_FILE = CACHE_DIR / "portfolio_trades.json"
 DELISTED_TICKERS_FILE = CACHE_DIR / "delisted_tickers.csv"
+PREMARKET_OUTLOOK_FILE = CACHE_DIR / "premarket_outlook.json"
 PREDICTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _load_settings() -> dict:
+    """Load config/settings.yaml if available."""
+    settings_path = CONFIG_DIR / "settings.yaml"
+    if not settings_path.exists():
+        return {}
+    try:
+        with open(settings_path) as f:
+            data = yaml.safe_load(f) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        log.warning("Failed to load settings.yaml: %s", e)
+        return {}
+
+
+_settings = _load_settings()
+_webapp_settings = (
+    _settings.get("webapp", {}) if isinstance(_settings.get("webapp", {}), dict) else {}
+)
+PREMARKET_MAX_BUFFER_MINUTES = int(
+    os.environ.get(
+        "PREMARKET_MAX_BUFFER_MINUTES",
+        _webapp_settings.get("premarket_max_buffer_minutes", 30),
+    )
+)
+PREMARKET_MAX_BUFFER_MINUTES = int(np.clip(PREMARKET_MAX_BUFFER_MINUTES, 0, 180))
+PREMARKET_DEFAULT_TICKERS = int(_webapp_settings.get("premarket_default_tickers", 10))
+PREMARKET_DEFAULT_TICKERS = max(1, PREMARKET_DEFAULT_TICKERS)
 
 # Thread-safe lock for file I/O
 _log_lock = threading.Lock()
@@ -163,7 +209,13 @@ def load_tickers():
     with open(cfg_path) as f:
         data = yaml.safe_load(f)
 
-    tradeable_sectors = ["large_cap", "banking", "mid_cap", "high_volatility", "commodities"]
+    tradeable_sectors = [
+        "large_cap",
+        "banking",
+        "mid_cap",
+        "high_volatility",
+        "commodities",
+    ]
     for sec in tradeable_sectors:
         syms = data.get(sec, [])
         if isinstance(syms, list):
@@ -216,6 +268,27 @@ def _log_prediction(ticker: str, pred: dict):
     """Log prediction to daily JSON file for end-of-day comparison."""
     today_str = datetime.now(IST).strftime("%Y-%m-%d")
     log_file = PREDICTION_LOG_DIR / f"{today_str}.json"
+    predicted_return_pct = float(pred.get("predicted_return", 0) or 0)
+    current_price = float(pred.get("current_price", 0) or 0)
+    open_price = float(
+        _opening_prices.get(ticker, {}).get("open", current_price) or current_price
+    )
+    strategy_price_at_open = (
+        round(open_price * (1 + predicted_return_pct / 100.0), 2)
+        if open_price > 0
+        else float(pred.get("predicted_price", 0) or 0)
+    )
+    ai_last_prediction = float(pred.get("predicted_price", 0) or 0)
+    strategy_direction = (
+        "UP"
+        if strategy_price_at_open > open_price
+        else "DOWN" if strategy_price_at_open < open_price else "FLAT"
+    )
+    ai_direction = (
+        "UP"
+        if ai_last_prediction > current_price
+        else "DOWN" if ai_last_prediction < current_price else "FLAT"
+    )
 
     with _log_lock:
         existing = {}
@@ -230,6 +303,12 @@ def _log_prediction(ticker: str, pred: dict):
             "predicted_return": pred.get("predicted_return", 0),
             "predicted_price": pred.get("predicted_price", 0),
             "current_price": pred.get("current_price", 0),
+            "open_price": round(open_price, 2) if open_price > 0 else 0.0,
+            "strategy_price_at_open": strategy_price_at_open,
+            "ai_last_prediction": round(ai_last_prediction, 2),
+            "strategy_direction_at_open": strategy_direction,
+            "ai_direction_last": ai_direction,
+            "direction_comparison": strategy_direction == ai_direction,
             "signal": pred.get("signal", "HOLD"),
             "confidence": pred.get("confidence", 50),
             "model_predictions": pred.get("model_predictions", {}),
@@ -241,7 +320,14 @@ def _log_prediction(ticker: str, pred: dict):
 
     # Also record to prediction tracker for hit/miss tracking
     try:
-        PredictionTracker.record_prediction(ticker, pred)
+        tracked = dict(pred)
+        tracked["open_price"] = round(open_price, 2) if open_price > 0 else 0.0
+        tracked["strategy_price_at_open"] = strategy_price_at_open
+        tracked["ai_last_prediction"] = round(ai_last_prediction, 2)
+        tracked["strategy_direction_at_open"] = strategy_direction
+        tracked["ai_direction_last"] = ai_direction
+        tracked["direction_comparison"] = strategy_direction == ai_direction
+        PredictionTracker.record_prediction(ticker, tracked)
     except Exception as e:
         log.warning(f"Prediction tracking failed for {ticker}: {e}")
 
@@ -331,18 +417,22 @@ def _save_delisted_registry_unlocked(registry: dict[str, dict]) -> None:
         writer.writeheader()
         for ticker in sorted(registry):
             row = registry[ticker]
-            writer.writerow({
-                "ticker": row.get("ticker", ticker),
-                "first_seen": row.get("first_seen", ""),
-                "last_seen": row.get("last_seen", ""),
-                "hit_count": int(row.get("hit_count", 0) or 0),
-                "last_reason": row.get("last_reason", ""),
-                "last_source": row.get("last_source", ""),
-                "status": row.get("status", "watchlist"),
-            })
+            writer.writerow(
+                {
+                    "ticker": row.get("ticker", ticker),
+                    "first_seen": row.get("first_seen", ""),
+                    "last_seen": row.get("last_seen", ""),
+                    "hit_count": int(row.get("hit_count", 0) or 0),
+                    "last_reason": row.get("last_reason", ""),
+                    "last_source": row.get("last_source", ""),
+                    "status": row.get("status", "watchlist"),
+                }
+            )
 
 
-def _record_unavailable_ticker(ticker: str, reason: str, source: str = "yfinance") -> None:
+def _record_unavailable_ticker(
+    ticker: str, reason: str, source: str = "yfinance"
+) -> None:
     """Track tickers that repeatedly fail to return valid price data."""
     t = str(ticker or "").strip().upper()
     if not t:
@@ -507,7 +597,12 @@ def _sanitize_portfolio_storage() -> dict:
             price = float(tr.get("price", 0) or 0)
         except Exception:
             qty, price = 0, 0
-        if not _is_tradeable_ticker(ticker) or side not in {"BUY", "SELL"} or qty <= 0 or price <= 0:
+        if (
+            not _is_tradeable_ticker(ticker)
+            or side not in {"BUY", "SELL"}
+            or qty <= 0
+            or price <= 0
+        ):
             removed_trade_rows += 1
             changed = True
             continue
@@ -525,7 +620,7 @@ def _sanitize_portfolio_storage() -> dict:
         rebuilt = [t for t in valid_trades if t.get("side") == "BUY"]
         if len(rebuilt) != len(valid_trades):
             changed = True
-            removed_trade_rows += (len(valid_trades) - len(rebuilt))
+            removed_trade_rows += len(valid_trades) - len(rebuilt)
             valid_trades = rebuilt
 
     valid_holdings: list[dict] = []
@@ -542,16 +637,18 @@ def _sanitize_portfolio_storage() -> dict:
     if changed:
         _write_portfolio_trades(valid_trades)
         summary = _portfolio_summary_from_trades(valid_trades)
-        _write_portfolio([
-            {
-                "ticker": row["ticker"],
-                "name": row["name"],
-                "quantity": row["quantity"],
-                "entry_price": row["avg_buy_price"],
-                "updated_at": datetime.now(IST).isoformat(),
-            }
-            for row in summary["positions"]
-        ])
+        _write_portfolio(
+            [
+                {
+                    "ticker": row["ticker"],
+                    "name": row["name"],
+                    "quantity": row["quantity"],
+                    "entry_price": row["avg_buy_price"],
+                    "updated_at": datetime.now(IST).isoformat(),
+                }
+                for row in summary["positions"]
+            ]
+        )
 
     return {
         "changed": changed,
@@ -561,7 +658,9 @@ def _sanitize_portfolio_storage() -> dict:
     }
 
 
-def _portfolio_summary_from_trades(trades: list[dict], include_live_prices: bool = True) -> dict:
+def _portfolio_summary_from_trades(
+    trades: list[dict], include_live_prices: bool = True
+) -> dict:
     positions: dict[str, dict] = {}
     realized_total = 0.0
 
@@ -615,11 +714,17 @@ def _portfolio_summary_from_trades(trades: list[dict], include_live_prices: bool
         m2m = curr * row["quantity"] if curr > 0 else 0.0
         row["market_value"] = round(m2m, 2)
         row["unrealized_pnl"] = round(m2m - row["cost_value"], 2)
-        row["unrealized_pnl_pct"] = round(((m2m - row["cost_value"]) / row["cost_value"] * 100), 3) if row["cost_value"] > 0 and m2m > 0 else 0.0
-        unrealized_total += (m2m - row["cost_value"])
+        row["unrealized_pnl_pct"] = (
+            round(((m2m - row["cost_value"]) / row["cost_value"] * 100), 3)
+            if row["cost_value"] > 0 and m2m > 0
+            else 0.0
+        )
+        unrealized_total += m2m - row["cost_value"]
 
     return {
-        "positions": sorted(positions.values(), key=lambda x: x["cost_value"], reverse=True),
+        "positions": sorted(
+            positions.values(), key=lambda x: x["cost_value"], reverse=True
+        ),
         "position_count": len(positions),
         "realized_pnl": round(realized_total, 2),
         "unrealized_pnl": round(unrealized_total, 2),
@@ -630,6 +735,7 @@ def _portfolio_summary_from_trades(trades: list[dict], include_live_prices: bool
 def _get_live_prices_batch(tickers: list[str]) -> dict:
     """Get live prices for multiple tickers using yfinance."""
     import yfinance as yf
+
     result: dict[str, dict] = {}
 
     clean_tickers = [str(t).strip().upper() for t in tickers if str(t).strip()]
@@ -656,11 +762,15 @@ def _get_live_prices_batch(tickers: list[str]) -> dict:
             clean_tickers if len(clean_tickers) > 1 else clean_tickers[0],
             period="2d",
             interval="1d",
-            progress=False, auto_adjust=True, threads=True,
+            progress=False,
+            auto_adjust=True,
+            threads=True,
         )
         if data is None or data.empty:
             if len(clean_tickers) == 1:
-                _record_unavailable_ticker(clean_tickers[0], "empty_batch_data", "yfinance_single")
+                _record_unavailable_ticker(
+                    clean_tickers[0], "empty_batch_data", "yfinance_single"
+                )
             return result
 
         successful: set[str] = set()
@@ -670,7 +780,9 @@ def _get_live_prices_batch(tickers: list[str]) -> dict:
 
                 if close_col is None or close_col.dropna().empty:
                     if len(clean_tickers) == 1:
-                        _record_unavailable_ticker(ticker, "missing_close_series", "yfinance_single")
+                        _record_unavailable_ticker(
+                            ticker, "missing_close_series", "yfinance_single"
+                        )
                     continue
 
                 close_vals = close_col.dropna()
@@ -684,10 +796,26 @@ def _get_live_prices_batch(tickers: list[str]) -> dict:
                 low_col = _extract_field_series(data, "Low", ticker)
                 open_col = _extract_field_series(data, "Open", ticker)
 
-                vol = float(vol_col.dropna().iloc[-1]) if vol_col is not None and not vol_col.dropna().empty else 0
-                high = float(high_col.dropna().iloc[-1]) if high_col is not None and not high_col.dropna().empty else current
-                low = float(low_col.dropna().iloc[-1]) if low_col is not None and not low_col.dropna().empty else current
-                open_p = float(open_col.dropna().iloc[-1]) if open_col is not None and not open_col.dropna().empty else current
+                vol = (
+                    float(vol_col.dropna().iloc[-1])
+                    if vol_col is not None and not vol_col.dropna().empty
+                    else 0
+                )
+                high = (
+                    float(high_col.dropna().iloc[-1])
+                    if high_col is not None and not high_col.dropna().empty
+                    else current
+                )
+                low = (
+                    float(low_col.dropna().iloc[-1])
+                    if low_col is not None and not low_col.dropna().empty
+                    else current
+                )
+                open_p = (
+                    float(open_col.dropna().iloc[-1])
+                    if open_col is not None and not open_col.dropna().empty
+                    else current
+                )
 
                 result[ticker] = {
                     "price": round(current, 2),
@@ -705,11 +833,17 @@ def _get_live_prices_batch(tickers: list[str]) -> dict:
             except Exception as exc:
                 log.debug(f"Price fetch failed for {ticker}: {exc}")
                 if len(clean_tickers) == 1:
-                    _record_unavailable_ticker(ticker, f"price_fetch_exception:{type(exc).__name__}", "yfinance_single")
+                    _record_unavailable_ticker(
+                        ticker,
+                        f"price_fetch_exception:{type(exc).__name__}",
+                        "yfinance_single",
+                    )
                 continue
 
         if not successful and len(clean_tickers) == 1:
-            _record_unavailable_ticker(clean_tickers[0], "all_missing_single_ticker", "yfinance_single")
+            _record_unavailable_ticker(
+                clean_tickers[0], "all_missing_single_ticker", "yfinance_single"
+            )
     except Exception as e:
         log.warning(f"Batch price fetch error: {e}")
 
@@ -803,21 +937,40 @@ def api_status():
         load_elapsed = max(0.0, ref - models_load_started_at)
 
     load_progress = predictor.get_load_status() if predictor else {}
-    return jsonify({
-        "models_loaded": models_loaded,
-        "models_loading": models_loading,
-        "load_error": load_error,
-        "model_count": len(predictor.models) if predictor else 0,
-        "model_load_elapsed_sec": round(load_elapsed, 1),
-        "model_load_progress": load_progress,
-        "market": {
-            "status": mkt["status"],
-            "description": mkt["description"],
-            "next_open": mkt.get("next_open", ""),
-            "ist_now": mkt["ist_now"].strftime("%d %b %Y, %I:%M %p IST"),
-        },
-        "ticker_count": len(all_tickers),
-    })
+    with _premarket_snapshot_lock:
+        premarket_meta = (
+            {
+                "date": _premarket_snapshot.get("date"),
+                "captured_at": _premarket_snapshot.get("captured_at"),
+                "captured_within_buffer": _premarket_snapshot.get(
+                    "captured_within_buffer"
+                ),
+            }
+            if _premarket_snapshot
+            else {}
+        )
+    return jsonify(
+        {
+            "models_loaded": models_loaded,
+            "models_loading": models_loading,
+            "load_error": load_error,
+            "model_count": len(predictor.models) if predictor else 0,
+            "model_load_elapsed_sec": round(load_elapsed, 1),
+            "model_load_progress": load_progress,
+            "market": {
+                "status": mkt["status"],
+                "description": mkt["description"],
+                "next_open": mkt.get("next_open", ""),
+                "ist_now": mkt["ist_now"].strftime("%d %b %Y, %I:%M %p IST"),
+            },
+            "ticker_count": len(all_tickers),
+            "premarket_config": {
+                "max_buffer_minutes": PREMARKET_MAX_BUFFER_MINUTES,
+                "default_tickers": PREMARKET_DEFAULT_TICKERS,
+            },
+            "premarket_snapshot": premarket_meta,
+        }
+    )
 
 
 @app.route("/api/sectors")
@@ -912,6 +1065,37 @@ def api_top_picks():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/premarket-outlook")
+def api_premarket_outlook():
+    """
+    Premarket snapshot endpoint.
+    Returns:
+      ticker, current_price, strategy_price_at_open, ai_predicted_price,
+      strategy_direction, ai_direction, captured_at.
+    """
+    if predictor is None:
+        return jsonify({"error": "Predictor not initialized"}), 503
+
+    force = request.args.get("force", "").lower() in ("1", "true", "yes")
+    try:
+        snapshot = _capture_premarket_snapshot_if_due(force=force)
+        items = snapshot.get("items", [])
+        return jsonify(
+            {
+                "date": snapshot.get("date"),
+                "captured_at": snapshot.get("captured_at"),
+                "capture_cutoff": snapshot.get("capture_cutoff"),
+                "captured_within_buffer": snapshot.get("captured_within_buffer", True),
+                "buffer_minutes": snapshot.get(
+                    "buffer_minutes", PREMARKET_MAX_BUFFER_MINUTES
+                ),
+                "items": items,
+            }
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/intraday/<ticker>")
 def api_intraday(ticker: str):
     """Get intraday price data for charting."""
@@ -928,14 +1112,16 @@ def api_intraday(ticker: str):
 
         records = []
         for idx, row in df.iterrows():
-            records.append({
-                "time": idx.isoformat() if hasattr(idx, "isoformat") else str(idx),
-                "open": round(float(row.get("Open", 0)), 2),
-                "high": round(float(row.get("High", 0)), 2),
-                "low": round(float(row.get("Low", 0)), 2),
-                "close": round(float(row.get("Close", 0)), 2),
-                "volume": int(row.get("Volume", 0)),
-            })
+            records.append(
+                {
+                    "time": idx.isoformat() if hasattr(idx, "isoformat") else str(idx),
+                    "open": round(float(row.get("Open", 0)), 2),
+                    "high": round(float(row.get("High", 0)), 2),
+                    "low": round(float(row.get("Low", 0)), 2),
+                    "close": round(float(row.get("Close", 0)), 2),
+                    "volume": int(row.get("Volume", 0)),
+                }
+            )
         return jsonify(records)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -946,8 +1132,11 @@ def api_history(ticker: str):
     """Get daily price history for charting."""
     period = request.args.get("period", "1y")
     import yfinance as yf
+
     try:
-        df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True)
+        df = yf.download(
+            ticker, period=period, interval="1d", progress=False, auto_adjust=True
+        )
         if df is None or df.empty:
             return jsonify({"error": "No data"}), 404
         if isinstance(df.columns, pd.MultiIndex):
@@ -955,14 +1144,16 @@ def api_history(ticker: str):
 
         records = []
         for idx, row in df.iterrows():
-            records.append({
-                "time": idx.strftime("%Y-%m-%d"),
-                "open": round(float(row["Open"]), 2),
-                "high": round(float(row["High"]), 2),
-                "low": round(float(row["Low"]), 2),
-                "close": round(float(row["Close"]), 2),
-                "volume": int(row["Volume"]),
-            })
+            records.append(
+                {
+                    "time": idx.strftime("%Y-%m-%d"),
+                    "open": round(float(row["Open"]), 2),
+                    "high": round(float(row["High"]), 2),
+                    "low": round(float(row["Low"]), 2),
+                    "close": round(float(row["Close"]), 2),
+                    "volume": int(row["Volume"]),
+                }
+            )
         return jsonify(records)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -978,13 +1169,19 @@ def api_expected_vs_actual():
     log_file = PREDICTION_LOG_DIR / f"{date_str}.json"
 
     if not log_file.exists():
-        return jsonify({"error": f"No predictions logged for {date_str}", "date": date_str})
+        return jsonify(
+            {"error": f"No predictions logged for {date_str}", "date": date_str}
+        )
 
     with open(log_file) as f:
         predictions = json.load(f)
 
     if not predictions:
         return jsonify({"error": "Empty prediction log", "date": date_str})
+
+    # Persist and hydrate tracker outcomes so expected-vs-actual stays retraining-ready.
+    tracker_results = PredictionTracker.check_outcomes(date_str)
+    tracker_by_ticker = tracker_results if isinstance(tracker_results, dict) else {}
 
     # Fetch actual prices
     tickers_to_check = list(predictions.keys())
@@ -1008,11 +1205,19 @@ def api_expected_vs_actual():
         if ticker not in actual_prices:
             continue
 
-        pred_price_at_prediction = pred.get("current_price", 0)
-        pred_return_pct = pred.get("predicted_return", 0)  # already in %
-        actual_price = actual_prices[ticker]
+        tracker_row = (
+            tracker_by_ticker.get(ticker, {})
+            if isinstance(tracker_by_ticker, dict)
+            else {}
+        )
 
-        if pred_price_at_prediction <= 0:
+        pred_price_at_prediction = float(pred.get("current_price", 0) or 0)
+        pred_return_pct = _normalize_predicted_return_pct(
+            pred.get("predicted_return", 0)
+        )
+        actual_price = float(actual_prices[ticker] or 0)
+
+        if pred_price_at_prediction <= 0 or actual_price <= 0:
             continue
 
         # Corporate-action guardrail: normalize stale pre-split logged prices.
@@ -1025,56 +1230,138 @@ def api_expected_vs_actual():
                 break
         if split_factor > 1.0:
             pred_price_at_prediction = pred_price_at_prediction / split_factor
+        if actual_price > 0 and pred_price_at_prediction > actual_price * 5:
+            pred_price_at_prediction = actual_price
 
-        actual_return = (actual_price - pred_price_at_prediction) / pred_price_at_prediction
+        actual_return = (
+            actual_price - pred_price_at_prediction
+        ) / pred_price_at_prediction
         actual_return_pct = actual_return * 100
 
         # Direction check
-        pred_dir = "UP" if pred_return_pct > 0 else "DOWN"
+        pred_dir = (
+            "UP" if pred_return_pct > 0 else "DOWN" if pred_return_pct < 0 else "FLAT"
+        )
         actual_dir = "UP" if actual_return > 0 else "DOWN"
-        direction_correct = pred_dir == actual_dir
+        strategy_price_at_open = float(
+            tracker_row.get(
+                "strategy_price_at_open",
+                pred.get("strategy_price_at_open", pred.get("predicted_price", 0)),
+            )
+            or 0
+        )
+        ai_last_prediction = float(
+            tracker_row.get(
+                "ai_last_prediction",
+                pred.get("ai_last_prediction", pred.get("predicted_price", 0)),
+            )
+            or 0
+        )
+        open_price = float(
+            tracker_row.get(
+                "open_price", pred.get("open_price", pred_price_at_prediction)
+            )
+            or pred_price_at_prediction
+        )
+        if split_factor > 1.0 and open_price > actual_price * 1.2:
+            open_price = open_price / split_factor
+        if actual_price > 0 and (open_price <= 0 or open_price > actual_price * 5):
+            open_price = pred_price_at_prediction
+        if actual_price > 0 and strategy_price_at_open > actual_price * 5:
+            strategy_price_at_open = 0
+        if actual_price > 0 and ai_last_prediction > actual_price * 5:
+            ai_last_prediction = 0
+        if open_price > 0 and (
+            strategy_price_at_open <= 0 or strategy_price_at_open > open_price * 5
+        ):
+            strategy_price_at_open = round(
+                open_price * (1 + pred_return_pct / 100.0), 2
+            )
+        if ai_last_prediction <= 0 or ai_last_prediction > pred_price_at_prediction * 5:
+            ai_last_prediction = round(
+                pred_price_at_prediction * (1 + pred_return_pct / 100.0), 2
+            )
+        strategy_direction = tracker_row.get(
+            "strategy_direction_at_open"
+        ) or _direction_from_prices(open_price, strategy_price_at_open)
+        ai_direction = tracker_row.get("ai_direction_last") or _direction_from_prices(
+            pred_price_at_prediction, ai_last_prediction
+        )
+        direction_comparison = bool(
+            tracker_row.get("direction_comparison", strategy_direction == ai_direction)
+        )
+        predicted_price = float(pred.get("predicted_price", 0) or 0)
+        if predicted_price <= 0 or predicted_price > pred_price_at_prediction * 5:
+            predicted_price = round(
+                pred_price_at_prediction * (1 + pred_return_pct / 100.0), 2
+            )
 
         # Alpha = actual return - benchmark return
         alpha = actual_return - benchmark_return
         alpha_pct = alpha * 100
 
-        results.append({
-            "ticker": ticker,
-            "name": ticker_names.get(ticker, _clean_name(ticker)),
-            "signal": pred.get("signal", "N/A"),
-            "predicted_return_pct": round(pred_return_pct, 3),
-            "predicted_price": round((pred.get("predicted_price", 0) / split_factor) if split_factor > 1.0 else pred.get("predicted_price", 0), 2),
-            "actual_price": round(actual_price, 2),
-            "actual_return_pct": round(actual_return_pct, 3),
-            "direction_predicted": pred_dir,
-            "direction_actual": actual_dir,
-            "direction_correct": direction_correct,
-            "alpha_pct": round(alpha_pct, 3),
-            "confidence": pred.get("confidence", 50),
-        })
+        results.append(
+            {
+                "ticker": ticker,
+                "name": ticker_names.get(ticker, _clean_name(ticker)),
+                "signal": pred.get("signal", "N/A"),
+                "predicted_return_pct": round(pred_return_pct, 3),
+                "predicted_price": round(
+                    (
+                        (predicted_price / split_factor)
+                        if split_factor > 1.0
+                        else predicted_price
+                    ),
+                    2,
+                ),
+                "actual_price": round(actual_price, 2),
+                "actual_close": round(actual_price, 2),
+                "actual_return_pct": round(actual_return_pct, 3),
+                "direction_predicted": pred_dir,
+                "direction_actual": actual_dir,
+                "strategy_direction_at_open": strategy_direction,
+                "ai_direction_last": ai_direction,
+                "direction_comparison": direction_comparison,
+                "direction_correct": direction_comparison,
+                "strategy_price_at_open": (
+                    round(strategy_price_at_open, 2)
+                    if strategy_price_at_open > 0
+                    else None
+                ),
+                "ai_last_prediction": (
+                    round(ai_last_prediction, 2) if ai_last_prediction > 0 else None
+                ),
+                "alpha_pct": round(alpha_pct, 3),
+                "confidence": pred.get("confidence", 50),
+                "checked_at": tracker_row.get("checked_at"),
+            }
+        )
 
     if not results:
         return jsonify({"error": "Could not fetch actuals", "date": date_str})
 
     # Summary
     total = len(results)
-    hits = sum(1 for r in results if r["direction_correct"])
+    hits = sum(1 for r in results if r["direction_comparison"])
     hit_rate = (hits / total * 100) if total > 0 else 0
     avg_alpha = float(np.mean([r["alpha_pct"] for r in results]))
     total_alpha = float(np.sum([r["alpha_pct"] for r in results]))
     avg_confidence = float(np.mean([r["confidence"] for r in results]))
 
-    return jsonify({
-        "date": date_str,
-        "total_predictions": total,
-        "direction_hits": hits,
-        "hit_rate_pct": round(hit_rate, 1),
-        "avg_alpha_pct": round(avg_alpha, 3),
-        "total_alpha_pct": round(total_alpha, 3),
-        "benchmark_return_pct": round(benchmark_return * 100, 3),
-        "avg_confidence": round(avg_confidence, 1),
-        "results": sorted(results, key=lambda x: abs(x["alpha_pct"]), reverse=True),
-    })
+    return jsonify(
+        {
+            "date": date_str,
+            "total_predictions": total,
+            "direction_hits": hits,
+            "hit_rate_pct": round(hit_rate, 1),
+            "avg_alpha_pct": round(avg_alpha, 3),
+            "total_alpha_pct": round(total_alpha, 3),
+            "benchmark_return_pct": round(benchmark_return * 100, 3),
+            "avg_confidence": round(avg_confidence, 1),
+            "schema_version": PredictionTracker.SCHEMA_VERSION,
+            "results": sorted(results, key=lambda x: abs(x["alpha_pct"]), reverse=True),
+        }
+    )
 
 
 @app.route("/api/prediction-dates")
@@ -1118,7 +1405,9 @@ def api_explain():
         if explain_type == "fundamental":
             explanation = explain_fundamental(metric, value, ticker, stock_name)
         elif explain_type == "greek":
-            explanation = explain_greek(metric, float(value) if value else 0, "call", ticker, stock_name)
+            explanation = explain_greek(
+                metric, float(value) if value else 0, "call", ticker, stock_name
+            )
         elif explain_type == "indicator":
             explanation = explain_indicator(metric, value, None, ticker, stock_name)
         else:
@@ -1149,10 +1438,12 @@ def api_strategy(ticker: str):
         # Get combined strategy
         combined = get_combined_strategy(ticker, stock_name, pred, groq_strat)
 
-        return jsonify({
-            "groq_strategy": groq_strat,
-            "combined_strategy": combined,
-        })
+        return jsonify(
+            {
+                "groq_strategy": groq_strat,
+                "combined_strategy": combined,
+            }
+        )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1180,12 +1471,14 @@ def api_stock_overview(ticker: str):
         # Get news sentiment
         sentiment = get_news_sentiment(ticker, stock_name)
 
-        return jsonify({
-            "overview": overview,
-            "sentiment": sentiment,
-            "stock_name": stock_name,
-            "ticker": ticker,
-        })
+        return jsonify(
+            {
+                "overview": overview,
+                "sentiment": sentiment,
+                "stock_name": stock_name,
+                "ticker": ticker,
+            }
+        )
     except Exception as e:
         log.warning(f"Overview error for {ticker}: {e}")
         return jsonify({"error": str(e)}), 500
@@ -1233,6 +1526,13 @@ def api_tracking_feedback():
     return jsonify(feedback)
 
 
+@app.route("/api/training-feedback")
+def api_training_feedback():
+    """Alias endpoint for retraining export in a stable schema."""
+    feedback = PredictionTracker.get_training_feedback_data()
+    return jsonify(feedback)
+
+
 # ---------------------------------------------------------------------------
 # Routes — Daily Analysis (Enhanced Dashboard)
 # ---------------------------------------------------------------------------
@@ -1241,6 +1541,10 @@ _opening_prices: dict[str, dict] = {}
 _opening_prices_date: str = ""
 _daily_prediction_baseline: dict[str, dict] = {}
 _daily_prediction_baseline_date: str = ""
+_premarket_snapshot: dict = {}
+_premarket_snapshot_lock = threading.Lock()
+MARKET_OPEN_HOUR = 9
+MARKET_OPEN_MINUTE = 15
 
 # Background-computed daily analysis cache (avoids blocking requests)
 _daily_analysis_cache: dict = {}
@@ -1296,6 +1600,183 @@ def _capture_opening_prices():
         }
     _opening_prices_date = today
     log.info(f"Captured opening prices for {len(_opening_prices)} tickers")
+
+
+def _market_open_dt(now: datetime) -> datetime:
+    return now.replace(
+        hour=MARKET_OPEN_HOUR,
+        minute=MARKET_OPEN_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+
+
+def _premarket_cutoff_dt(now: datetime) -> datetime:
+    return _market_open_dt(now) - timedelta(minutes=PREMARKET_MAX_BUFFER_MINUTES)
+
+
+def _direction_from_prices(base_price: float, predicted_price: float) -> str:
+    if base_price <= 0 or predicted_price <= 0:
+        return "FLAT"
+    if predicted_price > base_price:
+        return "UP"
+    if predicted_price < base_price:
+        return "DOWN"
+    return "FLAT"
+
+
+def _load_premarket_snapshot_from_disk() -> dict:
+    if not PREMARKET_OUTLOOK_FILE.exists():
+        return {}
+    try:
+        data = json.loads(PREMARKET_OUTLOOK_FILE.read_text())
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_premarket_snapshot_to_disk(snapshot: dict) -> None:
+    PREMARKET_OUTLOOK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PREMARKET_OUTLOOK_FILE.write_text(json.dumps(snapshot, indent=2, default=str))
+
+
+def _build_premarket_snapshot(tickers: list[str] | None = None) -> dict:
+    """
+    Build a premarket snapshot payload with strategy-open and AI-now predictions.
+    Internal prices are numeric INR, returns are %.
+    """
+    if predictor is None:
+        return {
+            "date": datetime.now(IST).strftime("%Y-%m-%d"),
+            "captured_at": datetime.now(IST).isoformat(),
+            "items": [],
+        }
+
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    scan_tickers = (
+        tickers or tickers_by_sector.get("large_cap", [])[:PREMARKET_DEFAULT_TICKERS]
+    )
+    prices = _get_live_prices_batch(scan_tickers)
+    captured_at = datetime.now(IST).isoformat()
+    rows: list[dict] = []
+
+    for ticker in scan_tickers:
+        quote = prices.get(ticker, {})
+        current_price = float(quote.get("price", 0) or 0)
+        open_price = float(quote.get("open", 0) or 0)
+        if open_price <= 0:
+            open_price = float(
+                _opening_prices.get(ticker, {}).get("open", current_price)
+                or current_price
+            )
+        if current_price <= 0:
+            continue
+
+        try:
+            pred = predictor.predict_single(ticker, use_cache=True) or {}
+        except Exception:
+            pred = {}
+
+        predicted_return_pct = _normalize_predicted_return_pct(
+            pred.get("predicted_return", 0)
+        )
+        ai_predicted_price = float(pred.get("predicted_price", 0) or 0)
+        strategy_price_at_open = (
+            round(open_price * (1 + predicted_return_pct / 100.0), 2)
+            if open_price > 0
+            else ai_predicted_price
+        )
+        ai_direction = _direction_from_prices(current_price, ai_predicted_price)
+        strategy_direction = _direction_from_prices(open_price, strategy_price_at_open)
+
+        row = {
+            "ticker": ticker,
+            "name": ticker_names.get(ticker, _clean_name(ticker)),
+            "current_price": round(current_price, 2),
+            "open_price": round(open_price, 2) if open_price > 0 else None,
+            "strategy_price_at_open": (
+                round(strategy_price_at_open, 2) if strategy_price_at_open > 0 else None
+            ),
+            "ai_predicted_price": (
+                round(ai_predicted_price, 2) if ai_predicted_price > 0 else None
+            ),
+            "strategy_direction": strategy_direction,
+            "ai_direction": ai_direction,
+            "predicted_return_pct": round(predicted_return_pct, 4),
+            "captured_at": captured_at,
+        }
+        rows.append(row)
+
+        # Track for expected-vs-actual feedback.
+        try:
+            tracked = dict(pred)
+            tracked.update(
+                {
+                    "open_price": row["open_price"] or row["current_price"],
+                    "current_price": row["current_price"],
+                    "strategy_price_at_open": row["strategy_price_at_open"]
+                    or row["current_price"],
+                    "ai_last_prediction": row["ai_predicted_price"]
+                    or row["current_price"],
+                    "strategy_direction_at_open": strategy_direction,
+                    "ai_direction_last": ai_direction,
+                    "direction_comparison": strategy_direction == ai_direction,
+                }
+            )
+            PredictionTracker.record_prediction(ticker, tracked)
+        except Exception as e:
+            log.warning("Premarket tracking record failed for %s: %s", ticker, e)
+
+    return {"date": today, "captured_at": captured_at, "items": rows}
+
+
+def _capture_premarket_snapshot_if_due(force: bool = False) -> dict:
+    """
+    Capture premarket snapshot once per day, preferably before open-buffer cutoff.
+    """
+    global _premarket_snapshot
+    now = datetime.now(IST)
+    today = now.strftime("%Y-%m-%d")
+    cutoff = _premarket_cutoff_dt(now)
+
+    with _premarket_snapshot_lock:
+        if (
+            not force
+            and _premarket_snapshot
+            and _premarket_snapshot.get("date") == today
+            and _premarket_snapshot.get("items")
+        ):
+            return dict(_premarket_snapshot)
+
+        disk_snapshot = _load_premarket_snapshot_from_disk()
+        if (
+            not force
+            and disk_snapshot
+            and disk_snapshot.get("date") == today
+            and disk_snapshot.get("items")
+        ):
+            _premarket_snapshot = dict(disk_snapshot)
+            return dict(_premarket_snapshot)
+
+    # Build outside lock (may call network/model inference).
+    snapshot = _build_premarket_snapshot()
+    snapshot["capture_cutoff"] = cutoff.isoformat()
+    snapshot["buffer_minutes"] = PREMARKET_MAX_BUFFER_MINUTES
+    snapshot["captured_within_buffer"] = now <= cutoff
+    if not snapshot["captured_within_buffer"]:
+        log.warning(
+            "Premarket snapshot captured after cutoff. now=%s cutoff=%s buffer=%sm",
+            now.isoformat(),
+            cutoff.isoformat(),
+            PREMARKET_MAX_BUFFER_MINUTES,
+        )
+
+    with _premarket_snapshot_lock:
+        _premarket_snapshot = snapshot
+        _save_premarket_snapshot_to_disk(snapshot)
+        return dict(_premarket_snapshot)
 
 
 def _normalize_predicted_return_pct(value) -> float:
@@ -1400,15 +1881,21 @@ def _build_daily_analysis() -> dict:
         )
         if refresh_budget > 0 and ticker not in predictions:
             refresh_budget -= 1
-        predicted_return = _normalize_predicted_return_pct(pred.get("predicted_return", 0))
+        predicted_return = _normalize_predicted_return_pct(
+            pred.get("predicted_return", 0)
+        )
         signal = pred.get("signal", "HOLD")
         confidence = float(pred.get("confidence", 50) or 50)
 
         baseline_price = open_price if open_price > 0 else current_price
-        strategy_predicted_price = round(
-            baseline_price * (1 + predicted_return / 100.0),
-            2,
-        ) if baseline_price > 0 else 0.0
+        strategy_predicted_price = (
+            round(
+                baseline_price * (1 + predicted_return / 100.0),
+                2,
+            )
+            if baseline_price > 0
+            else 0.0
+        )
 
         # AI price starts from strategy baseline; a later news-aware layer can adjust this.
         ai_adjustment_pct = 0.0
@@ -1416,7 +1903,9 @@ def _build_daily_analysis() -> dict:
             ai_adjustment_pct = min(confidence / 200.0, 0.5)
         elif signal in ("SELL", "STRONG_SELL"):
             ai_adjustment_pct = -min(confidence / 200.0, 0.5)
-        ai_predicted_price = round(strategy_predicted_price * (1 + ai_adjustment_pct / 100.0), 2)
+        ai_predicted_price = round(
+            strategy_predicted_price * (1 + ai_adjustment_pct / 100.0), 2
+        )
 
         if current_price <= 0 or open_price <= 0:
             continue
@@ -1424,10 +1913,22 @@ def _build_daily_analysis() -> dict:
         prediction_count += 1
 
         # Calculate percentage changes
-        open_to_current_pct = ((current_price - open_price) / open_price * 100) if open_price > 0 else 0
-        open_to_predicted_pct = ((strategy_predicted_price - open_price) / open_price * 100) if open_price > 0 and strategy_predicted_price > 0 else 0
-        open_to_ai_predicted_pct = ((ai_predicted_price - open_price) / open_price * 100) if open_price > 0 and ai_predicted_price > 0 else 0
-        prev_to_current_pct = ((current_price - prev_close) / prev_close * 100) if prev_close > 0 else 0
+        open_to_current_pct = (
+            ((current_price - open_price) / open_price * 100) if open_price > 0 else 0
+        )
+        open_to_predicted_pct = (
+            ((strategy_predicted_price - open_price) / open_price * 100)
+            if open_price > 0 and strategy_predicted_price > 0
+            else 0
+        )
+        open_to_ai_predicted_pct = (
+            ((ai_predicted_price - open_price) / open_price * 100)
+            if open_price > 0 and ai_predicted_price > 0
+            else 0
+        )
+        prev_to_current_pct = (
+            ((current_price - prev_close) / prev_close * 100) if prev_close > 0 else 0
+        )
 
         # Composite score for ranking (higher = better opportunity)
         # Factors: predicted return (40%), confidence (25%), model agreement (20%), R:R (15%)
@@ -1435,40 +1936,42 @@ def _build_daily_analysis() -> dict:
         risk_reward = pred.get("risk_reward", 1.0) if pred.get("risk_reward") else 1.0
 
         score = (
-            abs(predicted_return) * 4.0 +
-            confidence * 0.25 +
-            model_agreement * 0.20 +
-            min(risk_reward, 5) * 3.0
+            abs(predicted_return) * 4.0
+            + confidence * 0.25
+            + model_agreement * 0.20
+            + min(risk_reward, 5) * 3.0
         )
 
         model_preds = pred.get("model_predictions", {})
 
-        stocks.append({
-            "ticker": ticker,
-            "name": ticker_names.get(ticker, _clean_name(ticker)),
-            "open_price": round(open_price, 2),
-            "predicted_price": round(strategy_predicted_price, 2),
-            "strategy_predicted_price": round(strategy_predicted_price, 2),
-            "ai_predicted_price": round(ai_predicted_price, 2),
-            "current_price": round(current_price, 2),
-            "prev_close": round(prev_close, 2),
-            "open_to_current_pct": round(open_to_current_pct, 3),
-            "open_to_predicted_pct": round(open_to_predicted_pct, 3),
-            "open_to_ai_predicted_pct": round(open_to_ai_predicted_pct, 3),
-            "prev_to_current_pct": round(prev_to_current_pct, 3),
-            "predicted_return": round(predicted_return, 3),
-            "signal": signal,
-            "confidence": round(confidence, 1),
-            "model_agreement": round(model_agreement, 1),
-            "risk_reward": round(risk_reward, 1) if risk_reward else None,
-            "volume": curr.get("volume", 0),
-            "high": curr.get("high", 0),
-            "low": curr.get("low", 0),
-            "change": curr.get("change", 0),
-            "change_pct": curr.get("change_pct", 0),
-            "composite_score": round(score, 2),
-            "model_predictions": model_preds,
-        })
+        stocks.append(
+            {
+                "ticker": ticker,
+                "name": ticker_names.get(ticker, _clean_name(ticker)),
+                "open_price": round(open_price, 2),
+                "predicted_price": round(strategy_predicted_price, 2),
+                "strategy_predicted_price": round(strategy_predicted_price, 2),
+                "ai_predicted_price": round(ai_predicted_price, 2),
+                "current_price": round(current_price, 2),
+                "prev_close": round(prev_close, 2),
+                "open_to_current_pct": round(open_to_current_pct, 3),
+                "open_to_predicted_pct": round(open_to_predicted_pct, 3),
+                "open_to_ai_predicted_pct": round(open_to_ai_predicted_pct, 3),
+                "prev_to_current_pct": round(prev_to_current_pct, 3),
+                "predicted_return": round(predicted_return, 3),
+                "signal": signal,
+                "confidence": round(confidence, 1),
+                "model_agreement": round(model_agreement, 1),
+                "risk_reward": round(risk_reward, 1) if risk_reward else None,
+                "volume": curr.get("volume", 0),
+                "high": curr.get("high", 0),
+                "low": curr.get("low", 0),
+                "change": curr.get("change", 0),
+                "change_pct": curr.get("change_pct", 0),
+                "composite_score": round(score, 2),
+                "model_predictions": model_preds,
+            }
+        )
 
     stocks.sort(key=lambda x: x["composite_score"], reverse=True)
     top_10 = stocks[:10]
@@ -1487,7 +1990,9 @@ def _build_daily_analysis() -> dict:
             "gainers": len(gainers),
             "losers": len(losers),
             "unchanged": len(stocks) - len(gainers) - len(losers),
-            "avg_change_pct": round(float(np.mean([s["change_pct"] for s in stocks])) if stocks else 0, 3),
+            "avg_change_pct": round(
+                float(np.mean([s["change_pct"] for s in stocks])) if stocks else 0, 3
+            ),
         },
         "top_10": top_10,
         "all_stocks": stocks,
@@ -1503,11 +2008,14 @@ def _daily_analysis_background_loop():
             time.sleep(5)
             continue
         try:
+            _capture_premarket_snapshot_if_due(force=False)
             result = _build_daily_analysis()
             with _daily_analysis_lock:
                 _daily_analysis_cache = result
                 _daily_analysis_cache_time = time.time()
-            log.info(f"Daily analysis cache refreshed — {result['total_stocks']} stocks")
+            log.info(
+                f"Daily analysis cache refreshed — {result['total_stocks']} stocks"
+            )
         except Exception as e:
             log.error(f"Daily analysis background error: {e}")
         time.sleep(DAILY_ANALYSIS_TTL)
@@ -1527,7 +2035,12 @@ def api_daily_analysis():
             return jsonify(_daily_analysis_cache)
 
     # Cache not ready yet — return a loading indicator
-    return jsonify({"error": "Analysis is being computed, please retry in ~15 seconds..."}), 202
+    return (
+        jsonify(
+            {"error": "Analysis is being computed, please retry in ~15 seconds..."}
+        ),
+        202,
+    )
 
 
 @app.route("/api/price-tracker/<ticker>")
@@ -1571,7 +2084,11 @@ def api_price_tracker(ticker: str):
 
     current_price = curr.get("price", 0)
     predicted_return = _normalize_predicted_return_pct(pred.get("predicted_return", 0))
-    strategy_predicted_price = round(open_price * (1 + predicted_return / 100.0), 2) if open_price > 0 else pred.get("predicted_price", 0)
+    strategy_predicted_price = (
+        round(open_price * (1 + predicted_return / 100.0), 2)
+        if open_price > 0
+        else pred.get("predicted_price", 0)
+    )
     cached_forecast = _groq_forecast_cache.get(ticker, {})
     ai_raw = cached_forecast.get("ai_predicted_price")
     try:
@@ -1582,35 +2099,53 @@ def api_price_tracker(ticker: str):
     signal = pred.get("signal", "")
     confidence = pred.get("confidence", 0)
 
-    open_to_current_pct = ((current_price - open_price) / open_price * 100) if open_price > 0 else 0
-    open_to_predicted_pct = ((strategy_predicted_price - open_price) / open_price * 100) if open_price > 0 and strategy_predicted_price > 0 else 0
+    open_to_current_pct = (
+        ((current_price - open_price) / open_price * 100) if open_price > 0 else 0
+    )
+    open_to_predicted_pct = (
+        ((strategy_predicted_price - open_price) / open_price * 100)
+        if open_price > 0 and strategy_predicted_price > 0
+        else 0
+    )
 
-    open_to_ai_predicted_pct = ((ai_predicted_price - open_price) / open_price * 100) if open_price > 0 and ai_available else None
+    open_to_ai_predicted_pct = (
+        ((ai_predicted_price - open_price) / open_price * 100)
+        if open_price > 0 and ai_available
+        else None
+    )
 
-    return jsonify({
-        "ticker": ticker,
-        "name": ticker_names.get(ticker, _clean_name(ticker)),
-        "open_price": round(open_price, 2),
-        "predicted_price": round(strategy_predicted_price, 2),
-        "strategy_predicted_price": round(strategy_predicted_price, 2),
-        "ai_predicted_price": round(ai_predicted_price, 2) if ai_available else None,
-        "current_price": round(current_price, 2),
-        "prev_close": round(prev_close, 2),
-        "open_to_current_pct": round(open_to_current_pct, 3),
-        "open_to_predicted_pct": round(open_to_predicted_pct, 3),
-        "open_to_ai_predicted_pct": round(open_to_ai_predicted_pct, 3) if open_to_ai_predicted_pct is not None else None,
-        "predicted_return": round(predicted_return, 3),
-        "signal": signal,
-        "confidence": round(confidence, 1),
-        "ai_forecast_available": ai_available,
-        "ai_forecast_source": cached_forecast.get("ai_source", "none"),
-        "volume": curr.get("volume", 0),
-        "high": curr.get("high", 0),
-        "low": curr.get("low", 0),
-        "open": curr.get("open", 0),
-        "change": curr.get("change", 0),
-        "change_pct": curr.get("change_pct", 0),
-    })
+    return jsonify(
+        {
+            "ticker": ticker,
+            "name": ticker_names.get(ticker, _clean_name(ticker)),
+            "open_price": round(open_price, 2),
+            "predicted_price": round(strategy_predicted_price, 2),
+            "strategy_predicted_price": round(strategy_predicted_price, 2),
+            "ai_predicted_price": (
+                round(ai_predicted_price, 2) if ai_available else None
+            ),
+            "current_price": round(current_price, 2),
+            "prev_close": round(prev_close, 2),
+            "open_to_current_pct": round(open_to_current_pct, 3),
+            "open_to_predicted_pct": round(open_to_predicted_pct, 3),
+            "open_to_ai_predicted_pct": (
+                round(open_to_ai_predicted_pct, 3)
+                if open_to_ai_predicted_pct is not None
+                else None
+            ),
+            "predicted_return": round(predicted_return, 3),
+            "signal": signal,
+            "confidence": round(confidence, 1),
+            "ai_forecast_available": ai_available,
+            "ai_forecast_source": cached_forecast.get("ai_source", "none"),
+            "volume": curr.get("volume", 0),
+            "high": curr.get("high", 0),
+            "low": curr.get("low", 0),
+            "open": curr.get("open", 0),
+            "change": curr.get("change", 0),
+            "change_pct": curr.get("change_pct", 0),
+        }
+    )
 
 
 @app.route("/api/news/<ticker>")
@@ -1619,12 +2154,14 @@ def api_news(ticker: str):
     try:
         stock_name = ticker_names.get(ticker, _clean_name(ticker))
         sentiment = get_news_sentiment(ticker, stock_name)
-        return jsonify({
-            "ticker": ticker,
-            "name": stock_name,
-            "sentiment": sentiment,
-            "generated_at": datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST"),
-        })
+        return jsonify(
+            {
+                "ticker": ticker,
+                "name": stock_name,
+                "sentiment": sentiment,
+                "generated_at": datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST"),
+            }
+        )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1636,7 +2173,10 @@ def api_groq_price_forecast(ticker: str):
         return jsonify({"error": "Models still loading..."}), 503
 
     now = time.time()
-    if ticker in _groq_forecast_cache and (now - _groq_forecast_cache_time.get(ticker, 0)) < GROQ_FORECAST_TTL:
+    if (
+        ticker in _groq_forecast_cache
+        and (now - _groq_forecast_cache_time.get(ticker, 0)) < GROQ_FORECAST_TTL
+    ):
         return jsonify(_groq_forecast_cache[ticker])
 
     try:
@@ -1658,7 +2198,11 @@ def api_groq_price_forecast(ticker: str):
             ticker=ticker,
             stock_name=stock_name,
             open_price=float(tracker_payload.get("open_price") or 0),
-            strategy_predicted_price=float(tracker_payload.get("strategy_predicted_price") or tracker_payload.get("predicted_price") or 0),
+            strategy_predicted_price=float(
+                tracker_payload.get("strategy_predicted_price")
+                or tracker_payload.get("predicted_price")
+                or 0
+            ),
             current_price=float(tracker_payload.get("current_price") or 0),
             sentiment_text=sentiment or "",
         )
@@ -1669,7 +2213,11 @@ def api_groq_price_forecast(ticker: str):
             ai_price = 0.0
         ai_available = ai_price > 0
         open_price = float(tracker_payload.get("open_price") or 0)
-        open_to_ai_pct = ((ai_price - open_price) / open_price * 100) if open_price > 0 and ai_available else None
+        open_to_ai_pct = (
+            ((ai_price - open_price) / open_price * 100)
+            if open_price > 0 and ai_available
+            else None
+        )
 
         payload = {
             "ticker": ticker,
@@ -1678,7 +2226,9 @@ def api_groq_price_forecast(ticker: str):
             "current_price": tracker_payload.get("current_price"),
             "ai_predicted_price": round(ai_price, 2) if ai_available else None,
             "open_price": tracker_payload.get("open_price"),
-            "open_to_ai_predicted_pct": round(open_to_ai_pct, 3) if open_to_ai_pct is not None else None,
+            "open_to_ai_predicted_pct": (
+                round(open_to_ai_pct, 3) if open_to_ai_pct is not None else None
+            ),
             "outlook": forecast.get("outlook", "Neutral"),
             "rationale": forecast.get("rationale", ""),
             "news_sentiment": sentiment,
@@ -1735,8 +2285,13 @@ def api_delisted_tickers():
             continue
         rows.append(row)
 
-    rows.sort(key=lambda r: (int(r.get("hit_count", 0) or 0), r.get("last_seen", "")), reverse=True)
-    return jsonify({"count": len(rows), "tickers": rows, "file": str(DELISTED_TICKERS_FILE)})
+    rows.sort(
+        key=lambda r: (int(r.get("hit_count", 0) or 0), r.get("last_seen", "")),
+        reverse=True,
+    )
+    return jsonify(
+        {"count": len(rows), "tickers": rows, "file": str(DELISTED_TICKERS_FILE)}
+    )
 
 
 @app.route("/api/delisted-tickers/export.csv")
@@ -1789,7 +2344,13 @@ def api_portfolio():
         trades = [e for e in _read_portfolio_trades() if e.get("ticker") != ticker]
         _write_portfolio_trades(trades)
         summary = _portfolio_summary_from_trades(trades)
-        return jsonify({"ok": True, "holdings": summary["positions"], "count": summary["position_count"]})
+        return jsonify(
+            {
+                "ok": True,
+                "holdings": summary["positions"],
+                "count": summary["position_count"],
+            }
+        )
 
     payload = request.get_json(silent=True) or {}
     ticker = str(payload.get("ticker", "")).strip().upper()
@@ -1809,20 +2370,30 @@ def api_portfolio():
 
     # Backward-compatible path: this endpoint creates a BUY trade.
     trades = _read_portfolio_trades()
-    trades.append(_new_trade_entry(ticker=ticker, side="BUY", qty=qty, price=entry_price))
+    trades.append(
+        _new_trade_entry(ticker=ticker, side="BUY", qty=qty, price=entry_price)
+    )
     _write_portfolio_trades(trades)
     summary = _portfolio_summary_from_trades(trades)
-    _write_portfolio([
+    _write_portfolio(
+        [
+            {
+                "ticker": row["ticker"],
+                "name": row["name"],
+                "quantity": row["quantity"],
+                "entry_price": row["avg_buy_price"],
+                "updated_at": datetime.now(IST).isoformat(),
+            }
+            for row in summary["positions"]
+        ]
+    )
+    return jsonify(
         {
-            "ticker": row["ticker"],
-            "name": row["name"],
-            "quantity": row["quantity"],
-            "entry_price": row["avg_buy_price"],
-            "updated_at": datetime.now(IST).isoformat(),
+            "ok": True,
+            "holdings": summary["positions"],
+            "count": summary["position_count"],
         }
-        for row in summary["positions"]
-    ])
-    return jsonify({"ok": True, "holdings": summary["positions"], "count": summary["position_count"]})
+    )
 
 
 @app.route("/api/portfolio/trade", methods=["POST"])
@@ -1854,38 +2425,16 @@ def api_portfolio_trade():
     if side == "SELL":
         open_qty = float(pos_before.get(ticker, {}).get("quantity", 0) or 0)
         if open_qty + 1e-9 < qty:
-            return jsonify({"error": f"Cannot SELL {qty}; open quantity is {open_qty}"}), 400
+            return (
+                jsonify({"error": f"Cannot SELL {qty}; open quantity is {open_qty}"}),
+                400,
+            )
 
     trades.append(_new_trade_entry(ticker=ticker, side=side, qty=qty, price=price))
     _write_portfolio_trades(trades)
     summary = _portfolio_summary_from_trades(trades)
-    _write_portfolio([
-        {
-            "ticker": row["ticker"],
-            "name": row["name"],
-            "quantity": row["quantity"],
-            "entry_price": row["avg_buy_price"],
-            "updated_at": datetime.now(IST).isoformat(),
-        }
-        for row in summary["positions"]
-    ])
-    return jsonify({"ok": True, "summary": summary})
-
-
-@app.route("/api/portfolio/trade/<trade_id>", methods=["DELETE", "PATCH"])
-def api_portfolio_trade_edit(trade_id: str):
-    """Edit or delete a trade row by ID."""
-    _sanitize_portfolio_storage()
-    trades = _read_portfolio_trades()
-    idx = next((i for i, tr in enumerate(trades) if str(tr.get("id", "")) == trade_id), None)
-    if idx is None:
-        return jsonify({"error": f"trade_id {trade_id} not found"}), 404
-
-    if request.method == "DELETE":
-        trades.pop(idx)
-        _write_portfolio_trades(trades)
-        summary = _portfolio_summary_from_trades(trades)
-        _write_portfolio([
+    _write_portfolio(
+        [
             {
                 "ticker": row["ticker"],
                 "name": row["name"],
@@ -1894,7 +2443,38 @@ def api_portfolio_trade_edit(trade_id: str):
                 "updated_at": datetime.now(IST).isoformat(),
             }
             for row in summary["positions"]
-        ])
+        ]
+    )
+    return jsonify({"ok": True, "summary": summary})
+
+
+@app.route("/api/portfolio/trade/<trade_id>", methods=["DELETE", "PATCH"])
+def api_portfolio_trade_edit(trade_id: str):
+    """Edit or delete a trade row by ID."""
+    _sanitize_portfolio_storage()
+    trades = _read_portfolio_trades()
+    idx = next(
+        (i for i, tr in enumerate(trades) if str(tr.get("id", "")) == trade_id), None
+    )
+    if idx is None:
+        return jsonify({"error": f"trade_id {trade_id} not found"}), 404
+
+    if request.method == "DELETE":
+        trades.pop(idx)
+        _write_portfolio_trades(trades)
+        summary = _portfolio_summary_from_trades(trades)
+        _write_portfolio(
+            [
+                {
+                    "ticker": row["ticker"],
+                    "name": row["name"],
+                    "quantity": row["quantity"],
+                    "entry_price": row["avg_buy_price"],
+                    "updated_at": datetime.now(IST).isoformat(),
+                }
+                for row in summary["positions"]
+            ]
+        )
         return jsonify({"ok": True, "summary": summary, "trade_count": len(trades)})
 
     payload = request.get_json(silent=True) or {}
@@ -1915,14 +2495,16 @@ def api_portfolio_trade_edit(trade_id: str):
     if not _is_tradeable_ticker(ticker):
         return jsonify({"error": f"{ticker} is not in configured ticker universe"}), 400
 
-    trades[idx].update({
-        "ticker": ticker,
-        "name": ticker_names.get(ticker, _clean_name(ticker)),
-        "side": side,
-        "quantity": round(qty, 4),
-        "price": round(price, 2),
-        "edited_at": datetime.now(IST).isoformat(),
-    })
+    trades[idx].update(
+        {
+            "ticker": ticker,
+            "name": ticker_names.get(ticker, _clean_name(ticker)),
+            "side": side,
+            "quantity": round(qty, 4),
+            "price": round(price, 2),
+            "edited_at": datetime.now(IST).isoformat(),
+        }
+    )
     valid, err = _validate_trade_sequence(trades)
     if not valid:
         trades[idx] = old
@@ -1930,16 +2512,18 @@ def api_portfolio_trade_edit(trade_id: str):
 
     _write_portfolio_trades(trades)
     summary = _portfolio_summary_from_trades(trades)
-    _write_portfolio([
-        {
-            "ticker": row["ticker"],
-            "name": row["name"],
-            "quantity": row["quantity"],
-            "entry_price": row["avg_buy_price"],
-            "updated_at": datetime.now(IST).isoformat(),
-        }
-        for row in summary["positions"]
-    ])
+    _write_portfolio(
+        [
+            {
+                "ticker": row["ticker"],
+                "name": row["name"],
+                "quantity": row["quantity"],
+                "entry_price": row["avg_buy_price"],
+                "updated_at": datetime.now(IST).isoformat(),
+            }
+            for row in summary["positions"]
+        ]
+    )
     return jsonify({"ok": True, "summary": summary, "trade_count": len(trades)})
 
 
@@ -1994,20 +2578,24 @@ def api_portfolio_export_csv():
     trades = sorted(_read_portfolio_trades(), key=lambda x: x.get("timestamp", ""))
     out = StringIO()
     writer = csv.writer(out)
-    writer.writerow(["id", "timestamp", "ticker", "name", "side", "quantity", "price", "notional"])
+    writer.writerow(
+        ["id", "timestamp", "ticker", "name", "side", "quantity", "price", "notional"]
+    )
     for tr in trades:
         qty = float(tr.get("quantity", 0) or 0)
         price = float(tr.get("price", 0) or 0)
-        writer.writerow([
-            tr.get("id", ""),
-            tr.get("timestamp", ""),
-            tr.get("ticker", ""),
-            tr.get("name", ""),
-            tr.get("side", ""),
-            round(qty, 4),
-            round(price, 2),
-            round(qty * price, 2),
-        ])
+        writer.writerow(
+            [
+                tr.get("id", ""),
+                tr.get("timestamp", ""),
+                tr.get("ticker", ""),
+                tr.get("name", ""),
+                tr.get("side", ""),
+                round(qty, 4),
+                round(price, 2),
+                round(qty * price, 2),
+            ]
+        )
     resp = make_response(out.getvalue())
     resp.headers["Content-Type"] = "text/csv; charset=utf-8"
     resp.headers["Content-Disposition"] = "attachment; filename=portfolio_trades.csv"
@@ -2027,7 +2615,13 @@ def api_groq_ticker_suggestions():
 
     try:
         groups = predictor.predict_top_picks_grouped(
-            sectors=["large_cap", "banking", "mid_cap", "high_volatility", "commodities"],
+            sectors=[
+                "large_cap",
+                "banking",
+                "mid_cap",
+                "high_volatility",
+                "commodities",
+            ],
             top_n=n,
         )
         candidates: list[dict] = []
@@ -2035,15 +2629,25 @@ def api_groq_ticker_suggestions():
             for p in groups.get(bucket, []):
                 if float(p.get("current_price", 0) or 0) <= 0:
                     continue
-                candidates.append({
-                    "ticker": p.get("ticker"),
-                    "name": ticker_names.get(p.get("ticker", ""), _clean_name(p.get("ticker", ""))),
-                    "signal": p.get("signal", "HOLD"),
-                    "predicted_return": round(float(p.get("predicted_return", 0) or 0), 3),
-                    "confidence": round(float(p.get("confidence", 0) or 0), 1),
-                    "model_agreement": round(float(p.get("model_agreement", 0) or 0), 1),
-                    "current_price": round(float(p.get("current_price", 0) or 0), 2),
-                })
+                candidates.append(
+                    {
+                        "ticker": p.get("ticker"),
+                        "name": ticker_names.get(
+                            p.get("ticker", ""), _clean_name(p.get("ticker", ""))
+                        ),
+                        "signal": p.get("signal", "HOLD"),
+                        "predicted_return": round(
+                            float(p.get("predicted_return", 0) or 0), 3
+                        ),
+                        "confidence": round(float(p.get("confidence", 0) or 0), 1),
+                        "model_agreement": round(
+                            float(p.get("model_agreement", 0) or 0), 1
+                        ),
+                        "current_price": round(
+                            float(p.get("current_price", 0) or 0), 2
+                        ),
+                    }
+                )
         # Keep unique symbols and cap length.
         seen: set[str] = set()
         unique_candidates = []
@@ -2057,12 +2661,14 @@ def api_groq_ticker_suggestions():
                 break
 
         recommendation = suggest_ticker_shortlist(unique_candidates)
-        return jsonify({
-            "count": len(unique_candidates),
-            "candidates": unique_candidates,
-            "recommendation": recommendation,
-            "generated_at": datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST"),
-        })
+        return jsonify(
+            {
+                "count": len(unique_candidates),
+                "candidates": unique_candidates,
+                "recommendation": recommendation,
+                "generated_at": datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST"),
+            }
+        )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2109,19 +2715,21 @@ def api_groq_trade_review():
             agreement=agreement,
             sentiment_text=sentiment,
         )
-        return jsonify({
-            "ticker": ticker,
-            "name": stock_name,
-            "entry_price": round(entry_price, 2),
-            "quantity": quantity,
-            "current_price": round(current_price, 2) if current_price > 0 else None,
-            "signal": signal,
-            "predicted_return": round(predicted_return, 3),
-            "confidence": round(confidence, 1),
-            "model_agreement": round(agreement, 1),
-            "review": review,
-            "generated_at": datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST"),
-        })
+        return jsonify(
+            {
+                "ticker": ticker,
+                "name": stock_name,
+                "entry_price": round(entry_price, 2),
+                "quantity": quantity,
+                "current_price": round(current_price, 2) if current_price > 0 else None,
+                "signal": signal,
+                "predicted_return": round(predicted_return, 3),
+                "confidence": round(confidence, 1),
+                "model_agreement": round(agreement, 1),
+                "review": review,
+                "generated_at": datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST"),
+            }
+        )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2135,11 +2743,13 @@ def api_ai_risk_analysis():
         analysis = ai_risk_assessment(summary)
     except Exception as e:
         analysis = f"AI risk analysis unavailable: {e}"
-    return jsonify({
-        "summary": summary,
-        "analysis": analysis,
-        "generated_at": datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST"),
-    })
+    return jsonify(
+        {
+            "summary": summary,
+            "analysis": analysis,
+            "generated_at": datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST"),
+        }
+    )
 
 
 @app.route("/api/explain-model")
@@ -2192,16 +2802,22 @@ def api_feature_importance(ticker: str):
 
         # Extract feature importances from tree-based models
         importances = {}
-        if hasattr(predictor, 'models') and predictor.models:
+        if hasattr(predictor, "models") and predictor.models:
             for name, model in predictor.models.items():
-                inner = getattr(model, 'model', model)
-                if hasattr(inner, 'feature_importances_'):
+                inner = getattr(model, "model", model)
+                if hasattr(inner, "feature_importances_"):
                     fi = inner.feature_importances_
-                    feat_names = getattr(inner, 'feature_names_in_', None) or getattr(model, 'feature_names', None)
+                    feat_names = getattr(inner, "feature_names_in_", None) or getattr(
+                        model, "feature_names", None
+                    )
                     if feat_names is not None:
                         # Pair names with importances, sort by importance desc
-                        paired = sorted(zip(feat_names, fi), key=lambda x: x[1], reverse=True)[:20]
-                        importances[name] = {str(n): round(float(v), 4) for n, v in paired}
+                        paired = sorted(
+                            zip(feat_names, fi), key=lambda x: x[1], reverse=True
+                        )[:20]
+                        importances[name] = {
+                            str(n): round(float(v), 4) for n, v in paired
+                        }
 
         # Provide top indicators affecting price
         indicators = pred.get("indicators", {})
@@ -2212,52 +2828,126 @@ def api_feature_importance(ticker: str):
         rsi = indicators.get("rsi")
         if rsi is not None:
             if rsi > 70:
-                key_factors.append({"factor": "RSI (Overbought)", "value": f"{rsi:.1f}", "impact": "bearish", "weight": 0.15})
+                key_factors.append(
+                    {
+                        "factor": "RSI (Overbought)",
+                        "value": f"{rsi:.1f}",
+                        "impact": "bearish",
+                        "weight": 0.15,
+                    }
+                )
             elif rsi < 30:
-                key_factors.append({"factor": "RSI (Oversold)", "value": f"{rsi:.1f}", "impact": "bullish", "weight": 0.15})
+                key_factors.append(
+                    {
+                        "factor": "RSI (Oversold)",
+                        "value": f"{rsi:.1f}",
+                        "impact": "bullish",
+                        "weight": 0.15,
+                    }
+                )
             else:
-                key_factors.append({"factor": "RSI", "value": f"{rsi:.1f}", "impact": "neutral", "weight": 0.10})
+                key_factors.append(
+                    {
+                        "factor": "RSI",
+                        "value": f"{rsi:.1f}",
+                        "impact": "neutral",
+                        "weight": 0.10,
+                    }
+                )
 
         # MACD
         macd = indicators.get("macd")
         macd_signal = indicators.get("macd_signal")
         if macd is not None and macd_signal is not None:
             if macd > macd_signal:
-                key_factors.append({"factor": "MACD Crossover", "value": f"{macd:.3f}", "impact": "bullish", "weight": 0.12})
+                key_factors.append(
+                    {
+                        "factor": "MACD Crossover",
+                        "value": f"{macd:.3f}",
+                        "impact": "bullish",
+                        "weight": 0.12,
+                    }
+                )
             else:
-                key_factors.append({"factor": "MACD Crossover", "value": f"{macd:.3f}", "impact": "bearish", "weight": 0.12})
+                key_factors.append(
+                    {
+                        "factor": "MACD Crossover",
+                        "value": f"{macd:.3f}",
+                        "impact": "bearish",
+                        "weight": 0.12,
+                    }
+                )
 
         # Volume
         vol_ratio = indicators.get("volume_ratio")
         if vol_ratio is not None:
             if vol_ratio > 1.5:
-                key_factors.append({"factor": "High Volume", "value": f"{vol_ratio:.2f}x", "impact": "bullish", "weight": 0.10})
+                key_factors.append(
+                    {
+                        "factor": "High Volume",
+                        "value": f"{vol_ratio:.2f}x",
+                        "impact": "bullish",
+                        "weight": 0.10,
+                    }
+                )
             elif vol_ratio < 0.5:
-                key_factors.append({"factor": "Low Volume", "value": f"{vol_ratio:.2f}x", "impact": "bearish", "weight": 0.08})
+                key_factors.append(
+                    {
+                        "factor": "Low Volume",
+                        "value": f"{vol_ratio:.2f}x",
+                        "impact": "bearish",
+                        "weight": 0.08,
+                    }
+                )
 
         # ADX
         adx = indicators.get("adx")
         if adx is not None:
-            key_factors.append({"factor": "ADX (Trend Strength)", "value": f"{adx:.1f}", "impact": "bullish" if adx > 25 else "neutral", "weight": 0.08})
+            key_factors.append(
+                {
+                    "factor": "ADX (Trend Strength)",
+                    "value": f"{adx:.1f}",
+                    "impact": "bullish" if adx > 25 else "neutral",
+                    "weight": 0.08,
+                }
+            )
 
         # ATR
         atr = indicators.get("atr_pct")
         if atr is not None:
-            key_factors.append({"factor": "Volatility (ATR%)", "value": f"{atr*100:.2f}%", "impact": "neutral", "weight": 0.07})
+            key_factors.append(
+                {
+                    "factor": "Volatility (ATR%)",
+                    "value": f"{atr*100:.2f}%",
+                    "impact": "neutral",
+                    "weight": 0.07,
+                }
+            )
 
         # Fundamentals
         pe = fundamentals.get("pe_ratio")
         if pe is not None and pe > 0:
-            key_factors.append({"factor": "P/E Ratio", "value": f"{pe:.1f}", "impact": "bearish" if pe > 40 else "neutral" if pe > 20 else "bullish", "weight": 0.10})
+            key_factors.append(
+                {
+                    "factor": "P/E Ratio",
+                    "value": f"{pe:.1f}",
+                    "impact": (
+                        "bearish" if pe > 40 else "neutral" if pe > 20 else "bullish"
+                    ),
+                    "weight": 0.10,
+                }
+            )
 
         # Sort by weight
         key_factors.sort(key=lambda x: x["weight"], reverse=True)
 
-        return jsonify({
-            "ticker": ticker,
-            "key_factors": key_factors,
-            "model_importances": importances,
-        })
+        return jsonify(
+            {
+                "ticker": ticker,
+                "key_factors": key_factors,
+                "model_importances": importances,
+            }
+        )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2265,6 +2955,7 @@ def api_feature_importance(ticker: str):
 # ---------------------------------------------------------------------------
 # Helpers — JSON Sanitization for numpy types
 # ---------------------------------------------------------------------------
+
 
 def _sanitize(obj):
     """Recursively convert numpy types to Python-native for JSON serialization."""
@@ -2287,6 +2978,7 @@ def _sanitize(obj):
 # Routes — Portfolio Risk Analytics (Institutional Grade)
 # ---------------------------------------------------------------------------
 
+
 @app.route("/api/risk-analytics")
 def api_risk_analytics():
     """
@@ -2296,49 +2988,100 @@ def api_risk_analytics():
     """
     import yfinance as yf
     from src.backtest.metrics import (
-        sharpe_ratio as calc_sharpe, sortino_ratio as calc_sortino,
-        max_drawdown as calc_mdd, max_drawdown_duration as calc_mdd_dur,
-        value_at_risk as calc_var, conditional_var as calc_cvar,
+        sharpe_ratio as calc_sharpe,
+        sortino_ratio as calc_sortino,
+        max_drawdown as calc_mdd,
+        max_drawdown_duration as calc_mdd_dur,
+        value_at_risk as calc_var,
+        conditional_var as calc_cvar,
         parametric_var as calc_pvar,
-        return_skewness, return_kurtosis, tail_ratio as calc_tail,
-        jarque_bera_test, monte_carlo_backtest,
+        return_skewness,
+        return_kurtosis,
+        tail_ratio as calc_tail,
+        jarque_bera_test,
+        monte_carlo_backtest,
         information_ratio as calc_ir,
     )
 
     try:
-        # Use explicit portfolio if user has added holdings, else fallback to model picks
+        _sanitize_portfolio_storage()
         portfolio_rows = _read_portfolio()
+        if not portfolio_rows:
+            return (
+                jsonify(
+                    {
+                        "error": "No portfolio holdings found. Add portfolio positions to run risk analytics.",
+                        "portfolio_tickers": [],
+                    }
+                ),
+                400,
+            )
 
         custom_weights = {}
-        portfolio_tickers = []
+        portfolio_universe = []
         if portfolio_rows:
             for row in portfolio_rows:
                 t = row.get("ticker")
                 q = float(row.get("quantity", 0) or 0)
                 p = float(row.get("entry_price", 0) or 0)
                 if t and q > 0 and p > 0:
-                    portfolio_tickers.append(t)
+                    portfolio_universe.append(t)
                     custom_weights[t] = custom_weights.get(t, 0.0) + (q * p)
+        portfolio_universe = sorted(set(portfolio_universe))
+        if not portfolio_universe:
+            return (
+                jsonify(
+                    {
+                        "error": "No valid portfolio holdings found. Remove invalid tickers and add holdings again.",
+                        "portfolio_tickers": [],
+                    }
+                ),
+                400,
+            )
 
-        # Use top picks or daily analysis stocks for portfolio analytics
-        with _daily_analysis_lock:
-            stocks = _daily_analysis_cache.get("all_stocks", [])
-
-        if not stocks and not portfolio_tickers:
-            return jsonify({"error": "Daily analysis not ready yet"}), 202
+        raw_requested = request.args.getlist("tickers")
+        requested: list[str] = []
+        for raw in raw_requested:
+            requested.extend(
+                [t.strip().upper() for t in str(raw).split(",") if t.strip()]
+            )
+        if not requested:
+            tickers_param = request.args.get("tickers", "")
+            if tickers_param:
+                requested = [
+                    t.strip().upper()
+                    for t in str(tickers_param).split(",")
+                    if t.strip()
+                ]
+        if requested:
+            portfolio_tickers = [t for t in requested if t in portfolio_universe]
+            ignored = [t for t in requested if t not in portfolio_universe]
+        else:
+            portfolio_tickers = list(portfolio_universe)
+            ignored = []
 
         if not portfolio_tickers:
-            # Get buy-signal stocks as the "portfolio" — use top composite-scored stocks
-            portfolio_tickers = [s["ticker"] for s in stocks
-                                 if s.get("signal") in ("BUY", "STRONG_BUY")][:20]
-            if len(portfolio_tickers) < 5:
-                # Fall back to top 10 by composite score
-                portfolio_tickers = [s["ticker"] for s in stocks[:10]]
+            return (
+                jsonify(
+                    {
+                        "error": "Requested tickers are not in portfolio holdings.",
+                        "portfolio_tickers": [],
+                        "ignored_tickers": ignored,
+                    }
+                ),
+                400,
+            )
 
         # Download 6 months of history for robust risk calcs
         ticker_str = " ".join(portfolio_tickers + ["^NSEI"])
-        data = yf.download(ticker_str, period="6mo", interval="1d",
-                          progress=False, auto_adjust=True, threads=True)
+        data = yf.download(
+            ticker_str,
+            period="6mo",
+            interval="1d",
+            progress=False,
+            auto_adjust=True,
+            threads=True,
+        )
 
         if data is None or data.empty:
             return jsonify({"error": "Unable to fetch historical data"}), 500
@@ -2373,8 +3116,7 @@ def api_risk_analytics():
         corr_data = {}
         for col in corr_matrix.columns:
             corr_data[col] = {
-                c: round(float(v), 3)
-                for c, v in corr_matrix[col].items()
+                c: round(float(v), 3) for c, v in corr_matrix[col].items()
             }
 
         # --- Sector Exposure ---
@@ -2385,18 +3127,24 @@ def api_risk_analytics():
                 sector_exposure[SECTOR_DISPLAY.get(sec, sec)] = {
                     "count": len(overlap),
                     "tickers": overlap,
-                    "weight_pct": round(len(overlap) / len(portfolio_tickers) * 100, 1),
+                    "weight_pct": round(
+                        len(overlap) / max(len(surviving_tickers), 1) * 100, 1
+                    ),
                 }
 
         # --- Portfolio-level returns (weighted by user holdings if available) ---
-        portfolio_cols = [c for c in returns.columns if c != "^NSEI" and c in surviving_tickers]
+        portfolio_cols = [
+            c for c in returns.columns if c != "^NSEI" and c in surviving_tickers
+        ]
         if not portfolio_cols:
             return jsonify({"error": "Insufficient data for analytics"}), 500
 
         if custom_weights:
             total_cost = sum(custom_weights.get(t, 0.0) for t in portfolio_cols)
             if total_cost > 0:
-                normalized = {t: custom_weights.get(t, 0.0) / total_cost for t in portfolio_cols}
+                normalized = {
+                    t: custom_weights.get(t, 0.0) / total_cost for t in portfolio_cols
+                }
             else:
                 normalized = {t: 1.0 / len(portfolio_cols) for t in portfolio_cols}
             weighted = pd.Series(0.0, index=returns.index)
@@ -2425,7 +3173,9 @@ def api_risk_analytics():
             "max_drawdown_duration_days": int(calc_mdd_dur(port_equity)),
             "daily_var_95": _safe(calc_var, port_returns, 0.95),
             "daily_cvar_95": _safe(calc_cvar, port_returns, 0.95),
-            "parametric_var_cf_95": _safe(calc_pvar, port_returns, 0.95, "cornish_fisher"),
+            "parametric_var_cf_95": _safe(
+                calc_pvar, port_returns, 0.95, "cornish_fisher"
+            ),
             "skewness": _safe(return_skewness, port_returns),
             "excess_kurtosis": _safe(return_kurtosis, port_returns),
             "tail_ratio": _safe(calc_tail, port_returns, default=1.0),
@@ -2434,7 +3184,9 @@ def api_risk_analytics():
 
         # Add benchmark-relative metrics
         if benchmark_returns is not None and not benchmark_returns.empty:
-            risk_metrics["information_ratio"] = _safe(calc_ir, port_returns, benchmark_returns)
+            risk_metrics["information_ratio"] = _safe(
+                calc_ir, port_returns, benchmark_returns
+            )
 
         # --- Statistical Tests ---
         stat_tests = {
@@ -2454,18 +3206,27 @@ def api_risk_analytics():
             for d, v in port_equity.items()
         ]
 
-        return jsonify(_sanitize({
-            "portfolio_tickers": surviving_tickers,
-            "portfolio_holdings": [r for r in portfolio_rows if r.get("ticker") in surviving_tickers],
-            "n_stocks": len(surviving_tickers),
-            "period": f"{actual_period_days} days",
-            "risk_metrics": risk_metrics,
-            "correlation_matrix": corr_data,
-            "sector_exposure": sector_exposure,
-            "statistical_tests": stat_tests,
-            "monte_carlo": mc_result,
-            "equity_curve": equity_data,
-        }))
+        return jsonify(
+            _sanitize(
+                {
+                    "portfolio_tickers": surviving_tickers,
+                    "portfolio_holdings": [
+                        r
+                        for r in portfolio_rows
+                        if r.get("ticker") in surviving_tickers
+                    ],
+                    "ignored_tickers": ignored,
+                    "n_stocks": len(surviving_tickers),
+                    "period": f"{actual_period_days} days",
+                    "risk_metrics": risk_metrics,
+                    "correlation_matrix": corr_data,
+                    "sector_exposure": sector_exposure,
+                    "statistical_tests": stat_tests,
+                    "monte_carlo": mc_result,
+                    "equity_curve": equity_data,
+                }
+            )
+        )
 
     except Exception as e:
         log.error(f"Risk analytics error: {e}")
@@ -2489,7 +3250,9 @@ def ai_risk_dashboard():
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     load_tickers()
-    log.info(f"Loaded {len(all_tickers)} tickers across {len(tickers_by_sector)} sectors")
+    log.info(
+        f"Loaded {len(all_tickers)} tickers across {len(tickers_by_sector)} sectors"
+    )
     cleaned = _sanitize_portfolio_storage()
     if cleaned.get("changed"):
         log.info(
@@ -2511,7 +3274,9 @@ if __name__ == "__main__":
     model_thread.start()
 
     # Start daily analysis background computation thread
-    analysis_thread = threading.Thread(target=_daily_analysis_background_loop, daemon=True)
+    analysis_thread = threading.Thread(
+        target=_daily_analysis_background_loop, daemon=True
+    )
     analysis_thread.start()
     log.info("Daily analysis background thread started")
 

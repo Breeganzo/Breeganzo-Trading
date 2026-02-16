@@ -21,7 +21,9 @@ def test_live_predictor_top_picks_ranges():
 
     for pick in picks:
         predicted_return_decimal = pick["predicted_return"] / 100.0
-        expected_price = round(pick["current_price"] * (1 + predicted_return_decimal), 2)
+        expected_price = round(
+            pick["current_price"] * (1 + predicted_return_decimal), 2
+        )
         assert abs(pick["predicted_price"] - expected_price) <= 0.02
 
 
@@ -66,8 +68,55 @@ def test_api_top_picks_shape_and_ranges(monkeypatch):
         assert len(payload) == 1
 
         pick = payload[0]
-        for key in ("ticker", "predicted_return", "predicted_price", "current_price", "signal"):
+        for key in (
+            "ticker",
+            "predicted_return",
+            "predicted_price",
+            "current_price",
+            "signal",
+        ):
             assert key in pick
 
         assert abs(pick["predicted_return"]) <= 50
         assert pick["current_price"] > 0
+
+
+def test_api_top_picks_large_cap_grouped_path(monkeypatch):
+    class StubPredictor:
+        def __init__(self):
+            self.last_sectors = None
+
+        def predict_top_picks_grouped(self, sectors=None, top_n=10):
+            self.last_sectors = sectors
+            return {
+                "top_buy": [
+                    {
+                        "ticker": "RELIANCE.NS",
+                        "predicted_return": 2.4,
+                        "predicted_price": 2800.0,
+                        "target_price": 2800.0,
+                        "current_price": 2730.0,
+                        "signal": "BUY",
+                        "confidence": 70.0,
+                        "model_agreement": 75.0,
+                        "risk_reward": 1.6,
+                    }
+                ],
+                "top_sell": [],
+                "top_hold": [],
+            }
+
+    stub = StubPredictor()
+    monkeypatch.setattr(server, "models_loaded", True)
+    monkeypatch.setattr(server, "predictor", stub)
+    monkeypatch.setattr(server, "ticker_names", {"RELIANCE.NS": "Reliance"})
+
+    with server.app.test_client() as client:
+        response = client.get("/api/top-picks?sectors=large_cap&grouped=true&n=10")
+        assert response.status_code == 200
+        payload = response.get_json()
+
+    assert stub.last_sectors == ["large_cap"]
+    assert payload["top_buy"]
+    assert payload["top_buy"][0]["ticker"] == "RELIANCE.NS"
+    assert payload["top_buy"][0]["current_price"] > 0

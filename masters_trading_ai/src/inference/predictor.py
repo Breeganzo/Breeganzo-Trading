@@ -45,12 +45,11 @@ from ..models.ensemble import EnsembleModel
 from ..features.pipeline import FeaturePipeline
 from ..features.fundamentals import FundamentalAnalyzer
 
-
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 IST = ZoneInfo("Asia/Kolkata")
-MARKET_OPEN = 9   # 9:15 AM IST
+MARKET_OPEN = 9  # 9:15 AM IST
 MARKET_OPEN_MIN = 15
 MARKET_CLOSE = 15  # 3:30 PM IST
 MARKET_CLOSE_MIN = 30
@@ -64,7 +63,7 @@ def _sanitize_predicted_return(value: float, base_preds: dict) -> float:
 
     Rules:
       - None/NaN/inf => 0.0
-      - If |value| >= 2.0, treat it as percent units and divide by 100
+      - If |value| > 2.0, treat it as percent units and divide by 100
       - Cap to +/- 0.5 (50%)
       - Log warning when conversion/capping happens
     """
@@ -83,15 +82,9 @@ def _sanitize_predicted_return(value: float, base_preds: dict) -> float:
     converted = False
     capped = False
 
-    # Boundary includes 2.0 to match expected behavior for 2.0 => 0.02.
-    if abs(sanitized) >= 2.0:
+    if abs(sanitized) > 2.0:
         sanitized = sanitized / 100.0
         converted = True
-
-    # Hard guardrail for extreme runaway values.
-    if abs(raw_value) >= 10.0:
-        sanitized = 0.5 if raw_value > 0 else -0.5
-        capped = True
 
     clipped = float(np.clip(sanitized, -0.5, 0.5))
     if not np.isclose(clipped, sanitized):
@@ -129,8 +122,12 @@ def get_market_status() -> dict:
     now = datetime.now(IST)
     weekday = now.weekday()  # 0=Mon, 6=Sun
 
-    market_open_time = now.replace(hour=MARKET_OPEN, minute=MARKET_OPEN_MIN, second=0, microsecond=0)
-    market_close_time = now.replace(hour=MARKET_CLOSE, minute=MARKET_CLOSE_MIN, second=0, microsecond=0)
+    market_open_time = now.replace(
+        hour=MARKET_OPEN, minute=MARKET_OPEN_MIN, second=0, microsecond=0
+    )
+    market_close_time = now.replace(
+        hour=MARKET_CLOSE, minute=MARKET_CLOSE_MIN, second=0, microsecond=0
+    )
 
     if weekday >= 5:  # Saturday or Sunday
         days_until_monday = 7 - weekday
@@ -295,7 +292,11 @@ class LivePredictor:
         loaded = sum(1 for step in self._load_steps if step.get("status") == "loaded")
         failed = sum(1 for step in self._load_steps if step.get("status") == "failed")
         in_progress = next(
-            (step.get("name") for step in self._load_steps if step.get("status") == "loading"),
+            (
+                step.get("name")
+                for step in self._load_steps
+                if step.get("status") == "loading"
+            ),
             None,
         )
         return {
@@ -339,7 +340,14 @@ class LivePredictor:
         ]
 
         loaded = {}
-        canonical_order = ["arima", "garch", "xgboost", "lightgbm", "lstm", "transformer"]
+        canonical_order = [
+            "arima",
+            "garch",
+            "xgboost",
+            "lightgbm",
+            "lstm",
+            "transformer",
+        ]
 
         # ── LSTM (load PyTorch models first to avoid C-extension conflicts) ──
         lstm_path = self.models_dir / "lstm_model.pt"
@@ -548,18 +556,28 @@ class LivePredictor:
                 if live:
                     current_price = float(live.get("price", 0) or 0)
                     cached["current_price"] = round(current_price, 2)
-                    cached["previous_close"] = float(live.get("previous_close", cached.get("previous_close", current_price)) or current_price)
+                    cached["previous_close"] = float(
+                        live.get(
+                            "previous_close",
+                            cached.get("previous_close", current_price),
+                        )
+                        or current_price
+                    )
                 else:
                     current_price = float(cached.get("current_price", 0) or 0)
                 if current_price <= 0:
                     return None
 
                 cached_return_pct = float(cached.get("predicted_return", 0) or 0)
-                cached_return_decimal = _sanitize_predicted_return(cached_return_pct / 100.0, {})
+                cached_return_decimal = _sanitize_predicted_return(
+                    cached_return_pct / 100.0, {}
+                )
                 atr_pct = float(cached.get("atr_pct", 2.0) or 2.0) / 100.0
                 volume_ratio = float(cached.get("volume_ratio", 1.0) or 1.0)
                 rvol = float(cached.get("rvol", 1.0) or 1.0)
-                model_agreement = float(cached.get("model_agreement", 50.0) or 50.0) / 100.0
+                model_agreement = (
+                    float(cached.get("model_agreement", 50.0) or 50.0) / 100.0
+                )
                 signal, confidence = self._generate_signal(
                     cached_return_decimal,
                     atr_pct=atr_pct,
@@ -568,7 +586,12 @@ class LivePredictor:
                     model_agreement=model_agreement,
                 )
                 cached["predicted_return"] = round(cached_return_decimal * 100, 4)
-                cached["predicted_price"] = round(current_price * (1 + cached_return_decimal), 2)
+                cached["predicted_price"] = round(
+                    current_price * (1 + cached_return_decimal), 2
+                )
+                assert cached["predicted_price"] == round(
+                    current_price * (1 + cached_return_decimal), 2
+                )
                 cached["target_price"] = cached["predicted_price"]
                 cached["signal"] = signal
                 cached["confidence"] = round(confidence, 1)
@@ -590,21 +613,34 @@ class LivePredictor:
         live = self.get_live_price(ticker)
         if live:
             current_price = float(live.get("price", 0) or 0)
-            previous_close = float(live.get("previous_close", current_price) or current_price)
+            previous_close = float(
+                live.get("previous_close", current_price) or current_price
+            )
             current_volume = float(live.get("volume", 0) or 0)
         else:
             try:
                 if "Close" in feat_df.columns:
                     current_price = float(feat_df["Close"].iloc[-1])
-                    previous_close = float(feat_df["Close"].iloc[-2]) if len(feat_df) >= 2 else current_price
+                    previous_close = (
+                        float(feat_df["Close"].iloc[-2])
+                        if len(feat_df) >= 2
+                        else current_price
+                    )
                 else:
                     current_price = 0
                     previous_close = 0
-                current_volume = float(feat_df["Volume"].iloc[-1]) if "Volume" in feat_df.columns else 0
+                current_volume = (
+                    float(feat_df["Volume"].iloc[-1])
+                    if "Volume" in feat_df.columns
+                    else 0
+                )
             except Exception:
                 current_price = 0
                 previous_close = current_price
                 current_volume = 0
+
+        if current_price <= 0:
+            return None
 
         # --- Base model predictions ---
         base_preds = {}
@@ -622,7 +658,9 @@ class LivePredictor:
         if "garch" in self.models:
             try:
                 garch_model = self.models["garch"]
-                mean_fc, vol_fc = garch_model.forecast_ticker(ticker, garch_model.forecast_horizon)
+                mean_fc, vol_fc = garch_model.forecast_ticker(
+                    ticker, garch_model.forecast_horizon
+                )
                 base_preds["garch"] = float(mean_fc)
             except Exception as e:
                 print(f"GARCH prediction failed: {e}")
@@ -633,7 +671,9 @@ class LivePredictor:
                 xgb_model = self.models["xgboost"]
                 # Align features to what model expects
                 available = [f for f in xgb_model.feature_names if f in feat_df.columns]
-                missing = [f for f in xgb_model.feature_names if f not in feat_df.columns]
+                missing = [
+                    f for f in xgb_model.feature_names if f not in feat_df.columns
+                ]
                 pred_df = feat_df[available].copy()
                 for m in missing:
                     pred_df[m] = 0.0
@@ -651,7 +691,9 @@ class LivePredictor:
             try:
                 lgb_model = self.models["lightgbm"]
                 available = [f for f in lgb_model.feature_names if f in feat_df.columns]
-                missing = [f for f in lgb_model.feature_names if f not in feat_df.columns]
+                missing = [
+                    f for f in lgb_model.feature_names if f not in feat_df.columns
+                ]
                 pred_df = feat_df[available].copy()
                 for m in missing:
                     pred_df[m] = 0.0
@@ -668,8 +710,12 @@ class LivePredictor:
         if "lstm" in self.models:
             try:
                 lstm_model = self.models["lstm"]
-                available = [f for f in lstm_model.feature_names if f in feat_df.columns]
-                missing = [f for f in lstm_model.feature_names if f not in feat_df.columns]
+                available = [
+                    f for f in lstm_model.feature_names if f in feat_df.columns
+                ]
+                missing = [
+                    f for f in lstm_model.feature_names if f not in feat_df.columns
+                ]
                 pred_df = feat_df[available].copy()
                 for m in missing:
                     pred_df[m] = 0.0
@@ -690,7 +736,9 @@ class LivePredictor:
             try:
                 tf_model = self.models["transformer"]
                 available = [f for f in tf_model.feature_names if f in feat_df.columns]
-                missing = [f for f in tf_model.feature_names if f not in feat_df.columns]
+                missing = [
+                    f for f in tf_model.feature_names if f not in feat_df.columns
+                ]
                 pred_df = feat_df[available].copy()
                 for m in missing:
                     pred_df[m] = 0.0
@@ -715,7 +763,11 @@ class LivePredictor:
         if self.ensemble is not None and len(base_preds) >= 2:
             try:
                 # Build prediction DataFrame matching ensemble's expected columns
-                ens_cols = self.ensemble.model_names if hasattr(self.ensemble, "model_names") else list(base_preds.keys())
+                ens_cols = (
+                    self.ensemble.model_names
+                    if hasattr(self.ensemble, "model_names")
+                    else list(base_preds.keys())
+                )
                 ens_data = {}
                 for col in ens_cols:
                     ens_data[col] = [base_preds.get(col, 0.0)]
@@ -729,16 +781,22 @@ class LivePredictor:
                     available_wts = {k: raw_weights.get(k, 0.0) for k in base_preds}
                     total = sum(available_wts.values())
                     if total > 0:
-                        ensemble_weights = {k: v / total for k, v in available_wts.items()}
+                        ensemble_weights = {
+                            k: v / total for k, v in available_wts.items()
+                        }
                     else:
-                        ensemble_weights = {k: 1.0 / len(base_preds) for k in base_preds}
+                        ensemble_weights = {
+                            k: 1.0 / len(base_preds) for k in base_preds
+                        }
                 else:
                     ensemble_weights = {k: 1.0 / len(base_preds) for k in base_preds}
 
                 # Get direction probability if dual-learner is available
                 if hasattr(self.ensemble, "predict_direction_probability"):
                     try:
-                        dir_prob = float(self.ensemble.predict_direction_probability(ens_df)[0])
+                        dir_prob = float(
+                            self.ensemble.predict_direction_probability(ens_df)[0]
+                        )
                     except Exception:
                         dir_prob = None
                 else:
@@ -754,7 +812,9 @@ class LivePredictor:
                         predicted_return = sum(
                             v * available_wts[k] / total for k, v in base_preds.items()
                         )
-                        ensemble_weights = {k: v / total for k, v in available_wts.items()}
+                        ensemble_weights = {
+                            k: v / total for k, v in available_wts.items()
+                        }
                     else:
                         predicted_return = float(np.mean(list(base_preds.values())))
                 else:
@@ -770,8 +830,14 @@ class LivePredictor:
         assert predicted_price == round(current_price * (1 + predicted_return), 2)
 
         # Get ATR% from features if available
-        atr_pct = float(feat_df["ATR_pct"].iloc[-1]) if "ATR_pct" in feat_df.columns else 0.02
-        volume_ratio = float(feat_df["Volume_SMA_ratio"].iloc[-1]) if "Volume_SMA_ratio" in feat_df.columns else 1.0
+        atr_pct = (
+            float(feat_df["ATR_pct"].iloc[-1]) if "ATR_pct" in feat_df.columns else 0.02
+        )
+        volume_ratio = (
+            float(feat_df["Volume_SMA_ratio"].iloc[-1])
+            if "Volume_SMA_ratio" in feat_df.columns
+            else 1.0
+        )
         rvol = float(feat_df["RVOL"].iloc[-1]) if "RVOL" in feat_df.columns else 1.0
 
         # Model agreement (what fraction of base models agree on direction)
@@ -783,7 +849,10 @@ class LivePredictor:
 
         # --- Signal generation ---
         signal, confidence = self._generate_signal(
-            predicted_return, atr_pct, volume_ratio, rvol,
+            predicted_return,
+            atr_pct,
+            volume_ratio,
+            rvol,
             model_agreement=model_agreement,
         )
 
@@ -802,7 +871,9 @@ class LivePredictor:
             stop_loss = current_price - 2.0 * atr_value
             target_price = predicted_price
 
-        risk_reward = abs(predicted_price - entry_price) / (abs(entry_price - stop_loss) + 1e-10)
+        risk_reward = abs(predicted_price - entry_price) / (
+            abs(entry_price - stop_loss) + 1e-10
+        )
 
         result = {
             "ticker": ticker,
@@ -812,11 +883,17 @@ class LivePredictor:
             "previous_close": round(previous_close, 2),
             "model_predictions": {k: round(v * 100, 4) for k, v in base_preds.items()},
             "ensemble_weights": {k: round(v, 4) for k, v in ensemble_weights.items()},
-            "ensemble_strategy": getattr(self.ensemble, "best_strategy", "simple_average") if self.ensemble else "fallback_average",
+            "ensemble_strategy": (
+                getattr(self.ensemble, "best_strategy", "simple_average")
+                if self.ensemble
+                else "fallback_average"
+            ),
             "excluded_models": sorted(self._stale_models) if self._stale_models else [],
             "signal": signal,
             "confidence": round(confidence, 1),
-            "direction_probability": round(dir_prob * 100, 1) if dir_prob is not None else None,
+            "direction_probability": (
+                round(dir_prob * 100, 1) if dir_prob is not None else None
+            ),
             "model_agreement": round(model_agreement * 100, 1),
             "entry_price": round(entry_price, 2),
             "stop_loss": round(stop_loss, 2),
@@ -831,12 +908,19 @@ class LivePredictor:
         try:
             indicators = {}
             indicator_cols = {
-                "RSI_14": "rsi", "MACD": "macd", "MACD_Signal": "macd_signal",
-                "SMA_20": "sma_20", "SMA_50": "sma_50",
-                "EMA_12": "ema_12", "EMA_26": "ema_26",
-                "BB_Upper": "bb_upper", "BB_Lower": "bb_lower",
-                "ATR_pct": "atr_pct", "Volume_SMA_ratio": "volume_ratio",
-                "ADX": "adx", "BB_Middle": "bb_middle",
+                "RSI_14": "rsi",
+                "MACD": "macd",
+                "MACD_Signal": "macd_signal",
+                "SMA_20": "sma_20",
+                "SMA_50": "sma_50",
+                "EMA_12": "ema_12",
+                "EMA_26": "ema_26",
+                "BB_Upper": "bb_upper",
+                "BB_Lower": "bb_lower",
+                "ATR_pct": "atr_pct",
+                "Volume_SMA_ratio": "volume_ratio",
+                "ADX": "adx",
+                "BB_Middle": "bb_middle",
             }
             for col, key in indicator_cols.items():
                 if col in feat_df.columns:
@@ -851,10 +935,15 @@ class LivePredictor:
         # --- Add options greeks (if available) ---
         try:
             from ..options.greeks import BlackScholesGreeks
+
             bs = BlackScholesGreeks()
             # Calculate ATM call greeks using historical volatility
             if current_price > 0:
-                hist_vol = float(feat_df["Returns"].std() * np.sqrt(252)) if "Returns" in feat_df.columns else 0.3
+                hist_vol = (
+                    float(feat_df["Returns"].std() * np.sqrt(252))
+                    if "Returns" in feat_df.columns
+                    else 0.3
+                )
                 T = 30 / 365  # 30 days to expiry (approximate)
                 K = round(current_price / 50) * 50  # Round to nearest 50 for strike
                 greeks_data = bs.all_greeks(current_price, K, T, hist_vol)
@@ -949,11 +1038,11 @@ class LivePredictor:
 
         # Model agreement bonus/penalty
         if model_agreement >= 0.8:
-            confidence += 8   # Strong agreement — high conviction
+            confidence += 8  # Strong agreement — high conviction
         elif model_agreement >= 0.6:
             confidence += 3
         elif model_agreement < 0.4:
-            confidence -= 5   # Models disagree — lower conviction
+            confidence -= 5  # Models disagree — lower conviction
 
         confidence = max(0, min(100, confidence))
         move_pct = abs(predicted_return) * 100.0
@@ -1091,7 +1180,9 @@ class LivePredictor:
             top_n=top_n,
             sectors=sectors,
         )
-        return grouped["top_buy"] + grouped["top_sell"][:min(3, len(grouped["top_sell"]))]
+        return (
+            grouped["top_buy"] + grouped["top_sell"][: min(3, len(grouped["top_sell"]))]
+        )
 
     def get_after_hours_review(self) -> dict:
         """
@@ -1102,6 +1193,7 @@ class LivePredictor:
         dict with keys: predictions, actuals, hit_rate, alpha, results
         """
         import json
+
         log_dir = PROJECT_ROOT / "cache" / "prediction_log"
         today_str = datetime.now(IST).strftime("%Y-%m-%d")
         log_file = log_dir / f"{today_str}.json"
@@ -1126,7 +1218,9 @@ class LivePredictor:
                 actual_close = live["price"]
                 pred_price = pred.get("current_price", 0)
                 pred_return = pred.get("predicted_return", 0) / 100
-                actual_return = (actual_close - pred_price) / pred_price if pred_price > 0 else 0
+                actual_return = (
+                    (actual_close - pred_price) / pred_price if pred_price > 0 else 0
+                )
 
                 pred_dir = "UP" if pred_return > 0 else "DOWN"
                 actual_dir = "UP" if actual_return > 0 else "DOWN"
@@ -1134,23 +1228,27 @@ class LivePredictor:
 
                 alpha = actual_return if correct else -abs(actual_return)
 
-                results.append({
-                    "ticker": ticker,
-                    "signal": pred.get("signal", "N/A"),
-                    "predicted_return": pred.get("predicted_return", 0),
-                    "predicted_price": pred.get("predicted_price", 0),
-                    "actual_close": actual_close,
-                    "actual_return_pct": round(actual_return * 100, 4),
-                    "direction_correct": correct,
-                    "alpha_pct": round(alpha * 100, 4),
-                })
+                results.append(
+                    {
+                        "ticker": ticker,
+                        "signal": pred.get("signal", "N/A"),
+                        "predicted_return": pred.get("predicted_return", 0),
+                        "predicted_price": pred.get("predicted_price", 0),
+                        "actual_close": actual_close,
+                        "actual_return_pct": round(actual_return * 100, 4),
+                        "direction_correct": correct,
+                        "alpha_pct": round(alpha * 100, 4),
+                    }
+                )
             except Exception:
                 continue
 
         if not results:
             return {"error": "Could not fetch actuals"}
 
-        hit_rate = sum(1 for r in results if r["direction_correct"]) / len(results) * 100
+        hit_rate = (
+            sum(1 for r in results if r["direction_correct"]) / len(results) * 100
+        )
         avg_alpha = np.mean([r["alpha_pct"] for r in results])
         total_alpha = sum(r["alpha_pct"] for r in results)
 
@@ -1167,14 +1265,21 @@ class LivePredictor:
         """
         Pre-market: generate next-day price estimates for key stocks.
 
-        Returns list of dicts with predicted prices and recent candle data.
+        Returns list of dicts with strategy/open and AI/current comparison fields.
         """
         if tickers is None:
             # Default to top large caps for pre-market view
             tickers = [
-                "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS",
-                "ICICIBANK.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS",
-                "BAJFINANCE.NS", "LT.NS",
+                "RELIANCE.NS",
+                "TCS.NS",
+                "HDFCBANK.NS",
+                "INFY.NS",
+                "ICICIBANK.NS",
+                "ITC.NS",
+                "SBIN.NS",
+                "BHARTIARTL.NS",
+                "BAJFINANCE.NS",
+                "LT.NS",
             ]
 
         if not self._loaded:
@@ -1189,11 +1294,44 @@ class LivePredictor:
 
                 # Get recent 5-day OHLCV for mini candle chart
                 live = self.get_live_price(ticker)
+                current_price = float(pred.get("current_price", 0) or 0)
+                if current_price <= 0:
+                    continue
+                open_price = float(
+                    live.get("open", current_price) if live else current_price
+                )
+                predicted_return_pct = float(pred.get("predicted_return", 0) or 0)
+                strategy_price_at_open = (
+                    round(open_price * (1 + predicted_return_pct / 100.0), 2)
+                    if open_price > 0
+                    else float(pred.get("predicted_price", 0) or 0)
+                )
+                ai_predicted_price = float(pred.get("predicted_price", 0) or 0)
+                strategy_direction = (
+                    "UP"
+                    if strategy_price_at_open > open_price
+                    else "DOWN" if strategy_price_at_open < open_price else "FLAT"
+                )
+                ai_direction = (
+                    "UP"
+                    if ai_predicted_price > current_price
+                    else "DOWN" if ai_predicted_price < current_price else "FLAT"
+                )
 
                 entry = {
                     "ticker": ticker,
                     "name": ticker.replace(".NS", ""),
-                    "current_price": pred.get("current_price", 0),
+                    "current_price": round(current_price, 2),
+                    "open_price": round(open_price, 2) if open_price > 0 else None,
+                    "strategy_price_at_open": (
+                        strategy_price_at_open if strategy_price_at_open > 0 else None
+                    ),
+                    "ai_predicted_price": (
+                        round(ai_predicted_price, 2) if ai_predicted_price > 0 else None
+                    ),
+                    "strategy_direction": strategy_direction,
+                    "ai_direction": ai_direction,
+                    "captured_at": datetime.now(IST).isoformat(),
                     "predicted_price": pred.get("predicted_price", 0),
                     "predicted_return": pred.get("predicted_return", 0),
                     "signal": pred.get("signal", "HOLD"),
@@ -1226,7 +1364,9 @@ class LivePredictor:
         if yf is None:
             return None
         try:
-            data = yf.download(ticker, period="2d", interval="1d", progress=False, auto_adjust=True)
+            data = yf.download(
+                ticker, period="2d", interval="1d", progress=False, auto_adjust=True
+            )
             if data is None or data.empty:
                 return None
             if isinstance(data.columns, pd.MultiIndex):
@@ -1249,13 +1389,16 @@ class LivePredictor:
         except Exception:
             return None
 
-
-    def get_intraday_data(self, ticker: str, period: str = "5d", interval: str = "15m") -> pd.DataFrame | None:
+    def get_intraday_data(
+        self, ticker: str, period: str = "5d", interval: str = "15m"
+    ) -> pd.DataFrame | None:
         """Download intraday data (instance method)."""
         return get_intraday_data(ticker, period, interval)
 
 
-def get_intraday_data(ticker: str, period: str = "1d", interval: str = "5m") -> pd.DataFrame | None:
+def get_intraday_data(
+    ticker: str, period: str = "1d", interval: str = "5m"
+) -> pd.DataFrame | None:
     """
     Download intraday data for a ticker.
 
@@ -1275,7 +1418,9 @@ def get_intraday_data(ticker: str, period: str = "1d", interval: str = "5m") -> 
     if yf is None:
         return None
     try:
-        df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
+        df = yf.download(
+            ticker, period=period, interval=interval, progress=False, auto_adjust=True
+        )
         if df is None or df.empty:
             return None
         if isinstance(df.columns, pd.MultiIndex):

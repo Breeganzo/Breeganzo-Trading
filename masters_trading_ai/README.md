@@ -1,8 +1,14 @@
 # Masters Trading AI
 
-AI-powered NSE dashboard with live prices, ensemble predictions, stock-level analysis, risk analytics, and Groq-assisted explanations.
+Production-focused NSE trading dashboard with:
+- live yfinance prices,
+- ensemble model predictions,
+- premarket strategy snapshots,
+- expected-vs-actual tracking,
+- portfolio-only risk analytics,
+- Groq-assisted explainability.
 
-## 1) Quick setup
+## 1) Setup
 ```bash
 cd /Users/anto/Trading_Project/masters_trading_ai
 python3 -m venv .venv
@@ -11,7 +17,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Set minimum `.env` values:
+Minimum `.env` values:
 ```bash
 GROQ_API_KEY=your_groq_key
 FLASK_SECRET_KEY=change-this
@@ -24,116 +30,180 @@ source .venv/bin/activate
 python webapp/server.py
 ```
 
-Do not run `webapp/server.py` directly (zsh will show permission denied).
-
 Open:
-- Dashboard: `http://localhost:5001`
-- Portfolio: `http://localhost:5001/portfolio`
-- Risk Analytics: `http://localhost:5001/risk`
+- `http://localhost:5001` (Dashboard)
+- `http://localhost:5001/portfolio`
+- `http://localhost:5001/risk`
 
-## 3) Verify app + predictions
-```bash
-curl -s 'http://localhost:5001/api/status' | jq
-curl -s 'http://localhost:5001/api/top-picks?n=20&grouped=true' | jq
-curl -s 'http://localhost:5001/api/price-tracker/RELIANCE.NS' | jq
-curl -s 'http://localhost:5001/api/groq-price-forecast/RELIANCE.NS' | jq
-```
-
-## 4) Delisted / unavailable ticker tracking (new)
-When yfinance repeatedly fails for a ticker, the app now writes it to:
-- `cache/delisted_tickers.csv`
-
-CSV columns:
-- `ticker`
-- `first_seen`
-- `last_seen`
-- `hit_count`
-- `last_reason`
-- `last_source`
-- `status` (`watchlist`, `delisted_candidate`, `recovered`)
-
-Rules:
-- first/second failure: `watchlist`
-- 3+ failures: `delisted_candidate`
-- if data later appears again: `recovered`
-
-APIs:
-```bash
-curl -s 'http://localhost:5001/api/delisted-tickers?min_hits=1' | jq
-curl -s 'http://localhost:5001/api/delisted-tickers?status=delisted_candidate' | jq
-curl -L 'http://localhost:5001/api/delisted-tickers/export.csv' -o delisted_tickers.csv
-```
-
-Before retraining, review `delisted_candidate` symbols and replace them in `config/tickers.yaml`.
-
-## 5) Model rerun/retraining cadence (avoid running everything at once)
-
-### Daily (market days)
-- Run app + generate fresh predictions.
-- Use `run_daily.sh`.
-
-### Weekly (1x, weekend)
-- Data + feature refresh:
-  - `notebooks/01_data_download.ipynb`
-  - `notebooks/03_feature_engineering.ipynb`
-- Quick diagnostics:
-  - `notebooks/11_model_comparison.ipynb`
-
-### Every 2 weeks
-- Refresh tree/sequence models:
-  - `notebooks/07_xgboost.ipynb`
-  - `notebooks/08_lightgbm.ipynb`
-  - `notebooks/09_lstm.ipynb`
-
-### Monthly
-- Validate robustness and rebalance ensemble:
-  - `notebooks/04_walk_forward_cv.ipynb`
-  - `notebooks/12_ensemble.ipynb`
-  - `notebooks/13_backtest.ipynb`
-
-### Quarterly
-- Heavy refresh and full report:
-  - `notebooks/10_transformer.ipynb`
-  - `notebooks/14_risk_analytics.ipynb`
-  - `notebooks/17_final_report.ipynb`
-
-### Trigger immediate retraining if any of these happen
-- 20-day hit-rate drops below your threshold (example: <52%).
-- Market regime shift (volatility spike/event risk).
-- More than 10% universe changes in `config/tickers.yaml`.
-
-## 6) Why AI price and Strategy price can look close
-- `Strategy predicted price` = model output based on open/current context.
-- `AI predicted price` = Groq narrative forecast with sentiment context.
-- If Groq JSON parse fails, app now shows AI as unavailable instead of silently copying strategy price.
-
-## 7) Tests
-```bash
-cd /Users/anto/Trading_Project/masters_trading_ai
-source .venv/bin/activate
-pytest -q
-```
-
-## 8) Troubleshooting
-
-### Port 5001 already in use
+If port 5001 is busy:
 ```bash
 lsof -iTCP:5001 -sTCP:LISTEN -n -P
 kill $(lsof -tiTCP:5001 -sTCP:LISTEN)
 ```
 
-### Start on another port
+## 3) Model-loading transparency
+Use:
 ```bash
-FLASK_PORT=5002 python webapp/server.py
+curl -s 'http://localhost:5001/api/status' | jq
 ```
 
-### Models still loading
-- Wait for `/api/status` => `models_loaded=true`.
-- UI navbar also shows load progress.
+It returns:
+- `models_loaded`, `models_loading`, `model_load_elapsed_sec`, `model_load_progress`
+- `premarket_config.max_buffer_minutes`
+- `premarket_snapshot` metadata
 
-## 9) Important reality check
-This system can improve decision quality, but it cannot guarantee profit, and it cannot be made “perfect” for 5-10 years without ongoing maintenance. For production-grade use:
-- keep strict position sizing and max drawdown limits,
-- monitor live slippage/transaction costs,
-- run monthly walk-forward validation,
-- treat Groq outputs as explanatory context, not guaranteed price truth.
+## 4) Prediction unit contract (critical)
+- Internal model return unit: **decimal** (`0.02` = +2%).
+- API `predicted_return` unit: **percent** (`2.0` = +2%).
+- Sanitizer guarantees:
+  - `None/NaN` -> `0.0` (decimal)
+  - if `abs(raw) > 2.0`, converts mistaken percent-to-decimal by `/100`
+  - caps to `[-0.5, 0.5]` decimal (±50%)
+
+## 5) Premarket behavior
+Config (`config/settings.yaml`):
+```yaml
+webapp:
+  premarket_max_buffer_minutes: 30
+  premarket_default_tickers: 10
+```
+
+Snapshot is captured once/day and intended to be taken by:
+- `market_open - premarket_max_buffer_minutes`
+
+Endpoint:
+```bash
+curl -s 'http://localhost:5001/api/premarket-outlook' | jq
+```
+
+Response includes per ticker:
+- `ticker`
+- `current_price`
+- `strategy_price_at_open`
+- `ai_predicted_price`
+- `strategy_direction`
+- `ai_direction`
+- `captured_at`
+
+## 6) API contracts
+
+### `/api/top-picks`
+```bash
+curl -s 'http://localhost:5001/api/top-picks?n=50' | jq
+curl -s 'http://localhost:5001/api/top-picks?sectors=large_cap&grouped=true&n=10' | jq
+```
+
+Guarantees:
+- rows with `current_price <= 0` are filtered out
+- `abs(predicted_return) <= 50`
+- `predicted_price` aligns with return contract
+
+### `/api/expected-vs-actual`
+```bash
+curl -s 'http://localhost:5001/api/expected-vs-actual?date=2026-02-14' | jq
+```
+
+Includes:
+- `strategy_price_at_open`
+- `ai_last_prediction`
+- `actual_close`
+- `direction_comparison`
+- `schema_version`
+
+### `/api/training-feedback`
+```bash
+curl -s 'http://localhost:5001/api/training-feedback' | jq
+```
+
+Export schema is retraining-friendly and includes direction comparison fields.
+
+## 7) Dashboard behavior
+- Top Picks supports dropdown: `Top 10 BUY`, `Top 10 SELL`, `Top 10 HOLD`.
+- New table: **Premarket vs Current**.
+- New table: **Current Second Snapshot** for highlighted ticker.
+- `0/null` prices render as `—` (not fake `₹0`).
+
+## 8) Risk analytics behavior
+- `/api/risk-analytics` now uses **only user portfolio tickers**.
+- Non-portfolio requested tickers are ignored and reported in `ignored_tickers`.
+- No fallback to demo/model-pick portfolios.
+
+## 9) Delisted ticker registry
+Unavailable symbols are tracked in:
+- `cache/delisted_tickers.csv`
+
+Use:
+```bash
+curl -s 'http://localhost:5001/api/delisted-tickers?min_hits=1' | jq
+curl -L 'http://localhost:5001/api/delisted-tickers/export.csv' -o delisted_tickers.csv
+```
+
+Before retraining, replace repeated failures in `config/tickers.yaml`.
+
+## 10) Tests, lint, type-check
+```bash
+cd /Users/anto/Trading_Project/masters_trading_ai
+source .venv/bin/activate
+pytest -q
+black --check src webapp tests
+flake8 src webapp tests --max-line-length=120 --extend-ignore=E203,W503
+mypy src/inference/predictor.py webapp/prediction_tracker.py webapp/server.py --ignore-missing-imports --follow-imports=silent
+```
+
+## 11) CI
+GitHub Actions workflow:
+- `.github/workflows/ci.yml`
+
+Runs on `masters_trading_ai/**` changes:
+- install deps
+- `pytest -q`
+- `black --check`
+- `flake8`
+- `mypy`
+
+## 12) Branch workflow (feature -> main)
+From project root (`/Users/anto/Trading_Project`):
+
+```bash
+git checkout -b feature/predictor-productionize
+# make changes
+git add .
+git commit -m "productionize: sanitize predictions, premarket/outlook, expected-vs-actual persistence, tests, cleanup, docs"
+git push -u origin feature/predictor-productionize
+```
+
+Create PR to `main`.
+After approval + green CI, merge PR.
+
+## 13) Architecture (data flow)
+```mermaid
+flowchart LR
+    YF[yfinance Live + Daily] --> FP[FeaturePipeline]
+    FP --> M1[XGBoost]
+    FP --> M2[LightGBM]
+    FP --> M3[LSTM]
+    FP --> M4[Transformer]
+    FP --> M5[ARIMA/GARCH]
+    M1 --> ENS[Ensemble]
+    M2 --> ENS
+    M3 --> ENS
+    M4 --> ENS
+    M5 --> ENS
+    ENS --> PRED[Predictor + Sanitizer]
+    PRED --> API[Flask API]
+    API --> UI[Dashboard UI]
+    PRED --> TRACK[PredictionTracker]
+    TRACK --> FB[/api/training-feedback]
+```
+
+## 14) Retraining cadence
+- Daily: run app + monitor tracking.
+- Weekly: data/feature refresh.
+- Bi-weekly: retrain sequence/tree models.
+- Monthly: walk-forward + ensemble + backtest review.
+- Quarterly: full pipeline refresh.
+
+See `docs/DAILY_OPERATIONS.md` for detailed runbook.
+
+## 15) Trading disclaimer
+This system supports decision quality, not guaranteed profit. Use risk limits, monitor regime shifts, and keep ongoing retraining/backtesting in loop.

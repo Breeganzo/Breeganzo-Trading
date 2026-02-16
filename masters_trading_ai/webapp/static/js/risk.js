@@ -35,7 +35,7 @@ async function loadRiskAnalytics() {
         renderHoldings(data.portfolio_tickers, data.portfolio_holdings || []);
 
     } catch (e) {
-        loading.innerHTML = `<p class="error-text">⚠️ ${e.message}</p><p class="muted-text">Ensure models are loaded and daily analysis has run.</p>`;
+        loading.innerHTML = `<p class="error-text">⚠️ ${e.message}</p><p class="muted-text">Add valid portfolio holdings to run risk analytics.</p>`;
     }
 }
 

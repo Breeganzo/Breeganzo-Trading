@@ -899,6 +899,73 @@ a:hover { text-decoration: underline; }
 .pick-detail .label { color: var(--text-muted); }
 .pick-detail .value { font-weight: 600; }
 
+.premarket-panels {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.premarket-panel {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+}
+
+.premarket-panel.compact {
+    min-width: 0;
+}
+
+.premarket-panel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.premarket-panel-head h3 {
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.premarket-table-wrap {
+    overflow-x: auto;
+}
+
+.premarket-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.premarket-table th {
+    text-align: left;
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 11px;
+    padding: 8px 6px;
+    border-bottom: 1px solid var(--border);
+}
+
+.premarket-table td {
+    padding: 8px 6px;
+    border-bottom: 1px solid var(--border);
+}
+
+.premarket-row {
+    cursor: pointer;
+}
+
+.premarket-row:hover {
+    background: var(--bg-hover);
+}
+
+.premarket-row.selected {
+    background: rgba(91, 141, 239, 0.15);
+}
+
 /* ── Expected vs Actual ─────────────────────────── */
 .date-selector {
     margin-bottom: 20px;
@@ -1905,6 +1972,7 @@ a:hover { text-decoration: underline; }
     .price-tracker-arrow { transform: rotate(90deg); }
     .top10-cards { grid-template-columns: 1fr; }
     .top10-prices { grid-template-columns: 1fr; }
+    .premarket-panels { grid-template-columns: 1fr; }
     .feature-cards { grid-template-columns: 1fr; }
     .price-tracker-section, .feature-importance-section, .news-section { margin: 16px; padding: 16px; }
 }
