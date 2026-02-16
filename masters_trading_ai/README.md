@@ -8,6 +8,9 @@ Production-focused NSE trading dashboard with:
 - portfolio-only risk analytics,
 - Groq-assisted explainability.
 
+Project explainer for presentations and branch/CI flow:
+- `docs/PROJECT_WORKFLOW_GUIDE.md`
+
 ## 1) Setup
 ```bash
 cd /Users/anto/Trading_Project/masters_trading_ai

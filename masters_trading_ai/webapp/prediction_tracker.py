@@ -143,7 +143,11 @@ class PredictionTracker:
         )
         ai_source = str(prediction_data.get("ai_source", "none") or "none")
         strategy_vs_ai_direction = prediction_data.get("strategy_vs_ai_direction")
-        if strategy_vs_ai_direction is None and ai_last_prediction > 0 and current_price > 0:
+        if (
+            strategy_vs_ai_direction is None
+            and ai_last_prediction > 0
+            and current_price > 0
+        ):
             strategy_vs_ai_direction = strategy_direction == ai_direction
         if strategy_vs_ai_direction not in (True, False):
             strategy_vs_ai_direction = None
