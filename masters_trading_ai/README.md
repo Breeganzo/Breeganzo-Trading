@@ -1,217 +1,105 @@
-# 🚀 AI Trading System for NSE India
+# Masters Trading AI
 
-AI-powered trading predictions for **124 Indian stocks** across 5 sectors using 6 machine learning models.
+AI-powered NSE dashboard with live prices, multi-model inference, ensemble predictions, top picks (BUY/SELL/HOLD), stock-level analysis, and risk analytics.
 
-**What it does:** Predicts tomorrow's stock movements and shows you the top buy/sell opportunities.
+## What is included
+- 6-model stack: `ARIMA`, `GARCH`, `XGBoost`, `LightGBM`, `LSTM`, `Transformer`
+- Ensemble prediction with learned weights
+- Prediction sanitizer and guardrails for runaway returns
+- Top Picks split by actual signal (`BUY`, `SELL`, `HOLD`)
+- Stock page with:
+  - Open price
+  - Strategy predicted price
+  - Current price
+  - Groq AI predicted price
+- Portfolio tracking (add ticker + quantity + entry price)
+- Risk analytics with Groq hover explainers
 
----
-
-## ⚡ Quick Start (First Time Setup)
-
-### Step 1: Install
+## 1) Setup (first time)
 ```bash
 cd /Users/anto/Trading_Project/masters_trading_ai
-
-# Create virtual environment and install packages
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Step 2: Get Your FREE API Key
-1. Go to https://console.groq.com/keys
-2. Sign up (free)
-3. Create API key
-4. Create `.env` file in project folder:
+Create `.env` from example:
 ```bash
-echo "GROQ_API_KEY=your_key_here" > .env
+cp .env.example .env
 ```
 
-### Step 3: Make Script Executable (One Time Only)
+Minimum recommended in `.env`:
 ```bash
-chmod +x run_daily.sh
+GROQ_API_KEY=your_groq_key
+FLASK_SECRET_KEY=dev-secret-change-me
 ```
 
-✅ **Setup Complete!**
+## 2) Run the app
 
----
+### Option A: Start Flask server directly (recommended for development)
+```bash
+cd /Users/anto/Trading_Project/masters_trading_ai
+source .venv/bin/activate
+python webapp/server.py
+```
 
-## 📅 How to Run Daily
+Open:
+- Dashboard: `http://localhost:5001`
+- Risk page: `http://localhost:5001/risk`
 
-### **Every Morning** (Run This)
+### Option B: Use daily helper scripts
 ```bash
 ./run_daily.sh
 ```
-
-**OR use the simple starter:**
+or
 ```bash
 ./start_daily.sh
 ```
 
-Then open your browser to: **http://localhost:5001**
-
-**What this does:**
-- ✅ Clears old predictions
-- ✅ Generates fresh predictions for today
-- ✅ Starts the web dashboard
-- ✅ Shows you top buy/sell picks
-
-**Press `Ctrl+C` to stop the server**
-
----
-
-## 🔄 When to Retrain Models
-
-### **Weekly** (Every Sunday)
+## 3) Verify it is working
+In another terminal:
 ```bash
-./run_daily.sh --retrain
+curl -s 'http://localhost:5001/api/status' | jq
+curl -s 'http://localhost:5001/api/top-picks?n=20&grouped=true' | jq
+curl -s 'http://localhost:5001/api/daily-analysis' | jq
 ```
 
-**What this does:**
-- Updates all 6 AI models with latest data
-- Takes 10-30 minutes
-- Improves prediction accuracy
+You should see:
+- `models_loaded: true`
+- model load steps populated
+- grouped top picks with `top_buy`, `top_sell`, `top_hold`
 
-### **Never Run:**
-❌ `python webapp/server.py` ← This is OLD (doesn't generate fresh predictions)
-
-### **Always Run:**
-✅ `./run_daily.sh` ← This is THE RIGHT WAY (generates fresh predictions)
-
----
-
-## 📊 What You Get
-
-| Feature | What It Shows |
-|---------|---------------|
-| **Dashboard** | All 124 stocks organized by sector |
-| **Top Picks** | Best buy/sell opportunities ranked by AI |
-| **Stock Detail** | Click any stock to see chart + prediction |
-| **About Stock** | AI explains company + news sentiment |
-| **Indicators** | RSI, MACD, ADX with buy/sell thresholds |
-| **Accuracy** | How well predictions performed |
-| **Live Prices** | Auto-updates every 5 seconds |
-
----
-
-## 🎯 Understanding the Models
-
-**6 AI Models Working Together:**
-1. **ARIMA** - Statistical trend analyzer
-2. **GARCH** - Volatility predictor  
-3. **XGBoost** - Pattern recognition
-4. **LightGBM** - Fast pattern detection
-5. **LSTM** - Deep learning neural network
-6. **Transformer** - Advanced attention mechanism
-
-**Final Prediction = Weighted average of all 6 models**
-
----
-
-## 📈 Trading Rules Built-In
-
-| Rule | Value |
-|------|-------|
-| Capital | ₹50,000 |
-| Stop Loss | -3% (auto-exit if stock drops 3%) |
-| Take Profit | +10% (auto-sell if stock rises 10%) |
-| Max Positions | 8 stocks at once |
-| Max Per Stock | 12% of capital (₹6,000) |
-| Max Sector | 35% of capital |
-
----
-
-## 🗂️ Key Files
-
-```
-masters_trading_ai/
-├── run_daily.sh          ← RUN THIS EVERY DAY
-├── start_daily.sh        ← SIMPLE DAILY STARTER
-├── DAILY_ROUTINE.txt     ← STEP-BY-STEP INSTRUCTIONS
-├── .env                  ← Your API key goes here
-├── webapp/
-│   └── server.py         ← Flask web server
-├── models/               ← Trained AI models (6 files)
-├── config/
-│   └── tickers.yaml      ← List of 124 stocks
-└── cache/
-    └── predictions.json  ← Today's predictions
-```
-
----
-
-## 🆘 Troubleshooting
-
-### Server Won't Start
+## 4) Run tests
 ```bash
-# Kill existing server
-pkill -f "python webapp/server.py"
-
-# Try again
-./run_daily.sh
+cd /Users/anto/Trading_Project/masters_trading_ai
+source .venv/bin/activate
+pytest -q
 ```
 
-### Missing API Key Error
+## 5) Troubleshooting
+
+### Port already in use
 ```bash
-# Make sure .env file exists
-cat .env
-
-# Should show: GROQ_API_KEY=gsk_...
-# If empty, get key from https://console.groq.com/keys
+lsof -iTCP:5001 -sTCP:LISTEN -n -P
+pkill -f "webapp/server.py"
 ```
 
-### Models Not Found
-```bash
-# Check if models exist
-ls -lh models/
+### Models still loading
+- Wait for `/api/status` to show `models_loaded=true`
+- The navbar status in UI shows per-model load progress
 
-# Should see 7 files (.joblib and .pt files)
-# If missing, run notebooks 05-12 to train models
-```
+### yfinance rate-limit issues
+- Retry after a short delay; some endpoints depend on live market data
+- You may temporarily see reduced ticker coverage until retry succeeds
 
----
+### Groq unavailable
+- Check `GROQ_API_KEY` in `.env`
+- App still runs without Groq, but AI explanation/forecast endpoints degrade gracefully
 
-## 📚 Advanced: Model Retraining Schedule
-
-For best results, retrain models on this schedule:
-
-| Model | How Often | Command |
-|-------|-----------|---------|
-| GARCH | Every 7 days | Run notebook `06_garch.ipynb` |
-| ARIMA | Every 14 days | Run notebook `05_arima.ipynb` |
-| LSTM | Every 21 days | Run notebook `09_lstm.ipynb` |
-| Transformer | Every 21 days | Run notebook `10_transformer.ipynb` |
-| XGBoost | Every 30 days | Run notebook `07_xgboost.ipynb` |
-| LightGBM | Every 30 days | Run notebook `08_lightgbm.ipynb` |
-| Ensemble | After any retrain | Run notebook `12_ensemble.ipynb` |
-
-**OR** just run `./run_daily.sh --retrain` once a week for automated retraining.
-
----
-
-## 🎓 Want to Understand the Code?
-
-**Read these in order:**
-1. [DAILY_OPERATIONS.md](docs/DAILY_OPERATIONS.md) - Daily usage guide
-2. [SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md) - How everything works
-3. [INTERVIEW_GUIDE.md](INTERVIEW_GUIDE.md) - Project deep-dive for interviews
-
-**Run Jupyter Notebooks (in order):**
-```bash
-jupyter notebook
-# Open notebooks 00-17 in sequence
-```
-
----
-
-## ⚙️ Tech Stack
-
-**Languages:** Python 3.14  
-**ML:** XGBoost, LightGBM, PyTorch, scikit-learn, statsmodels  
-**Web:** Flask, JavaScript, HTML/CSS  
-**Data:** yfinance, pandas, numpy  
-**AI:** Groq API (Llama 3.3 70B)
-
----
-
-*For detailed technical documentation, see [SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md)*
+## Key paths
+- Server: `webapp/server.py`
+- Inference: `src/inference/predictor.py`
+- Dashboard JS: `webapp/static/js/app.js`
+- Stock page JS: `webapp/static/js/stock.js`
+- Risk page JS: `webapp/static/js/risk.js`
+- Tests: `tests/`
