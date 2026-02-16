@@ -1352,11 +1352,35 @@ async function loadPriceTracker() {
         if (stock.error) return;
 
         const openPrice = Number(stock.open_price || 0);
-        const predPrice = Number(stock.strategy_predicted_price || stock.predicted_price || 0);
+        const nextDayMode = stock.prediction_mode === 'next_day_after_close';
+        const predPrice = Number(
+            (nextDayMode
+                ? stock.next_day_strategy_predicted_price
+                : stock.strategy_predicted_price)
+            || stock.strategy_predicted_price
+            || stock.predicted_price
+            || 0
+        );
         const currPrice = Number(stock.current_price || 0);
-        const aiPrice = Number(stock.ai_predicted_price || 0);
-        const currentStrategyPrice = Number(stock.current_strategy_predicted_price || predPrice || 0);
-        const currentAiPrice = Number(stock.current_ai_predicted_price || aiPrice || 0);
+        const aiPrice = Number(
+            (nextDayMode
+                ? stock.next_day_ai_predicted_price
+                : stock.ai_predicted_price)
+            || stock.ai_predicted_price
+            || 0
+        );
+        const currentStrategyPrice = Number(
+            stock.current_strategy_predicted_price
+            || stock.next_day_strategy_predicted_price
+            || predPrice
+            || 0
+        );
+        const currentAiPrice = Number(
+            stock.current_ai_predicted_price
+            || stock.next_day_ai_predicted_price
+            || aiPrice
+            || 0
+        );
         const aiAvailable = aiPrice > 0;
         const currentAiAvailable = currentAiPrice > 0;
 
@@ -1364,6 +1388,14 @@ async function loadPriceTracker() {
         document.getElementById('tracker-open').textContent = `₹${formatN(openPrice)}`;
         document.getElementById('tracker-predicted').textContent = `₹${formatN(predPrice)}`;
         document.getElementById('tracker-current').textContent = `₹${formatN(currPrice)}`;
+        const strategyLabelEl = document.getElementById('tracker-strategy-label');
+        if (strategyLabelEl) {
+            strategyLabelEl.textContent = nextDayMode ? `Strategy Prediction (Next Day ${stock.predicted_for_date || ''})` : 'Strategy Predicted';
+        }
+        const aiLabelEl = document.getElementById('tracker-ai-label');
+        if (aiLabelEl) {
+            aiLabelEl.textContent = nextDayMode ? `AI Prediction (Next Day ${stock.predicted_for_date || ''})` : 'AI Predicted (Groq)';
+        }
         const currentLabelEl = document.getElementById('tracker-current-label');
         if (currentLabelEl) currentLabelEl.textContent = stock.display_price_label || 'Current Price';
         const aiEl = document.getElementById('tracker-ai');
@@ -1376,11 +1408,15 @@ async function loadPriceTracker() {
         }
         const strategyOpenTimeEl = document.getElementById('tracker-strategy-open-time');
         if (strategyOpenTimeEl) {
-            strategyOpenTimeEl.textContent = `Predicted: ${formatOpenWindowTime(stock.strategy_predicted_at_open, istDateStrNow(), 20)}`;
+            strategyOpenTimeEl.textContent = nextDayMode
+                ? `Predicted: ${formatTimestamp(stock.next_day_predicted_at || stock.current_strategy_predicted_at)}`
+                : `Predicted: ${formatOpenWindowTime(stock.strategy_predicted_at_open, istDateStrNow(), 20)}`;
         }
         const aiOpenTimeEl = document.getElementById('tracker-ai-open-time');
         if (aiOpenTimeEl) {
-            aiOpenTimeEl.textContent = `Predicted: ${formatOpenWindowTime(stock.ai_predicted_at_open, istDateStrNow(), 22)}`;
+            aiOpenTimeEl.textContent = nextDayMode
+                ? `Predicted: ${formatTimestamp(stock.next_day_predicted_at || stock.current_ai_predicted_at)}`
+                : `Predicted: ${formatOpenWindowTime(stock.ai_predicted_at_open, istDateStrNow(), 22)}`;
         }
         const currentTimeEl = document.getElementById('tracker-current-time');
         if (currentTimeEl) {
@@ -1405,14 +1441,20 @@ async function loadPriceTracker() {
         }
 
         // Percentage changes from open
-        const predPct = Number(stock.open_to_predicted_pct || 0);
+        const predPct = Number(
+            (nextDayMode ? stock.close_to_strategy_pct : stock.open_to_predicted_pct) || 0
+        );
         const currPct = Number(stock.open_to_current_pct || 0);
         const aiPct = aiAvailable
-            ? Number(stock.open_to_ai_predicted_pct ?? ((aiPrice - openPrice) / (openPrice || 1) * 100))
+            ? Number(
+                nextDayMode
+                    ? (stock.close_to_ai_pct ?? ((aiPrice - currPrice) / (currPrice || 1) * 100))
+                    : (stock.open_to_ai_predicted_pct ?? ((aiPrice - openPrice) / (openPrice || 1) * 100))
+            )
             : null;
 
         const predEl = document.getElementById('tracker-predicted-pct');
-        predEl.textContent = `${predPct >= 0 ? '+' : ''}${predPct.toFixed(3)}% from open`;
+        predEl.textContent = `${predPct >= 0 ? '+' : ''}${predPct.toFixed(3)}% ${nextDayMode ? 'vs close' : 'from open'}`;
         predEl.className = `tracker-change ${predPct >= 0 ? 'up-color' : 'down-color'}`;
 
         const currEl = document.getElementById('tracker-current-pct');
@@ -1422,7 +1464,7 @@ async function loadPriceTracker() {
         const aiPctEl = document.getElementById('tracker-ai-pct');
         if (aiPctEl) {
             if (aiAvailable && Number.isFinite(aiPct)) {
-                aiPctEl.textContent = `${aiPct >= 0 ? '+' : ''}${Number(aiPct).toFixed(3)}% from open`;
+                aiPctEl.textContent = `${aiPct >= 0 ? '+' : ''}${Number(aiPct).toFixed(3)}% ${nextDayMode ? 'vs close' : 'from open'}`;
                 aiPctEl.className = `tracker-change ${aiPct >= 0 ? 'up-color' : 'down-color'}`;
             } else {
                 aiPctEl.textContent = 'Awaiting Groq forecast';

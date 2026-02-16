@@ -170,6 +170,20 @@ PREMARKET_MAX_BUFFER_MINUTES = int(
 PREMARKET_MAX_BUFFER_MINUTES = int(np.clip(PREMARKET_MAX_BUFFER_MINUTES, 0, 180))
 PREMARKET_DEFAULT_TICKERS = int(_webapp_settings.get("premarket_default_tickers", 10))
 PREMARKET_DEFAULT_TICKERS = max(1, PREMARKET_DEFAULT_TICKERS)
+NEXT_DAY_PREDICTION_HOUR = int(
+    os.environ.get(
+        "NEXT_DAY_PREDICTION_HOUR",
+        _webapp_settings.get("next_day_prediction_hour", 15),
+    )
+)
+NEXT_DAY_PREDICTION_MINUTE = int(
+    os.environ.get(
+        "NEXT_DAY_PREDICTION_MINUTE",
+        _webapp_settings.get("next_day_prediction_minute", 45),
+    )
+)
+NEXT_DAY_PREDICTION_HOUR = int(np.clip(NEXT_DAY_PREDICTION_HOUR, 0, 23))
+NEXT_DAY_PREDICTION_MINUTE = int(np.clip(NEXT_DAY_PREDICTION_MINUTE, 0, 59))
 
 # Thread-safe lock for file I/O
 _log_lock = threading.Lock()
@@ -1706,6 +1720,26 @@ def _open_window_bounds(trading_day: date) -> tuple[datetime, datetime]:
     return start, end
 
 
+def _next_day_prediction_switch_dt(now: datetime) -> datetime:
+    return now.replace(
+        hour=NEXT_DAY_PREDICTION_HOUR,
+        minute=NEXT_DAY_PREDICTION_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+
+
+def _is_next_day_prediction_window(now: datetime) -> bool:
+    return now >= _next_day_prediction_switch_dt(now)
+
+
+def _next_trading_day(d: date) -> date:
+    out = d + timedelta(days=1)
+    while out.weekday() >= 5:
+        out += timedelta(days=1)
+    return out
+
+
 def _direction_from_prices(base_price: float, predicted_price: float) -> str:
     if base_price <= 0 or predicted_price <= 0:
         return "FLAT"
@@ -2005,6 +2039,21 @@ def _normalize_predicted_return_pct(value) -> float:
     return float(np.clip(ret_pct, -50.0, 50.0))
 
 
+def _derive_ai_price_from_signal(
+    strategy_price: float,
+    signal: str,
+    confidence: float,
+) -> float:
+    if strategy_price <= 0:
+        return 0.0
+    ai_adjustment_pct = 0.0
+    if signal in ("BUY", "STRONG_BUY"):
+        ai_adjustment_pct = min(confidence / 200.0, 0.5)
+    elif signal in ("SELL", "STRONG_SELL"):
+        ai_adjustment_pct = -min(confidence / 200.0, 0.5)
+    return round(strategy_price * (1 + ai_adjustment_pct / 100.0), 2)
+
+
 def _get_prediction_for_ticker(
     ticker: str,
     fallback: dict | None = None,
@@ -2058,9 +2107,21 @@ def _build_daily_analysis() -> dict:
     """Build the full daily analysis payload (called by background thread)."""
     _capture_opening_prices()
     current_prices = _get_cached_prices()
+    now_ist = datetime.now(IST)
+    market = get_market_status()
+    market_status = market.get("status", "")
+    next_day_mode = _is_next_day_prediction_window(now_ist) or market_status == "weekend"
+    prediction_mode = "next_day_after_close" if next_day_mode else "market_open_window"
+    predicted_for_date = (
+        _next_trading_day(now_ist.date()).strftime("%Y-%m-%d")
+        if next_day_mode
+        else now_ist.strftime("%Y-%m-%d")
+    )
+    prediction_generated_at = now_ist.isoformat()
+    price_label = "Close Price" if market_status in ("after_hours", "weekend") else "Current Price"
 
     # Get all predictions (from cache)
-    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    today_str = now_ist.strftime("%Y-%m-%d")
     log_file = PREDICTION_LOG_DIR / f"{today_str}.json"
     predictions = {}
     if log_file.exists():
@@ -2083,6 +2144,8 @@ def _build_daily_analysis() -> dict:
         current_price = curr.get("price", 0)
         open_price = opening.get("open", curr.get("open", 0))
         prev_close = opening.get("prev_close", curr.get("prev_close", 0))
+        if open_price <= 0:
+            open_price = current_price
         pred = _get_prediction_for_ticker(
             ticker,
             predictions.get(ticker, {}),
@@ -2096,26 +2159,66 @@ def _build_daily_analysis() -> dict:
         )
         signal = pred.get("signal", "HOLD")
         confidence = float(pred.get("confidence", 50) or 50)
-
-        baseline_price = open_price if open_price > 0 else current_price
-        strategy_predicted_price = (
-            round(
-                baseline_price * (1 + predicted_return / 100.0),
-                2,
+        premarket_row = _get_premarket_row_for_ticker(ticker, today_str)
+        strategy_price_at_open = float(
+            premarket_row.get(
+                "strategy_price_at_open",
+                pred.get("strategy_price_at_open", 0),
             )
-            if baseline_price > 0
-            else 0.0
+            or 0
+        )
+        if strategy_price_at_open <= 0 and open_price > 0:
+            strategy_price_at_open = round(open_price * (1 + predicted_return / 100.0), 2)
+        if strategy_price_at_open <= 0:
+            strategy_price_at_open = float(current_price or 0)
+
+        ai_price_at_open = float(
+            premarket_row.get("ai_predicted_price")
+            or pred.get("ai_last_prediction")
+            or 0
+        )
+        if ai_price_at_open <= 0:
+            ai_price_at_open = _derive_ai_price_from_signal(
+                strategy_price_at_open, signal, confidence
+            )
+
+        strategy_predicted_at_open = _normalize_open_window_timestamp(
+            premarket_row.get("strategy_predicted_at_open")
+            or premarket_row.get("captured_at")
+            or pred.get("strategy_predicted_at_open")
+            or pred.get("timestamp"),
+            date_hint=today_str,
+            default_offset_minutes=5,
+        )
+        ai_predicted_at_open = _normalize_open_window_timestamp(
+            premarket_row.get("ai_predicted_at_open")
+            or premarket_row.get("captured_at")
+            or pred.get("ai_predicted_at_open")
+            or pred.get("timestamp"),
+            date_hint=today_str,
+            default_offset_minutes=7,
         )
 
-        # AI price starts from strategy baseline; a later news-aware layer can adjust this.
-        ai_adjustment_pct = 0.0
-        if signal in ("BUY", "STRONG_BUY"):
-            ai_adjustment_pct = min(confidence / 200.0, 0.5)
-        elif signal in ("SELL", "STRONG_SELL"):
-            ai_adjustment_pct = -min(confidence / 200.0, 0.5)
-        ai_predicted_price = round(
-            strategy_predicted_price * (1 + ai_adjustment_pct / 100.0), 2
-        )
+        if next_day_mode:
+            reference_price = float(current_price or open_price or 0)
+            strategy_predicted_price = (
+                round(reference_price * (1 + predicted_return / 100.0), 2)
+                if reference_price > 0
+                else strategy_price_at_open
+            )
+            ai_predicted_price = _derive_ai_price_from_signal(
+                strategy_predicted_price, signal, confidence
+            )
+            strategy_predicted_at = prediction_generated_at
+            ai_predicted_at = prediction_generated_at
+            prediction_context = "next_day"
+        else:
+            reference_price = float(open_price or current_price or 0)
+            strategy_predicted_price = float(strategy_price_at_open or 0)
+            ai_predicted_price = float(ai_price_at_open or 0)
+            strategy_predicted_at = strategy_predicted_at_open
+            ai_predicted_at = ai_predicted_at_open
+            prediction_context = "market_open"
 
         if current_price <= 0 or open_price <= 0:
             continue
@@ -2134,6 +2237,26 @@ def _build_daily_analysis() -> dict:
         open_to_ai_predicted_pct = (
             ((ai_predicted_price - open_price) / open_price * 100)
             if open_price > 0 and ai_predicted_price > 0
+            else 0
+        )
+        reference_to_strategy_pct = (
+            ((strategy_predicted_price - reference_price) / reference_price * 100)
+            if reference_price > 0 and strategy_predicted_price > 0
+            else 0
+        )
+        reference_to_ai_pct = (
+            ((ai_predicted_price - reference_price) / reference_price * 100)
+            if reference_price > 0 and ai_predicted_price > 0
+            else 0
+        )
+        close_to_strategy_pct = (
+            ((strategy_predicted_price - current_price) / current_price * 100)
+            if current_price > 0 and strategy_predicted_price > 0
+            else 0
+        )
+        close_to_ai_pct = (
+            ((ai_predicted_price - current_price) / current_price * 100)
+            if current_price > 0 and ai_predicted_price > 0
             else 0
         )
         prev_to_current_pct = (
@@ -2162,11 +2285,26 @@ def _build_daily_analysis() -> dict:
                 "predicted_price": round(strategy_predicted_price, 2),
                 "strategy_predicted_price": round(strategy_predicted_price, 2),
                 "ai_predicted_price": round(ai_predicted_price, 2),
+                "strategy_price_at_open": round(strategy_price_at_open, 2),
+                "ai_price_at_open": round(ai_price_at_open, 2),
                 "current_price": round(current_price, 2),
                 "prev_close": round(prev_close, 2),
+                "display_price_label": price_label,
                 "open_to_current_pct": round(open_to_current_pct, 3),
                 "open_to_predicted_pct": round(open_to_predicted_pct, 3),
                 "open_to_ai_predicted_pct": round(open_to_ai_predicted_pct, 3),
+                "reference_price": round(reference_price, 2),
+                "reference_to_strategy_pct": round(reference_to_strategy_pct, 3),
+                "reference_to_ai_pct": round(reference_to_ai_pct, 3),
+                "close_to_strategy_pct": round(close_to_strategy_pct, 3),
+                "close_to_ai_pct": round(close_to_ai_pct, 3),
+                "prediction_mode": prediction_mode,
+                "prediction_context": prediction_context,
+                "predicted_for_date": predicted_for_date,
+                "strategy_predicted_at": strategy_predicted_at,
+                "ai_predicted_at": ai_predicted_at,
+                "strategy_predicted_at_open": strategy_predicted_at_open,
+                "ai_predicted_at_open": ai_predicted_at_open,
                 "prev_to_current_pct": round(prev_to_current_pct, 3),
                 "predicted_return": round(predicted_return, 3),
                 "signal": signal,
@@ -2191,6 +2329,10 @@ def _build_daily_analysis() -> dict:
 
     return {
         "date": today_str,
+        "market_status": market_status,
+        "prediction_mode": prediction_mode,
+        "predicted_for_date": predicted_for_date,
+        "prediction_generated_at": prediction_generated_at,
         "total_stocks": len(stocks),
         "prediction_coverage": {
             "with_predictions": prediction_count,
@@ -2327,6 +2469,14 @@ def api_price_tracker(ticker: str):
     confidence = pred.get("confidence", 0)
     market = get_market_status()
     market_status = market.get("status", "")
+    now_ist = datetime.now(IST)
+    next_day_mode = _is_next_day_prediction_window(now_ist) or market_status == "weekend"
+    prediction_mode = "next_day_after_close" if next_day_mode else "market_open_window"
+    predicted_for_date = (
+        _next_trading_day(now_ist.date()).strftime("%Y-%m-%d")
+        if next_day_mode
+        else now_ist.strftime("%Y-%m-%d")
+    )
     is_market_closed = market_status in ("after_hours", "weekend")
     display_price_label = "Close Price" if is_market_closed else "Current Price"
     strategy_predicted_at_open = _normalize_open_window_timestamp(
@@ -2364,6 +2514,27 @@ def api_price_tracker(ticker: str):
     if ai_open_price <= 0:
         ai_open_price = ai_predicted_price if ai_predicted_price > 0 else 0.0
 
+    if next_day_mode:
+        reference_price = current_price if current_price > 0 else open_price
+        next_day_strategy_price = (
+            round(reference_price * (1 + predicted_return / 100.0), 2)
+            if reference_price > 0
+            else strategy_price_at_open
+        )
+        next_day_ai_price = _derive_ai_price_from_signal(
+            next_day_strategy_price, signal, float(confidence or 0)
+        )
+        next_day_predicted_at = now_ist.isoformat()
+        current_strategy_predicted_at = next_day_predicted_at
+        current_ai_predicted_at = (
+            cached_forecast.get("generated_at_iso") or next_day_predicted_at
+        )
+    else:
+        reference_price = open_price
+        next_day_strategy_price = strategy_price_at_open
+        next_day_ai_price = ai_open_price
+        next_day_predicted_at = strategy_predicted_at_open
+
     open_to_current_pct = (
         ((current_price - open_price) / open_price * 100) if open_price > 0 else 0
     )
@@ -2376,6 +2547,16 @@ def api_price_tracker(ticker: str):
     open_to_ai_predicted_pct = (
         ((ai_open_price - open_price) / open_price * 100)
         if open_price > 0 and ai_open_price > 0
+        else None
+    )
+    close_to_strategy_pct = (
+        ((next_day_strategy_price - current_price) / current_price * 100)
+        if current_price > 0 and next_day_strategy_price > 0
+        else None
+    )
+    close_to_ai_pct = (
+        ((next_day_ai_price - current_price) / current_price * 100)
+        if current_price > 0 and next_day_ai_price > 0
         else None
     )
 
@@ -2392,14 +2573,25 @@ def api_price_tracker(ticker: str):
             "predicted_price": round(strategy_price_at_open, 2),
             "strategy_predicted_price": round(strategy_price_at_open, 2),
             "ai_predicted_price": round(ai_open_price, 2) if ai_open_price > 0 else None,
-            "current_strategy_predicted_price": round(strategy_predicted_price, 2),
+            "current_strategy_predicted_price": round(next_day_strategy_price, 2),
             "current_ai_predicted_price": (
-                round(ai_predicted_price, 2) if ai_available else None
+                round(next_day_ai_price, 2) if next_day_ai_price > 0 else None
             ),
             "current_price": round(current_price, 2),
             "close_price": round(current_price, 2) if is_market_closed else None,
             "display_price_label": display_price_label,
             "market_status": market_status,
+            "prediction_mode": prediction_mode,
+            "predicted_for_date": predicted_for_date,
+            "prediction_reference_price": round(reference_price, 2) if reference_price > 0 else None,
+            "next_day_strategy_predicted_price": (
+                round(next_day_strategy_price, 2) if next_day_strategy_price > 0 else None
+            ),
+            "next_day_ai_predicted_price": (
+                round(next_day_ai_price, 2) if next_day_ai_price > 0 else None
+            ),
+            "next_day_predicted_at": next_day_predicted_at,
+            "next_day_predicted_at_display": _format_ist_timestamp(next_day_predicted_at),
             "strategy_predicted_at_open": strategy_predicted_at_open,
             "strategy_predicted_at_open_display": _format_ist_timestamp(
                 strategy_predicted_at_open
@@ -2426,10 +2618,18 @@ def api_price_tracker(ticker: str):
                 if open_to_ai_predicted_pct is not None
                 else None
             ),
+            "close_to_strategy_pct": (
+                round(close_to_strategy_pct, 3)
+                if close_to_strategy_pct is not None
+                else None
+            ),
+            "close_to_ai_pct": (
+                round(close_to_ai_pct, 3) if close_to_ai_pct is not None else None
+            ),
             "predicted_return": round(predicted_return, 3),
             "signal": signal,
             "confidence": round(confidence, 1),
-            "ai_forecast_available": ai_available or ai_open_price > 0,
+            "ai_forecast_available": ai_available or ai_open_price > 0 or next_day_ai_price > 0,
             "ai_forecast_source": cached_forecast.get("ai_source", "none"),
             "volume": curr.get("volume", 0),
             "high": curr.get("high", 0),

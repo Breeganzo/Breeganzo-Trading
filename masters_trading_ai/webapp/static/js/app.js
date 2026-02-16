@@ -338,10 +338,19 @@ function renderStockGrid(sector) {
 
         // Get daily analysis data for this stock
         const analysis = dailyAnalysisData?.all_stocks?.find(s => s.ticker === ticker);
-        const predPrice = analysis?.predicted_price || null;
-        const predReturn = analysis?.predicted_return || null;
+        const strategyPrice = Number(analysis?.strategy_predicted_price || analysis?.predicted_price || 0);
+        const aiPrice = Number(analysis?.ai_predicted_price || 0);
+        const predReturn = Number(analysis?.predicted_return || 0);
         const signal = analysis?.signal || '';
         const confidence = analysis?.confidence || 0;
+        const predictionMode = analysis?.prediction_mode || 'market_open_window';
+        const nextDayMode = predictionMode === 'next_day_after_close';
+        const predictedForDate = analysis?.predicted_for_date || dailyAnalysisData?.predicted_for_date || '';
+        const strategyPct = nextDayMode ? analysis?.close_to_strategy_pct : analysis?.open_to_predicted_pct;
+        const aiPct = nextDayMode ? analysis?.close_to_ai_pct : analysis?.open_to_ai_predicted_pct;
+        const strategyTime = analysis?.strategy_predicted_at || analysis?.strategy_predicted_at_open;
+        const aiTime = analysis?.ai_predicted_at || analysis?.ai_predicted_at_open;
+        const liveLabel = analysis?.display_price_label || 'Current Price';
 
         // Signal badge
         let signalBadge = '';
@@ -352,13 +361,30 @@ function renderStockGrid(sector) {
 
         // Prediction row
         let predRow = '';
-        if (predPrice && predReturn !== null) {
-            const predSign = predReturn >= 0 ? '+' : '';
-            const predColor = predReturn >= 0 ? 'up-color' : 'down-color';
+        if (strategyPrice > 0 || aiPrice > 0) {
+            const strategyColor = predReturn >= 0 ? 'up-color' : 'down-color';
+            const aiColor = Number(aiPct || predReturn) >= 0 ? 'up-color' : 'down-color';
+            const strategyLabel = nextDayMode
+                ? `Strategy (Next Day ${predictedForDate})`
+                : 'Strategy Prediction';
+            const aiLabel = nextDayMode
+                ? `AI Target (Next Day ${predictedForDate})`
+                : 'AI Target';
+            const modeHint = nextDayMode ? 'computed after 3:45 PM IST' : 'captured in 9:15–9:30 AM IST window';
             predRow = `
                 <div class="card-prediction">
-                    <span class="card-pred-label">AI Target</span>
-                    <span class="card-pred-value ${predColor}">₹${formatNumber(predPrice)} (${predSign}${predReturn.toFixed(2)}%)</span>
+                    <div class="card-pred-left">
+                        <span class="card-pred-label">${strategyLabel}</span>
+                        <span class="card-pred-meta">${modeHint} • ${formatIstTimestamp(strategyTime)}</span>
+                    </div>
+                    <span class="card-pred-value ${strategyColor}">${formatPrice(strategyPrice)} (${formatSignedPct(strategyPct, 2)})</span>
+                </div>
+                <div class="card-prediction">
+                    <div class="card-pred-left">
+                        <span class="card-pred-label">${aiLabel}</span>
+                        <span class="card-pred-meta">${modeHint} • ${formatIstTimestamp(aiTime)}</span>
+                    </div>
+                    <span class="card-pred-value ${aiColor}">${aiPrice > 0 ? formatPrice(aiPrice) : '—'} (${formatSignedPct(aiPct, 2)})</span>
                 </div>`;
         }
 
@@ -374,6 +400,7 @@ function renderStockGrid(sector) {
             </div>
                 <div class="stock-card-bottom">
                     <div class="stock-card-price">
+                        <span class="card-live-label">${liveLabel}</span>
                         <span class="price">${formatPrice(price)}</span>
                         <span class="change ${hasQuote ? direction : ''}">
                             ${hasQuote ? `${sign}${change.toFixed(2)} (${changePct.toFixed(2)}%)` : 'Waiting for quote'}
@@ -460,9 +487,17 @@ async function showTopAnalysis() {
             const s = top10[i];
             const rank = i + 1;
             const isUp = s.predicted_return > 0;
+            const nextDayMode = s.prediction_mode === 'next_day_after_close';
             const signalClass = (s.signal === 'BUY' || s.signal === 'STRONG_BUY') ? 'buy' : (s.signal === 'SELL' || s.signal === 'STRONG_SELL') ? 'sell' : 'hold';
             const predSign = s.predicted_return >= 0 ? '+' : '';
             const currSign = s.open_to_current_pct >= 0 ? '+' : '';
+            const liveLabel = s.display_price_label || 'Current';
+            const strategyLabel = nextDayMode ? `Strategy (Next Day ${s.predicted_for_date || ''})` : 'Strategy Predicted';
+            const aiLabel = nextDayMode ? `AI (Next Day ${s.predicted_for_date || ''})` : 'AI Predicted';
+            const strategyPct = nextDayMode ? s.close_to_strategy_pct : s.open_to_predicted_pct;
+            const aiPct = nextDayMode ? s.close_to_ai_pct : (s.open_to_ai_predicted_pct ?? s.open_to_predicted_pct);
+            const strategyTime = s.strategy_predicted_at || s.strategy_predicted_at_open;
+            const aiTime = s.ai_predicted_at || s.ai_predicted_at_open;
 
             html += `
             <div class="top10-card" onclick="window.location='/stock/${encodeURIComponent(s.ticker)}'">
@@ -481,17 +516,19 @@ async function showTopAnalysis() {
                         <span class="value">${formatPrice(s.open_price)}</span>
                     </div>
                     <div class="top10-price-item predicted">
-                        <span class="label">Strategy Predicted</span>
+                        <span class="label">${strategyLabel}</span>
                         <span class="value ${isUp ? 'up-color' : 'down-color'}">${formatPrice(s.strategy_predicted_price || s.predicted_price)}</span>
-                        <span class="pct ${isUp ? 'up-color' : 'down-color'}">${predSign}${s.open_to_predicted_pct}%</span>
+                        <span class="pct ${Number(strategyPct) >= 0 ? 'up-color' : 'down-color'}">${formatSignedPct(strategyPct, 2)}</span>
+                        <span class="muted-text">${formatIstTimestamp(strategyTime)}</span>
                     </div>
                     <div class="top10-price-item predicted">
-                        <span class="label">AI Predicted</span>
+                        <span class="label">${aiLabel}</span>
                         <span class="value ${isUp ? 'up-color' : 'down-color'}">${formatPrice(s.ai_predicted_price || s.predicted_price)}</span>
-                        <span class="pct ${isUp ? 'up-color' : 'down-color'}">${predSign}${(s.open_to_ai_predicted_pct ?? s.open_to_predicted_pct)}%</span>
+                        <span class="pct ${Number(aiPct) >= 0 ? 'up-color' : 'down-color'}">${formatSignedPct(aiPct, 2)}</span>
+                        <span class="muted-text">${formatIstTimestamp(aiTime)}</span>
                     </div>
                     <div class="top10-price-item current">
-                        <span class="label">Current</span>
+                        <span class="label">${liveLabel}</span>
                         <span class="value">${formatPrice(s.current_price)}</span>
                         <span class="pct ${s.open_to_current_pct >= 0 ? 'up-color' : 'down-color'}">${currSign}${s.open_to_current_pct}%</span>
                     </div>
@@ -745,8 +782,19 @@ async function loadCurrentSecondSnapshot() {
             return;
         }
 
-        const strategyNow = Number(data.strategy_predicted_price || data.predicted_price || 0);
-        const aiNow = Number(data.ai_predicted_price || 0);
+        const strategyNow = Number(
+            data.current_strategy_predicted_price
+            || data.next_day_strategy_predicted_price
+            || data.strategy_predicted_price
+            || data.predicted_price
+            || 0
+        );
+        const aiNow = Number(
+            data.current_ai_predicted_price
+            || data.next_day_ai_predicted_price
+            || data.ai_predicted_price
+            || 0
+        );
         const current = Number(data.current_price || 0);
         const strategyDir = strategyNow > current ? 'UP' : strategyNow < current ? 'DOWN' : 'FLAT';
         const aiDir = aiNow > current ? 'UP' : aiNow < current ? 'DOWN' : 'FLAT';
@@ -899,4 +947,25 @@ function formatPrice(n) {
         return '—';
     }
     return `₹${formatNumber(value)}`;
+}
+
+function formatIstTimestamp(value) {
+    if (!value) return '—';
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return String(value);
+    return d.toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        day: '2-digit',
+        month: 'short',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+    }) + ' IST';
+}
+
+function formatSignedPct(value, digits = 2) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '—';
+    const sign = n >= 0 ? '+' : '';
+    return `${sign}${n.toFixed(digits)}%`;
 }

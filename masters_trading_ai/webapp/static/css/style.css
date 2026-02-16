@@ -329,11 +329,12 @@ a:hover { text-decoration: underline; }
 .card-prediction {
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    align-items: flex-start;
     padding: 6px 8px;
     background: var(--bg-secondary);
     border-radius: 6px;
     margin-top: 2px;
+    gap: 10px;
 }
 
 .card-pred-label {
@@ -344,6 +345,27 @@ a:hover { text-decoration: underline; }
 .card-pred-value {
     font-size: 12px;
     font-weight: 600;
+    text-align: right;
+}
+
+.card-pred-left {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.card-pred-meta {
+    font-size: 10px;
+    color: var(--text-muted);
+    line-height: 1.35;
+}
+
+.card-live-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
 }
 
 .stock-card-icon {
