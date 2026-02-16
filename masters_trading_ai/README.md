@@ -43,6 +43,18 @@ source .venv/bin/activate
 python webapp/server.py
 ```
 
+If you are already inside `masters_trading_ai`:
+```bash
+source .venv/bin/activate
+python webapp/server.py
+```
+
+Do NOT run:
+```bash
+webapp/server.py
+```
+That runs it as a shell command and causes `zsh: permission denied`.
+
 Open:
 - Dashboard: `http://localhost:5001`
 - Risk page: `http://localhost:5001/risk`
@@ -115,6 +127,16 @@ git pull origin main
 ```bash
 lsof -iTCP:5001 -sTCP:LISTEN -n -P
 pkill -f "webapp/server.py"
+```
+
+### `zsh: permission denied: webapp/server.py`
+Use Python to run it:
+```bash
+python webapp/server.py
+```
+or:
+```bash
+python3 webapp/server.py
 ```
 
 ### Models still loading
