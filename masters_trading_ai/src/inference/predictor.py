@@ -1364,8 +1364,9 @@ class LivePredictor:
         if yf is None:
             return None
         try:
+            # Use unadjusted candles for live-trading price parity with broker/UI quotes.
             data = yf.download(
-                ticker, period="2d", interval="1d", progress=False, auto_adjust=True
+                ticker, period="2d", interval="1d", progress=False, auto_adjust=False
             )
             if data is None or data.empty:
                 return None
@@ -1418,8 +1419,9 @@ def get_intraday_data(
     if yf is None:
         return None
     try:
+        # Keep intraday chart prices in raw market units (not split-adjusted).
         df = yf.download(
-            ticker, period=period, interval=interval, progress=False, auto_adjust=True
+            ticker, period=period, interval=interval, progress=False, auto_adjust=False
         )
         if df is None or df.empty:
             return None

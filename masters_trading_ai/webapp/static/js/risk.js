@@ -6,6 +6,8 @@ document.addEventListener('DOMContentLoaded', () => {
     loadRiskAnalytics();
     bindRiskTermHover();
 });
+const riskExplainCache = {};
+let riskTooltipHideTimer = null;
 
 const riskPopoverState = {
     hideTimer: null,
@@ -33,7 +35,7 @@ async function loadRiskAnalytics() {
         content.classList.remove('hidden');
 
         renderRiskMetrics(data.risk_metrics);
-        renderEquityCurve(data.equity_curve);
+        renderEquityCurve(data.equity_curve, Number(data.initial_capital || data.monte_carlo?.initial_capital || 100000));
         renderSectorExposure(data.sector_exposure);
         renderMonteCarlo(data.monte_carlo);
         renderStatTests(data.statistical_tests);
@@ -68,7 +70,7 @@ function renderRiskMetrics(metrics) {
     let html = '';
     for (const c of cards) {
         html += `
-        <div class="risk-metric-card risk-term" data-risk-term="${c.label}" role="button" tabindex="0" aria-haspopup="dialog" aria-controls="risk-tooltip">
+        <div class="risk-metric-card risk-term" data-risk-term="${c.label}" tabindex="0" role="button">
             <div class="rmc-icon">${c.icon}</div>
             <div class="rmc-value" style="color:${c.color}">${c.value}</div>
             <div class="rmc-label">${c.label}</div>
@@ -85,12 +87,13 @@ function metricColor(val, bad, ok, good) {
 }
 
 // ── Equity Curve Chart ────────────────────────────
-function renderEquityCurve(equityData) {
+function renderEquityCurve(equityData, initialCapital = 100000) {
     const container = document.getElementById('equity-chart');
     if (!equityData || !equityData.length) {
         container.innerHTML = '<p class="muted-text">No equity data</p>';
         return;
     }
+    container.innerHTML = '';
 
     const chart = LightweightCharts.createChart(container, {
         layout: {
@@ -125,13 +128,13 @@ function renderEquityCurve(equityData) {
 
     chart.timeScale().fitContent();
 
-    // Add baseline at 100000
+    // Add baseline at invested capital
     const baseline = chart.addLineSeries({
         color: '#484f58',
         lineWidth: 1,
         lineStyle: 2,
     });
-    baseline.setData(equityData.map(d => ({ time: d.date, value: 100000 })));
+    baseline.setData(equityData.map(d => ({ time: d.date, value: Number(initialCapital || 100000) })));
 
     window.addEventListener('resize', () => {
         chart.applyOptions({ width: container.clientWidth });
@@ -180,42 +183,43 @@ function renderMonteCarlo(mc) {
     const mdd = mc.max_drawdown;
     const sr = mc.sharpe_ratio;
 
+    const initCapital = Number(mc.initial_capital || 100000);
     let html = `
     <div class="mc-grid">
         <div class="mc-card">
-            <h4>Terminal Wealth (₹1L invested)</h4>
+            <h4>Terminal Wealth (₹${formatN(initCapital)} invested)</h4>
             <div class="mc-distributions">
-                <div class="mc-row"><span class="mc-label">P5 (Worst case)</span><span class="mc-val down-color">₹${formatN(tw.p5)}</span></div>
-                <div class="mc-row"><span class="mc-label">P25</span><span class="mc-val">${formatN(tw.p25)}</span></div>
-                <div class="mc-row highlight"><span class="mc-label">Median (P50)</span><span class="mc-val">${formatN(tw.median)}</span></div>
-                <div class="mc-row"><span class="mc-label">Mean</span><span class="mc-val">${formatN(tw.mean)}</span></div>
-                <div class="mc-row"><span class="mc-label">P75</span><span class="mc-val">${formatN(tw.p75)}</span></div>
-                <div class="mc-row"><span class="mc-label">P95 (Best case)</span><span class="mc-val up-color">₹${formatN(tw.p95)}</span></div>
+                <div class="mc-row"><span class="mc-label risk-term" data-risk-term="Monte Carlo P5 Terminal Wealth" tabindex="0" role="button">P5 (Worst case)</span><span class="mc-val down-color">₹${formatN(tw.p5)}</span></div>
+                <div class="mc-row"><span class="mc-label risk-term" data-risk-term="Monte Carlo P25 Terminal Wealth" tabindex="0" role="button">P25</span><span class="mc-val">${formatN(tw.p25)}</span></div>
+                <div class="mc-row highlight"><span class="mc-label risk-term" data-risk-term="Monte Carlo Median Terminal Wealth (P50)" tabindex="0" role="button">Median (P50)</span><span class="mc-val">${formatN(tw.median)}</span></div>
+                <div class="mc-row"><span class="mc-label risk-term" data-risk-term="Monte Carlo Mean Terminal Wealth" tabindex="0" role="button">Mean</span><span class="mc-val">${formatN(tw.mean)}</span></div>
+                <div class="mc-row"><span class="mc-label risk-term" data-risk-term="Monte Carlo P75 Terminal Wealth" tabindex="0" role="button">P75</span><span class="mc-val">${formatN(tw.p75)}</span></div>
+                <div class="mc-row"><span class="mc-label risk-term" data-risk-term="Monte Carlo P95 Terminal Wealth" tabindex="0" role="button">P95 (Best case)</span><span class="mc-val up-color">₹${formatN(tw.p95)}</span></div>
             </div>
         </div>
         <div class="mc-card">
             <h4>Max Drawdown Distribution</h4>
             <div class="mc-distributions">
-                <div class="mc-row"><span class="mc-label">Mean MDD</span><span class="mc-val down-color">${(mdd.mean * 100).toFixed(2)}%</span></div>
-                <div class="mc-row"><span class="mc-label">P5 (Worst)</span><span class="mc-val down-color">${(mdd.p5_worst * 100).toFixed(2)}%</span></div>
-                <div class="mc-row"><span class="mc-label">P95 (Best)</span><span class="mc-val up-color">${(mdd.p95_best * 100).toFixed(2)}%</span></div>
+                <div class="mc-row"><span class="mc-label risk-term" data-risk-term="Monte Carlo Mean Max Drawdown" tabindex="0" role="button">Mean MDD</span><span class="mc-val down-color">${(mdd.mean * 100).toFixed(2)}%</span></div>
+                <div class="mc-row"><span class="mc-label risk-term" data-risk-term="Monte Carlo P5 Max Drawdown" tabindex="0" role="button">P5 (Worst)</span><span class="mc-val down-color">${(mdd.p5_worst * 100).toFixed(2)}%</span></div>
+                <div class="mc-row"><span class="mc-label risk-term" data-risk-term="Monte Carlo P95 Max Drawdown" tabindex="0" role="button">P95 (Best)</span><span class="mc-val up-color">${(mdd.p95_best * 100).toFixed(2)}%</span></div>
             </div>
             <h4 style="margin-top: 16px;">Sharpe Ratio Distribution</h4>
             <div class="mc-distributions">
-                <div class="mc-row"><span class="mc-label">Mean Sharpe</span><span class="mc-val">${sr.mean.toFixed(3)}</span></div>
-                <div class="mc-row"><span class="mc-label">P5</span><span class="mc-val">${sr.p5.toFixed(3)}</span></div>
-                <div class="mc-row"><span class="mc-label">P95</span><span class="mc-val">${sr.p95.toFixed(3)}</span></div>
+                <div class="mc-row"><span class="mc-label risk-term" data-risk-term="Monte Carlo Mean Sharpe Ratio" tabindex="0" role="button">Mean Sharpe</span><span class="mc-val">${sr.mean.toFixed(3)}</span></div>
+                <div class="mc-row"><span class="mc-label risk-term" data-risk-term="Monte Carlo P5 Sharpe Ratio" tabindex="0" role="button">P5</span><span class="mc-val">${sr.p5.toFixed(3)}</span></div>
+                <div class="mc-row"><span class="mc-label risk-term" data-risk-term="Monte Carlo P95 Sharpe Ratio" tabindex="0" role="button">P95</span><span class="mc-val">${sr.p95.toFixed(3)}</span></div>
             </div>
         </div>
         <div class="mc-card">
             <h4>Probability Analysis</h4>
             <div class="mc-distributions">
                 <div class="mc-row highlight">
-                    <span class="mc-label risk-term" data-risk-term="Probability of Profit" role="button" tabindex="0" aria-haspopup="dialog" aria-controls="risk-tooltip">Prob(Profit)</span>
+                    <span class="mc-label risk-term" data-risk-term="Probability of Profit" tabindex="0" role="button">Prob(Profit)</span>
                     <span class="mc-val ${mc.probability_of_profit > 0.5 ? 'up-color' : 'down-color'}">${(mc.probability_of_profit * 100).toFixed(1)}%</span>
                 </div>
                 <div class="mc-row">
-                    <span class="mc-label risk-term" data-risk-term="Probability of Loss greater than 10%" role="button" tabindex="0" aria-haspopup="dialog" aria-controls="risk-tooltip">Prob(Loss > 10%)</span>
+                    <span class="mc-label risk-term" data-risk-term="Probability of Loss greater than 10%" tabindex="0" role="button">Prob(Loss > 10%)</span>
                     <span class="mc-val down-color">${(mc.probability_of_loss_gt_10pct * 100).toFixed(1)}%</span>
                 </div>
                 <div class="mc-row">
@@ -333,105 +337,97 @@ function renderHoldings(tickers, holdings = []) {
 }
 
 function bindRiskTermHover() {
-    function getEls() {
-        const tooltip = document.getElementById('risk-tooltip');
-        const titleEl = document.getElementById('risk-tooltip-title');
-        const bodyEl = document.getElementById('risk-tooltip-body');
-        return { tooltip, titleEl, bodyEl };
-    }
+    const tooltip = document.getElementById('risk-tooltip');
+    const titleEl = document.getElementById('risk-tooltip-title');
+    const bodyEl = document.getElementById('risk-tooltip-body');
+    if (!tooltip || !titleEl || !bodyEl) return;
 
-    function cancelHide() {
-        if (riskPopoverState.hideTimer) {
-            clearTimeout(riskPopoverState.hideTimer);
-            riskPopoverState.hideTimer = null;
+    const clearHideTimer = () => {
+        if (riskTooltipHideTimer) {
+            clearTimeout(riskTooltipHideTimer);
+            riskTooltipHideTimer = null;
         }
-    }
+    };
+    const scheduleHide = () => {
+        clearHideTimer();
+        riskTooltipHideTimer = setTimeout(() => {
+            if (tooltip.matches(':hover') || tooltip.matches(':focus-within')) return;
+            tooltip.classList.add('hidden');
+        }, 180);
+    };
 
-    function scheduleHide() {
-        cancelHide();
-        riskPopoverState.hideTimer = setTimeout(() => {
-            const { tooltip } = getEls();
-            const trigger = riskPopoverState.activeTrigger;
-            const triggerHovered = !!(trigger && trigger.matches(':hover'));
-            const tipHovered = !!(tooltip && tooltip.matches(':hover'));
-            const tipFocused = !!(
-                tooltip
-                && (document.activeElement === tooltip || tooltip.contains(document.activeElement))
-            );
-            if (triggerHovered || tipHovered || tipFocused) return;
-            hide();
-        }, 160);
-    }
+    tooltip.addEventListener('mouseenter', clearHideTimer);
+    tooltip.addEventListener('mouseleave', scheduleHide);
+    tooltip.addEventListener('focusin', clearHideTimer);
+    tooltip.addEventListener('focusout', scheduleHide);
 
-    function hide() {
-        const { tooltip } = getEls();
-        cancelHide();
-        if (!tooltip) return;
-        tooltip.classList.add('hidden');
-        tooltip.setAttribute('aria-hidden', 'true');
-    }
-
-    function position(triggerEl) {
-        const { tooltip } = getEls();
-        if (!tooltip || !triggerEl) return;
-        const rect = triggerEl.getBoundingClientRect();
+    const placeTooltip = (el) => {
+        const rect = el.getBoundingClientRect();
         tooltip.style.top = `${window.scrollY + rect.bottom + 10}px`;
-        tooltip.style.left = `${Math.min(window.scrollX + rect.left, window.scrollX + window.innerWidth - tooltip.offsetWidth - 12)}px`;
-    }
+        tooltip.style.left = `${Math.min(window.scrollX + rect.left, window.scrollX + window.innerWidth - 380)}px`;
+    };
 
-    async function show(triggerEl, term) {
-        const { tooltip, titleEl, bodyEl } = getEls();
-        if (!tooltip || !titleEl || !bodyEl || !term || !triggerEl) return;
-        riskPopoverState.activeTrigger = triggerEl;
-        cancelHide();
-        position(triggerEl);
+    const showTooltip = async (el) => {
+        const term = el.dataset.riskTerm || el.textContent?.trim();
+        if (!term) return;
+        clearHideTimer();
+        placeTooltip(el);
         tooltip.classList.remove('hidden');
         tooltip.setAttribute('aria-hidden', 'false');
         titleEl.textContent = term;
         bodyEl.textContent = 'Loading explanation...';
-        const cacheKey = term.toLowerCase();
-        if (riskPopoverState.cache[cacheKey]) {
-            bodyEl.textContent = riskPopoverState.cache[cacheKey];
+        const cacheKey = `${term}::portfolio risk analytics`;
+        if (riskExplainCache[cacheKey]) {
+            bodyEl.textContent = riskExplainCache[cacheKey];
             return;
         }
         try {
             const res = await fetch(`/api/explain-risk-term?term=${encodeURIComponent(term)}&context=${encodeURIComponent('portfolio risk analytics')}`);
             const data = await res.json();
             const text = data.explanation || data.error || 'No explanation available';
-            riskPopoverState.cache[cacheKey] = text;
+            riskExplainCache[cacheKey] = text;
             bodyEl.textContent = text;
         } catch (e) {
             bodyEl.textContent = `Explanation unavailable: ${e.message}`;
         }
-    }
-
-    function normalizeTrigger(el) {
-        if (!el) return;
-        el.setAttribute('tabindex', el.getAttribute('tabindex') || '0');
-        el.setAttribute('role', 'button');
-        el.setAttribute('aria-haspopup', 'dialog');
-        el.setAttribute('aria-controls', 'risk-tooltip');
-    }
+    };
 
     document.addEventListener('mouseover', (event) => {
         const el = event.target.closest('.risk-term');
         if (!el) return;
-        normalizeTrigger(el);
-        const term = el.dataset.riskTerm || el.textContent?.trim();
-        if (!term) return;
-        show(el, term);
+        showTooltip(el);
     });
-
     document.addEventListener('focusin', (event) => {
         const el = event.target.closest('.risk-term');
         if (!el) return;
-        normalizeTrigger(el);
-        const term = el.dataset.riskTerm || el.textContent?.trim();
-        if (!term) return;
-        show(el, term);
+        showTooltip(el);
     });
-
+    document.addEventListener('click', (event) => {
+        const el = event.target.closest('.risk-term');
+        if (!el) {
+            if (!tooltip.contains(event.target)) tooltip.classList.add('hidden');
+            return;
+        }
+        showTooltip(el);
+    });
+    document.addEventListener('keydown', (event) => {
+        const el = event.target.closest('.risk-term');
+        if (!el) {
+            if (event.key === 'Escape') tooltip.classList.add('hidden');
+            return;
+        }
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            showTooltip(el);
+        } else if (event.key === 'Escape') {
+            tooltip.classList.add('hidden');
+        }
+    });
     document.addEventListener('mouseout', (event) => {
+        if (!event.target.closest('.risk-term')) return;
+        scheduleHide();
+    });
+    document.addEventListener('focusout', (event) => {
         if (!event.target.closest('.risk-term')) return;
         scheduleHide();
     });

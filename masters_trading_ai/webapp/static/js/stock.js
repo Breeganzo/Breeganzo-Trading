@@ -19,10 +19,7 @@ let currentPeriod = '1d';
 let currentInterval = '1m';
 let chartRefreshTimer = null;
 let metricExplainCache = {};
-const metricPopoverState = {
-    hideTimer: null,
-    activeTrigger: null,
-};
+let metricTooltipHideTimer = null;
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -56,6 +53,18 @@ document.addEventListener('DOMContentLoaded', () => {
         loadNews();
         loadGroqForecast();
     }, 15 * 60 * 1000);
+    document.addEventListener('keydown', (evt) => {
+        if (evt.key === 'Escape') hideMetricTooltip(true);
+    });
+    document.addEventListener('click', (evt) => {
+        const tip = document.getElementById('metric-tooltip');
+        if (!tip) return;
+        if (tip.contains(evt.target)) return;
+        if (evt.target.closest('.clickable-metric') || evt.target.closest('.strategy-evidence-explain')) {
+            return;
+        }
+        hideMetricTooltip(true);
+    });
 });
 
 // ── Status ────────────────────────────────────────
@@ -113,65 +122,54 @@ function formatOpenWindowTime(value, dateStr = '', minute = 20) {
     return formatTimestamp(value || openWindowFallbackIso(dateStr, minute));
 }
 
-function getMetricPopoverEls() {
+function moveMetricTooltip(evt) {
+    const tip = document.getElementById('metric-tooltip');
+    if (!tip || !evt || tip.classList.contains('hidden')) return;
+    tip.style.left = `${evt.pageX + 14}px`;
+    tip.style.top = `${evt.pageY + 14}px`;
+}
+
+function clearMetricTooltipHideTimer() {
+    if (metricTooltipHideTimer) {
+        clearTimeout(metricTooltipHideTimer);
+        metricTooltipHideTimer = null;
+    }
+}
+
+function scheduleMetricTooltipHide() {
+    clearMetricTooltipHideTimer();
+    metricTooltipHideTimer = setTimeout(() => {
+        const tip = document.getElementById('metric-tooltip');
+        if (!tip) return;
+        if (tip.matches(':hover') || tip.matches(':focus-within')) return;
+        tip.classList.add('hidden');
+    }, 180);
+}
+
+function bindMetricTooltipInteractions() {
+    const tip = document.getElementById('metric-tooltip');
+    if (!tip || tip.dataset.bound === '1') return;
+    tip.dataset.bound = '1';
+    tip.addEventListener('mouseenter', clearMetricTooltipHideTimer);
+    tip.addEventListener('mouseleave', scheduleMetricTooltipHide);
+    tip.addEventListener('focusin', clearMetricTooltipHideTimer);
+    tip.addEventListener('focusout', scheduleMetricTooltipHide);
+}
+
+async function showMetricTooltip(evt, term, context = '') {
     const tip = document.getElementById('metric-tooltip');
     const titleEl = document.getElementById('metric-tooltip-title');
     const bodyEl = document.getElementById('metric-tooltip-body');
     return { tip, titleEl, bodyEl };
 }
 
-function positionMetricPopover(triggerEl) {
-    const { tip } = getMetricPopoverEls();
-    if (!tip || !triggerEl) return;
-    const rect = triggerEl.getBoundingClientRect();
-    const left = Math.min(
-        window.scrollX + rect.left,
-        window.scrollX + window.innerWidth - tip.offsetWidth - 12
-    );
-    const top = window.scrollY + rect.bottom + 10;
-    tip.style.left = `${Math.max(window.scrollX + 8, left)}px`;
-    tip.style.top = `${top}px`;
-}
-
-function cancelMetricPopoverHide() {
-    if (metricPopoverState.hideTimer) {
-        clearTimeout(metricPopoverState.hideTimer);
-        metricPopoverState.hideTimer = null;
-    }
-}
-
-function scheduleMetricPopoverHide() {
-    cancelMetricPopoverHide();
-    metricPopoverState.hideTimer = setTimeout(() => {
-        const { tip } = getMetricPopoverEls();
-        const trigger = metricPopoverState.activeTrigger;
-        const triggerHovered = !!(trigger && trigger.matches(':hover'));
-        const tipHovered = !!(tip && tip.matches(':hover'));
-        const tipFocused = !!(
-            tip
-            && (document.activeElement === tip || tip.contains(document.activeElement))
-        );
-        if (triggerHovered || tipHovered || tipFocused) return;
-        hideMetricTooltip();
-    }, 160);
-}
-
-function hideMetricTooltip() {
-    const { tip } = getMetricPopoverEls();
-    cancelMetricPopoverHide();
-    if (!tip) return;
-    tip.classList.add('hidden');
-    tip.setAttribute('aria-hidden', 'true');
-}
-
-async function showMetricTooltip(triggerEl, term, context = '') {
-    const { tip, titleEl, bodyEl } = getMetricPopoverEls();
-    if (!tip || !titleEl || !bodyEl || !triggerEl) return;
-    metricPopoverState.activeTrigger = triggerEl;
-    cancelMetricPopoverHide();
+    bindMetricTooltipInteractions();
+    clearMetricTooltipHideTimer();
     titleEl.textContent = term;
     bodyEl.textContent = 'Loading explanation...';
-    positionMetricPopover(triggerEl);
+    if (evt && Number.isFinite(evt.pageX) && Number.isFinite(evt.pageY)) {
+        moveMetricTooltip(evt);
+    }
     tip.classList.remove('hidden');
     tip.setAttribute('aria-hidden', 'false');
 
@@ -189,6 +187,27 @@ async function showMetricTooltip(triggerEl, term, context = '') {
         bodyEl.textContent = text;
     } catch (e) {
         bodyEl.textContent = `Explanation unavailable: ${e.message}`;
+    }
+}
+
+function hideMetricTooltip(force = false) {
+    const tip = document.getElementById('metric-tooltip');
+    if (!tip) return;
+    if (force) {
+        clearMetricTooltipHideTimer();
+        tip.classList.add('hidden');
+        return;
+    }
+    scheduleMetricTooltipHide();
+}
+
+function handleMetricLabelKey(evt, term, context = '') {
+    if (!evt) return;
+    if (evt.key === 'Enter' || evt.key === ' ') {
+        evt.preventDefault();
+        showMetricTooltip(evt, term, context);
+    } else if (evt.key === 'Escape') {
+        hideMetricTooltip(true);
     }
 }
 
@@ -211,61 +230,13 @@ function bindPredictionMetricExplainers() {
         if (!el) continue;
         el.setAttribute('tabindex', '0');
         el.setAttribute('role', 'button');
-        el.setAttribute('aria-haspopup', 'dialog');
-        el.setAttribute('aria-controls', 'metric-tooltip');
-        el.dataset.explainTerm = b.term;
-        el.dataset.explainContext = b.context;
-        el.addEventListener('mouseenter', () => showMetricTooltip(el, b.term, b.context));
-        el.addEventListener('focus', () => showMetricTooltip(el, b.term, b.context));
-        el.addEventListener('mouseleave', scheduleMetricPopoverHide);
-        el.addEventListener('blur', scheduleMetricPopoverHide);
-        el.addEventListener('click', (evt) => {
-            evt.preventDefault();
-            showMetricTooltip(el, b.term, b.context);
-        });
-        el.addEventListener('keydown', (evt) => {
-            if (evt.key === 'Enter' || evt.key === ' ') {
-                evt.preventDefault();
-                showMetricTooltip(el, b.term, b.context);
-            }
-            if (evt.key === 'Escape') {
-                hideMetricTooltip();
-            }
-        });
-    }
-
-    const { tip } = getMetricPopoverEls();
-    if (tip && tip.dataset.boundPopover !== '1') {
-        tip.dataset.boundPopover = '1';
-        tip.setAttribute('tabindex', '0');
-        tip.addEventListener('mouseenter', cancelMetricPopoverHide);
-        tip.addEventListener('mouseleave', scheduleMetricPopoverHide);
-        tip.addEventListener('focusin', cancelMetricPopoverHide);
-        tip.addEventListener('focusout', scheduleMetricPopoverHide);
-        tip.addEventListener('keydown', (evt) => {
-            if (evt.key === 'Escape') hideMetricTooltip();
-        });
-        tip.addEventListener(
-            'wheel',
-            (evt) => {
-                evt.stopPropagation();
-            },
-            { passive: true }
-        );
-        tip.addEventListener(
-            'touchstart',
-            () => {
-                cancelMetricPopoverHide();
-            },
-            { passive: true }
-        );
-        document.addEventListener('click', (evt) => {
-            const inPopover = tip.contains(evt.target);
-            const inTrigger = evt.target.closest('.explainable-label');
-            if (!inPopover && !inTrigger) {
-                hideMetricTooltip();
-            }
-        });
+        el.addEventListener('mouseenter', (evt) => showMetricTooltip(evt, b.term, b.context));
+        el.addEventListener('mousemove', moveMetricTooltip);
+        el.addEventListener('mouseleave', hideMetricTooltip);
+        el.addEventListener('click', (evt) => showMetricTooltip(evt, b.term, b.context));
+        el.addEventListener('focus', (evt) => showMetricTooltip(evt, b.term, b.context));
+        el.addEventListener('blur', hideMetricTooltip);
+        el.addEventListener('keydown', (evt) => handleMetricLabelKey(evt, b.term, b.context));
     }
 }
 
@@ -1121,8 +1092,13 @@ function renderStrategyEvidenceCard(title, rows) {
         <div class="strategy-evidence-title">${title}</div>
         ${rows.map((row) => {
             const tag = classifyStrategyScore(row.score);
+            const term = row.term || row.key;
             return `
-            <div class="strategy-evidence-row">
+            <div class="strategy-evidence-row clickable-metric strategy-evidence-explain"
+                data-strategy-term="${term}"
+                data-strategy-context="${title}"
+                tabindex="0"
+                role="button">
                 <span class="strategy-evidence-key">${row.key}</span>
                 <span class="strategy-evidence-value">${row.value}</span>
                 <span class="strategy-evidence-tag ${tag.cls}">${tag.label}</span>
@@ -1246,6 +1222,25 @@ function buildStrategyEvidence(predData) {
     </div>`;
 }
 
+function bindStrategyEvidenceExplainers() {
+    const container = document.getElementById('ml-strategy');
+    if (!container) return;
+    const nodes = container.querySelectorAll('.strategy-evidence-explain');
+    nodes.forEach((el) => {
+        if (el.dataset.explainBound === '1') return;
+        el.dataset.explainBound = '1';
+        const term = el.dataset.strategyTerm || 'Strategy Metric';
+        const context = `${el.dataset.strategyContext || 'Strategy evidence'} for ${TICKER}`;
+        el.addEventListener('mouseenter', (evt) => showMetricTooltip(evt, term, context));
+        el.addEventListener('mousemove', moveMetricTooltip);
+        el.addEventListener('mouseleave', hideMetricTooltip);
+        el.addEventListener('focus', (evt) => showMetricTooltip(evt, term, context));
+        el.addEventListener('blur', hideMetricTooltip);
+        el.addEventListener('click', (evt) => showMetricTooltip(evt, term, context));
+        el.addEventListener('keydown', (evt) => handleMetricLabelKey(evt, term, context));
+    });
+}
+
 // ── Strategy Loading ──────────────────────────────
 async function loadStrategies(predData) {
     // ML Strategy — immediate (from prediction data)
@@ -1265,6 +1260,7 @@ async function loadStrategies(predData) {
             <p class="muted-text">Strategy evidence below uses live model inputs (indicators, fundamentals, and option greeks) with rule tags.</p>
             ${strategyEvidence}
         `;
+        bindStrategyEvidenceExplainers();
     }
 
     // Groq Strategy — async API call
