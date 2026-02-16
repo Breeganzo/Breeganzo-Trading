@@ -160,8 +160,7 @@ async function showMetricTooltip(evt, term, context = '') {
     const tip = document.getElementById('metric-tooltip');
     const titleEl = document.getElementById('metric-tooltip-title');
     const bodyEl = document.getElementById('metric-tooltip-body');
-    return { tip, titleEl, bodyEl };
-}
+    if (!tip || !titleEl || !bodyEl) return;
 
     bindMetricTooltipInteractions();
     clearMetricTooltipHideTimer();
