@@ -431,18 +431,53 @@ function bindRiskTermHover() {
         if (!event.target.closest('.risk-term')) return;
         scheduleHide();
     });
+
+    document.addEventListener('focusout', (event) => {
+        if (!event.target.closest('.risk-term')) return;
+        scheduleHide();
+    });
+
+    document.addEventListener('click', (event) => {
+        const trigger = event.target.closest('.risk-term');
+        const { tooltip } = getEls();
+        if (trigger) {
+            normalizeTrigger(trigger);
+            const term = trigger.dataset.riskTerm || trigger.textContent?.trim();
+            if (!term) return;
+            show(trigger, term);
+            return;
+        }
+        if (tooltip && !tooltip.contains(event.target)) {
+            hide();
+        }
+    });
+
+    document.addEventListener('keydown', (event) => {
+        const trigger = event.target.closest('.risk-term');
+        if (!trigger) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            const term = trigger.dataset.riskTerm || trigger.textContent?.trim();
+            if (term) show(trigger, term);
+        }
+        if (event.key === 'Escape') {
+            hide();
+        }
+    });
+
+    const { tooltip } = getEls();
+    if (!tooltip) return;
     tooltip.setAttribute('tabindex', '0');
-    tooltip.addEventListener('mouseenter', clearHideTimer);
+    tooltip.addEventListener('mouseenter', cancelHide);
     tooltip.addEventListener('mouseleave', scheduleHide);
-    tooltip.addEventListener('focusin', clearHideTimer);
+    tooltip.addEventListener('focusin', cancelHide);
     tooltip.addEventListener('focusout', scheduleHide);
     tooltip.addEventListener('keydown', (evt) => {
-        if (evt.key === 'Escape') tooltip.classList.add('hidden');
+        if (evt.key === 'Escape') hide();
     });
     tooltip.addEventListener(
         'wheel',
         (evt) => {
-            clearHideTimer();
             evt.stopPropagation();
         },
         { passive: true }
@@ -450,7 +485,7 @@ function bindRiskTermHover() {
     tooltip.addEventListener(
         'touchstart',
         () => {
-            clearHideTimer();
+            cancelHide();
         },
         { passive: true }
     );
