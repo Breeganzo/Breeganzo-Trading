@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useRankings } from '@/hooks/useData';
 import { api } from '@/lib/api';
 import { formatNumber, formatPercent, formatCurrency, pnlColor } from '@/lib/utils';
@@ -38,6 +38,7 @@ function scoreColor(score: number): string {
 export default function RankingsPanel() {
   const [category, setCategory] = useState<RankingCategory>('overall');
   const [isComputing, setIsComputing] = useState(false);
+  const [autoComputeAttempted, setAutoComputeAttempted] = useState(false);
 
   const { data: rankings, isLoading, error, mutate } = useRankings(category);
 
@@ -90,6 +91,14 @@ export default function RankingsPanel() {
 
   const entries: RankingEntry[] = rankings?.entries ?? [];
   const computedAt = rankings?.computed_at ?? null;
+
+  useEffect(() => {
+    if (isLoading || isComputing || autoComputeAttempted) return;
+    if (!entries.length) {
+      setAutoComputeAttempted(true);
+      void handleCompute();
+    }
+  }, [isLoading, isComputing, autoComputeAttempted, entries.length, handleCompute]);
 
   return (
     <div className="panel">

@@ -145,6 +145,7 @@ a:hover { text-decoration: underline; }
     display: flex;
     align-items: center;
     gap: 12px;
+    flex-wrap: wrap;
 }
 
 .status-badge {
@@ -158,6 +159,11 @@ a:hover { text-decoration: underline; }
 .status-badge.closed { background: var(--red-bg); color: var(--red); }
 .status-badge.loading { background: var(--yellow-bg); color: var(--yellow); }
 .status-badge.ready { background: var(--green-bg); color: var(--green); }
+
+.status-detail {
+    font-size: 11px;
+    color: var(--text-muted);
+}
 
 /* ── Market Banner ──────────────────────────────── */
 .market-banner {
@@ -831,6 +837,37 @@ a:hover { text-decoration: underline; }
 
 .pick-signal.buy { background: var(--green-bg); color: var(--green); }
 .pick-signal.sell { background: var(--red-bg); color: var(--red); }
+.pick-signal.hold { background: var(--yellow-bg); color: var(--yellow); }
+
+.top-picks-controls {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+}
+
+.pick-filter-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: 18px;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    transition: all 0.2s;
+}
+
+.pick-filter-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--text-secondary);
+}
+
+.pick-filter-btn.active {
+    background: var(--blue-bg);
+    color: var(--blue);
+    border-color: var(--blue);
+}
 
 .pick-details {
     display: grid;
@@ -2215,4 +2252,3 @@ a:hover { text-decoration: underline; }
     .risk-header { padding: 16px; }
     .risk-dashboard { padding: 12px; }
 }
-

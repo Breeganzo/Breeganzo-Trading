@@ -8,6 +8,8 @@ let dailyAnalysisData = null;
 let currentSector = 'all';
 let sectorsData = {};
 let autoRefreshTimer = null;
+let topPickFilter = 'top_buy';
+let groupedTopPicks = { top_buy: [], top_sell: [], top_hold: [] };
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -68,15 +70,30 @@ async function checkStatus() {
         }
 
         const modelBadge = document.getElementById('model-status');
+        const modelDetail = document.getElementById('model-load-detail');
         if (data.models_loaded) {
             modelBadge.textContent = `✅ ${data.model_count} Models Ready`;
             modelBadge.className = 'status-badge ready';
+            if (modelDetail) {
+                const elapsed = data.model_load_elapsed_sec ?? 0;
+                modelDetail.textContent = `Loaded in ${elapsed}s`;
+            }
         } else if (data.load_error) {
             modelBadge.textContent = '❌ Model Error';
             modelBadge.className = 'status-badge closed';
+            if (modelDetail) modelDetail.textContent = data.load_error;
         } else {
-            modelBadge.textContent = '⏳ Loading models...';
+            const progress = data.model_load_progress || {};
+            const loadedSteps = progress.loaded_steps || 0;
+            const totalSteps = progress.total_steps || 0;
+            const inProgress = progress.in_progress ? ` (${progress.in_progress})` : '';
+            modelBadge.textContent = totalSteps > 0
+                ? `⏳ Loading ${loadedSteps}/${totalSteps}${inProgress}`
+                : '⏳ Loading models...';
             modelBadge.className = 'status-badge loading';
+            if (modelDetail) {
+                modelDetail.textContent = `Elapsed ${data.model_load_elapsed_sec ?? 0}s`;
+            }
             setTimeout(checkStatus, 3000);
         }
     } catch (e) {
@@ -412,9 +429,14 @@ async function showTopAnalysis() {
                         <span class="value">${formatPrice(s.open_price)}</span>
                     </div>
                     <div class="top10-price-item predicted">
-                        <span class="label">AI Predicted</span>
-                        <span class="value ${isUp ? 'up-color' : 'down-color'}">${formatPrice(s.predicted_price)}</span>
+                        <span class="label">Strategy Predicted</span>
+                        <span class="value ${isUp ? 'up-color' : 'down-color'}">${formatPrice(s.strategy_predicted_price || s.predicted_price)}</span>
                         <span class="pct ${isUp ? 'up-color' : 'down-color'}">${predSign}${s.open_to_predicted_pct}%</span>
+                    </div>
+                    <div class="top10-price-item predicted">
+                        <span class="label">AI Predicted</span>
+                        <span class="value ${isUp ? 'up-color' : 'down-color'}">${formatPrice(s.ai_predicted_price || s.predicted_price)}</span>
+                        <span class="pct ${isUp ? 'up-color' : 'down-color'}">${predSign}${(s.open_to_ai_predicted_pct ?? s.open_to_predicted_pct)}%</span>
                     </div>
                     <div class="top10-price-item current">
                         <span class="label">Current</span>
@@ -463,67 +485,97 @@ async function showTopPicks() {
 
     const section = document.getElementById('top-picks-section');
     section.classList.remove('hidden');
+    updateTopPickFilterButtons();
 
     const grid = document.getElementById('picks-grid');
     grid.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>Running ML predictions across all sectors... This may take 2-5 minutes.</p></div>';
 
     try {
-        const res = await fetch('/api/top-picks?sectors=large_cap&sectors=banking&sectors=mid_cap&n=10');
-        const picks = await res.json();
+        const res = await fetch('/api/top-picks?sectors=large_cap&sectors=banking&sectors=mid_cap&n=10&grouped=true');
+        const data = await res.json();
 
-        if (picks.error) {
-            grid.innerHTML = `<div class="loading-spinner"><p>⚠️ ${picks.error}</p></div>`;
+        if (data.error) {
+            grid.innerHTML = `<div class="loading-spinner"><p>⚠️ ${data.error}</p></div>`;
             return;
         }
-
-        let html = '';
-        for (const pick of picks) {
-            const isUp = pick.predicted_return > 0;
-            const signalClass = isUp ? 'buy' : 'sell';
-            const returnSign = isUp ? '+' : '';
-
-            html += `
-            <div class="pick-card" onclick="window.location='/stock/${encodeURIComponent(pick.ticker)}'">
-                <div class="pick-card-header">
-                    <div>
-                        <h4>${pick.name || pick.ticker.replace('.NS', '')}</h4>
-                        <span class="muted-text">${pick.ticker}</span>
-                    </div>
-                    <span class="pick-signal ${signalClass}">${pick.signal}</span>
-                </div>
-                <div class="pick-details">
-                    <div class="pick-detail">
-                        <span class="label">Current Price</span>
-                        <span class="value">${formatPrice(pick.current_price)}</span>
-                    </div>
-                    <div class="pick-detail">
-                        <span class="label">Predicted Return</span>
-                        <span class="value ${isUp ? 'up-color' : 'down-color'}">${returnSign}${pick.predicted_return?.toFixed(3)}%</span>
-                    </div>
-                    <div class="pick-detail">
-                        <span class="label">Target</span>
-                        <span class="value">${formatPrice(pick.target_price || pick.predicted_price)}</span>
-                    </div>
-                    <div class="pick-detail">
-                        <span class="label">Confidence</span>
-                        <span class="value">${pick.confidence?.toFixed(0)}%</span>
-                    </div>
-                    <div class="pick-detail">
-                        <span class="label">Agreement</span>
-                        <span class="value">${pick.model_agreement?.toFixed(0)}%</span>
-                    </div>
-                    <div class="pick-detail">
-                        <span class="label">R:R</span>
-                        <span class="value">${pick.risk_reward?.toFixed(1)}</span>
-                    </div>
-                </div>
-            </div>`;
-        }
-
-        grid.innerHTML = html || '<div class="loading-spinner"><p>No predictions available yet.</p></div>';
+        groupedTopPicks = {
+            top_buy: data.top_buy || [],
+            top_sell: data.top_sell || [],
+            top_hold: data.top_hold || [],
+        };
+        renderTopPicks();
     } catch (e) {
         grid.innerHTML = `<div class="loading-spinner"><p>Error: ${e.message}</p></div>`;
     }
+}
+
+function setTopPickFilter(filterKey) {
+    topPickFilter = filterKey;
+    updateTopPickFilterButtons();
+    renderTopPicks();
+}
+
+function updateTopPickFilterButtons() {
+    document.querySelectorAll('.pick-filter-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.pickFilter === topPickFilter);
+    });
+}
+
+function renderTopPicks() {
+    const grid = document.getElementById('picks-grid');
+    if (!grid) return;
+
+    const picks = groupedTopPicks[topPickFilter] || [];
+    if (!picks.length) {
+        grid.innerHTML = '<div class="loading-spinner"><p>No predictions available yet for this group.</p></div>';
+        return;
+    }
+
+    let html = '';
+    for (const pick of picks) {
+        const isUp = Number(pick.predicted_return) >= 0;
+        const signalLower = String(pick.signal || '').toLowerCase();
+        const signalClass = signalLower.includes('buy') ? 'buy' : signalLower.includes('sell') ? 'sell' : 'hold';
+        const returnSign = isUp ? '+' : '';
+
+        html += `
+        <div class="pick-card" onclick="window.location='/stock/${encodeURIComponent(pick.ticker)}'">
+            <div class="pick-card-header">
+                <div>
+                    <h4>${pick.name || pick.ticker.replace('.NS', '')}</h4>
+                    <span class="muted-text">${pick.ticker}</span>
+                </div>
+                <span class="pick-signal ${signalClass}">${pick.signal || 'HOLD'}</span>
+            </div>
+            <div class="pick-details">
+                <div class="pick-detail">
+                    <span class="label">Current Price</span>
+                    <span class="value">${formatPrice(pick.current_price)}</span>
+                </div>
+                <div class="pick-detail">
+                    <span class="label">Predicted Return</span>
+                    <span class="value ${isUp ? 'up-color' : 'down-color'}">${returnSign}${Number(pick.predicted_return || 0).toFixed(3)}%</span>
+                </div>
+                <div class="pick-detail">
+                    <span class="label">Strategy Target</span>
+                    <span class="value">${formatPrice(pick.target_price || pick.predicted_price)}</span>
+                </div>
+                <div class="pick-detail">
+                    <span class="label">AI Predicted</span>
+                    <span class="value">${formatPrice(pick.ai_predicted_price || pick.predicted_price)}</span>
+                </div>
+                <div class="pick-detail">
+                    <span class="label">Confidence</span>
+                    <span class="value">${Number(pick.confidence || 0).toFixed(0)}%</span>
+                </div>
+                <div class="pick-detail">
+                    <span class="label">Agreement</span>
+                    <span class="value">${Number(pick.model_agreement || 0).toFixed(0)}%</span>
+                </div>
+            </div>
+        </div>`;
+    }
+    grid.innerHTML = html;
 }
 
 // ── Expected vs Actual ────────────────────────────

@@ -243,6 +243,39 @@ class LivePredictor:
         self.cache = PredictionCache()
         self.fundamental_analyzer = FundamentalAnalyzer()
         self._loaded = False
+        self._load_started_at: str | None = None
+        self._load_completed_at: str | None = None
+        self._load_steps: list[dict] = []
+
+    def _set_step(self, name: str, status: str, error: str | None = None) -> None:
+        for step in self._load_steps:
+            if step.get("name") == name:
+                step["status"] = status
+                if error:
+                    step["error"] = error
+                return
+        entry = {"name": name, "status": status}
+        if error:
+            entry["error"] = error
+        self._load_steps.append(entry)
+
+    def get_load_status(self) -> dict:
+        total = len(self._load_steps)
+        loaded = sum(1 for step in self._load_steps if step.get("status") == "loaded")
+        failed = sum(1 for step in self._load_steps if step.get("status") == "failed")
+        in_progress = next(
+            (step.get("name") for step in self._load_steps if step.get("status") == "loading"),
+            None,
+        )
+        return {
+            "started_at": self._load_started_at,
+            "completed_at": self._load_completed_at,
+            "total_steps": total,
+            "loaded_steps": loaded,
+            "failed_steps": failed,
+            "in_progress": in_progress,
+            "steps": self._load_steps,
+        }
 
     def load_models(self) -> dict:
         """
@@ -262,75 +295,118 @@ class LivePredictor:
         if self._loaded:
             return self.models
 
+        self._load_started_at = datetime.now(IST).isoformat()
+        self._load_completed_at = None
+        self._load_steps = [
+            {"name": "lstm", "status": "pending"},
+            {"name": "transformer", "status": "pending"},
+            {"name": "xgboost", "status": "pending"},
+            {"name": "lightgbm", "status": "pending"},
+            {"name": "arima", "status": "pending"},
+            {"name": "garch", "status": "pending"},
+            {"name": "ensemble", "status": "pending"},
+        ]
+
         loaded = {}
         canonical_order = ["arima", "garch", "xgboost", "lightgbm", "lstm", "transformer"]
 
         # ── LSTM (load PyTorch models first to avoid C-extension conflicts) ──
         lstm_path = self.models_dir / "lstm_model.pt"
         lstm_joblib = self.models_dir / "lstm_model.joblib"
+        self._set_step("lstm", "loading")
         if lstm_path.exists() or lstm_joblib.exists():
             try:
                 model = LSTMModel()
                 model.load(lstm_path)
                 loaded["lstm"] = model
+                self._set_step("lstm", "loaded")
             except Exception as e:
                 print(f"  ⚠ LSTM load failed: {e}")
+                self._set_step("lstm", "failed", str(e))
+        else:
+            self._set_step("lstm", "failed", "model file not found")
 
         # ── Transformer ──
         transformer_path = self.models_dir / "transformer_model.pt"
         transformer_joblib = self.models_dir / "transformer_model.joblib"
+        self._set_step("transformer", "loading")
         if transformer_path.exists() or transformer_joblib.exists():
             try:
                 model = TransformerModel()
                 model.load(transformer_path)
                 loaded["transformer"] = model
+                self._set_step("transformer", "loaded")
             except Exception as e:
                 print(f"  ⚠ Transformer load failed: {e}")
+                self._set_step("transformer", "failed", str(e))
+        else:
+            self._set_step("transformer", "failed", "model file not found")
 
         # ── XGBoost (joblib) ──
         xgb_path = self.models_dir / "xgboost_model.joblib"
+        self._set_step("xgboost", "loading")
         if xgb_path.exists():
             try:
                 model = XGBoostModel()
                 model.load(xgb_path)
                 loaded["xgboost"] = model
                 print(f"  Loaded xgboost from {xgb_path}")
+                self._set_step("xgboost", "loaded")
             except Exception as e:
                 print(f"  ⚠ XGBoost load failed: {e}")
+                self._set_step("xgboost", "failed", str(e))
+        else:
+            self._set_step("xgboost", "failed", "model file not found")
 
         # ── LightGBM (joblib) ──
         lgb_path = self.models_dir / "lightgbm_model.joblib"
+        self._set_step("lightgbm", "loading")
         if lgb_path.exists():
             try:
                 model = LightGBMModel()
                 model.load(lgb_path)
                 loaded["lightgbm"] = model
                 print(f"  Loaded lightgbm from {lgb_path}")
+                self._set_step("lightgbm", "loaded")
             except Exception as e:
                 print(f"  ⚠ LightGBM load failed: {e}")
+                self._set_step("lightgbm", "failed", str(e))
+        else:
+            self._set_step("lightgbm", "failed", "model file not found")
 
         # ── ARIMA (joblib — uses smooth() for instant restore) ──
         arima_path = self.models_dir / "arima_model.joblib"
+        self._set_step("arima", "loading")
         if arima_path.exists():
             try:
                 model = ARIMAModel()
                 model.load(arima_path)
                 loaded["arima"] = model
+                self._set_step("arima", "loaded")
             except Exception as e:
                 print(f"  ⚠ ARIMA load failed: {e}")
+                self._set_step("arima", "failed", str(e))
+        else:
+            self._set_step("arima", "failed", "model file not found")
 
         # ── GARCH (joblib — uses fix() for instant restore) ──
         garch_path = self.models_dir / "garch_model.joblib"
+        self._set_step("garch", "loading")
         if garch_path.exists():
             try:
                 model = GARCHModel()
                 model.load(garch_path)
                 loaded["garch"] = model
+                self._set_step("garch", "loaded")
             except Exception as e:
                 print(f"  ⚠ GARCH load failed: {e}")
+                self._set_step("garch", "failed", str(e))
+        else:
+            self._set_step("garch", "failed", "model file not found")
 
         # ── Ensemble meta-learner ──
         ens_path = self.models_dir / "ensemble_ridge_meta.joblib"
+        self._set_step("ensemble", "loading")
         if ens_path.exists():
             try:
                 ens = EnsembleModel()
@@ -356,11 +432,16 @@ class LivePredictor:
                 self.ensemble = ens
                 print(f"  Loaded ensemble from {ens_path}")
                 print(f"  Ensemble weights: {ens.learned_weights}")
+                self._set_step("ensemble", "loaded")
             except Exception as e:
                 print(f"  ⚠ Ensemble load failed: {e}")
+                self._set_step("ensemble", "failed", str(e))
+        else:
+            self._set_step("ensemble", "failed", "model file not found")
 
         self.models = loaded
         self._loaded = True
+        self._load_completed_at = datetime.now(IST).isoformat()
         print(f"  ✅ All models loaded: {list(loaded.keys())}")
         return loaded
 
@@ -825,6 +906,84 @@ class LivePredictor:
 
         return signal, confidence
 
+    def _resolve_top_pick_tickers(
+        self,
+        tickers: list[str] | None = None,
+        sectors: list[str] | None = None,
+    ) -> list[str]:
+        if tickers is not None:
+            return sorted(set(tickers))
+
+        import yaml
+
+        config_path = PROJECT_ROOT / "config" / "tickers.yaml"
+        with open(config_path) as f:
+            data = yaml.safe_load(f)
+        resolved = []
+        target_sectors = sectors or ["large_cap", "banking"]
+        for sec in target_sectors:
+            syms = data.get(sec, [])
+            if isinstance(syms, list):
+                resolved.extend(syms)
+        return sorted(set(resolved))
+
+    @staticmethod
+    def _score_prediction(pred: dict) -> float:
+        pred_ret = abs(pred.get("predicted_return", 0))
+        conf = pred.get("confidence", 50)
+        agreement = pred.get("model_agreement", 50)
+        rr = max(pred.get("risk_reward", 0), 0)
+        return pred_ret * (conf / 100) * (agreement / 100) * (1 + rr * 0.1)
+
+    def predict_top_picks_grouped(
+        self,
+        tickers: list[str] | None = None,
+        top_n: int = 10,
+        sectors: list[str] | None = None,
+    ) -> dict[str, list[dict]]:
+        if not self._loaded:
+            self.load_models()
+
+        scan_tickers = self._resolve_top_pick_tickers(tickers=tickers, sectors=sectors)
+        results = []
+
+        for ticker in scan_tickers:
+            try:
+                pred = self.predict_single(ticker, use_cache=True)
+                if pred is None:
+                    continue
+                if pred.get("current_price", 0) <= 0:
+                    continue
+                pred["_score"] = self._score_prediction(pred)
+                results.append(pred)
+            except Exception:
+                continue
+
+        buys = sorted(
+            [r for r in results if r.get("predicted_return", 0) > 0],
+            key=lambda x: x["_score"],
+            reverse=True,
+        )[:top_n]
+        sells = sorted(
+            [r for r in results if r.get("predicted_return", 0) < 0],
+            key=lambda x: x["_score"],
+            reverse=True,
+        )[:top_n]
+        holds = sorted(
+            [r for r in results if r.get("signal") == "HOLD"],
+            key=lambda x: (x.get("confidence", 0), -abs(x.get("predicted_return", 0))),
+            reverse=True,
+        )[:top_n]
+
+        for r in buys:
+            r["pick_type"] = "BUY"
+        for r in sells:
+            r["pick_type"] = "SELL"
+        for r in holds:
+            r["pick_type"] = "HOLD"
+
+        return {"top_buy": buys, "top_sell": sells, "top_hold": holds}
+
     def predict_top_picks(
         self,
         tickers: list[str] | None = None,
@@ -854,65 +1013,12 @@ class LivePredictor:
         if n is not None:
             top_n = n
 
-        if tickers is None:
-            import yaml
-            config_path = PROJECT_ROOT / "config" / "tickers.yaml"
-            with open(config_path) as f:
-                data = yaml.safe_load(f)
-            tickers = []
-            target_sectors = sectors or ["large_cap", "banking"]
-            for sec in target_sectors:
-                syms = data.get(sec, [])
-                if isinstance(syms, list):
-                    tickers.extend(syms)
-            tickers = sorted(set(tickers))
-
-        if not self._loaded:
-            self.load_models()
-
-        results = []
-        for ticker in tickers:
-            try:
-                pred = self.predict_single(ticker, use_cache=True)
-                if pred is None:
-                    continue
-                if pred.get("current_price", 0) <= 0:
-                    continue
-                # Compute composite score for ranking
-                pred_ret = abs(pred.get("predicted_return", 0))
-                conf = pred.get("confidence", 50)
-                agreement = pred.get("model_agreement", 50)
-                rr = max(pred.get("risk_reward", 0), 0)
-                # Score: higher is better opportunity  
-                score = pred_ret * (conf / 100) * (agreement / 100) * (1 + rr * 0.1)
-                pred["_score"] = score
-                results.append(pred)
-            except Exception:
-                continue
-
-        # Separate buys and sells, sort by score
-        buys = sorted(
-            [r for r in results if r.get("predicted_return", 0) > 0],
-            key=lambda x: x["_score"],
-            reverse=True,
+        grouped = self.predict_top_picks_grouped(
+            tickers=tickers,
+            top_n=top_n,
+            sectors=sectors,
         )
-        sells = sorted(
-            [r for r in results if r.get("predicted_return", 0) < 0],
-            key=lambda x: x["_score"],
-            reverse=True,
-        )
-
-        # Return top_n buys (primary picks) + top sells as warnings
-        top_buys = buys[:top_n]
-        top_sells = sells[:min(3, len(sells))]
-
-        # Mark pick type
-        for r in top_buys:
-            r["pick_type"] = "BUY"
-        for r in top_sells:
-            r["pick_type"] = "SELL"
-
-        return top_buys + top_sells
+        return grouped["top_buy"] + grouped["top_sell"][:min(3, len(grouped["top_sell"]))]
 
     def get_after_hours_review(self) -> dict:
         """

@@ -25,6 +25,7 @@
         <div class="nav-status">
             <span id="market-status" class="status-badge"></span>
             <span id="model-status" class="status-badge loading">Loading models...</span>
+            <span id="model-load-detail" class="status-detail">Preparing model pipeline...</span>
         </div>
     </nav>
 
@@ -88,6 +89,11 @@
         <div class="top-picks-section hidden" id="top-picks-section">
             <h2 class="section-title">🎯 AI Top Picks</h2>
             <p class="section-subtitle">ML model predictions ranked by composite score</p>
+            <div class="top-picks-controls">
+                <button class="pick-filter-btn active" data-pick-filter="top_buy" onclick="setTopPickFilter('top_buy')">Top 10 BUY</button>
+                <button class="pick-filter-btn" data-pick-filter="top_sell" onclick="setTopPickFilter('top_sell')">Top 10 SELL</button>
+                <button class="pick-filter-btn" data-pick-filter="top_hold" onclick="setTopPickFilter('top_hold')">Top 10 HOLD</button>
+            </div>
             <div class="picks-grid" id="picks-grid">
                 <div class="loading-spinner"><div class="spinner"></div><p>Generating predictions...</p></div>
             </div>

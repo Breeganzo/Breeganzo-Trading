@@ -129,6 +129,9 @@ all_tickers: list[str] = []
 ticker_names: dict[str, str] = {}  # RELIANCE.NS → Reliance Industries
 models_loaded = False
 load_error = ""
+models_loading = False
+models_load_started_at: float | None = None
+models_load_completed_at: float | None = None
 
 
 def _clean_name(ticker: str) -> str:
@@ -163,16 +166,22 @@ def load_tickers():
 
 def load_models_background():
     """Load ML models in background thread so server starts fast."""
-    global predictor, models_loaded, load_error
+    global predictor, models_loaded, load_error, models_loading, models_load_started_at, models_load_completed_at
     try:
+        models_loading = True
+        models_load_started_at = time.time()
+        models_load_completed_at = None
         log.info("Loading ML models...")
         t0 = time.time()
         predictor = LivePredictor()
         predictor.load_models()
         elapsed = time.time() - t0
         models_loaded = True
+        models_loading = False
+        models_load_completed_at = time.time()
         log.info(f"All models loaded in {elapsed:.1f}s")
     except Exception as e:
+        models_loading = False
         load_error = str(e)
         log.error(f"Model loading failed: {e}")
 
@@ -309,10 +318,19 @@ def stock_detail(ticker: str):
 def api_status():
     """Return server + market status."""
     mkt = get_market_status()
+    load_elapsed = 0.0
+    if models_load_started_at:
+        ref = models_load_completed_at or time.time()
+        load_elapsed = max(0.0, ref - models_load_started_at)
+
+    load_progress = predictor.get_load_status() if predictor else {}
     return jsonify({
         "models_loaded": models_loaded,
+        "models_loading": models_loading,
         "load_error": load_error,
         "model_count": len(predictor.models) if predictor else 0,
+        "model_load_elapsed_sec": round(load_elapsed, 1),
+        "model_load_progress": load_progress,
         "market": {
             "status": mkt["status"],
             "description": mkt["description"],
@@ -391,8 +409,21 @@ def api_top_picks():
 
     sectors = request.args.getlist("sectors") or ["large_cap", "banking"]
     top_n = int(request.args.get("n", 5))
+    grouped = request.args.get("grouped", "").lower() in ("1", "true", "yes")
 
     try:
+        if grouped:
+            groups = predictor.predict_top_picks_grouped(sectors=sectors, top_n=top_n)
+            for group in groups.values():
+                for pick in group:
+                    if pick.get("current_price", 0) > 0:
+                        pick["name"] = ticker_names.get(pick.get("ticker", ""), "")
+            groups = {
+                key: [p for p in value if p.get("current_price", 0) > 0]
+                for key, value in groups.items()
+            }
+            return jsonify(groups)
+
         picks = predictor.predict_top_picks(sectors=sectors, top_n=top_n)
         picks = [p for p in picks if p.get("current_price", 0) > 0]
         for p in picks:
@@ -711,6 +742,8 @@ def api_tracking_feedback():
 # In-memory cache of opening prices captured at market open
 _opening_prices: dict[str, dict] = {}
 _opening_prices_date: str = ""
+_daily_prediction_baseline: dict[str, dict] = {}
+_daily_prediction_baseline_date: str = ""
 
 # Background-computed daily analysis cache (avoids blocking requests)
 _daily_analysis_cache: dict = {}
@@ -768,6 +801,71 @@ def _capture_opening_prices():
     log.info(f"Captured opening prices for {len(_opening_prices)} tickers")
 
 
+def _normalize_predicted_return_pct(value) -> float:
+    """Normalize return to a safe percent range [-50, 50]."""
+    try:
+        ret_pct = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if not np.isfinite(ret_pct):
+        return 0.0
+
+    if abs(ret_pct) > 500:
+        ret_pct = ret_pct / 100.0
+
+    return float(np.clip(ret_pct, -50.0, 50.0))
+
+
+def _get_prediction_for_ticker(
+    ticker: str,
+    fallback: dict | None = None,
+    allow_live_refresh: bool = False,
+    baseline_price: float = 0.0,
+) -> dict:
+    """Get a robust prediction object from log or predictor cache/live output."""
+    global _daily_prediction_baseline, _daily_prediction_baseline_date
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    if _daily_prediction_baseline_date != today:
+        _daily_prediction_baseline = {}
+        _daily_prediction_baseline_date = today
+
+    if ticker in _daily_prediction_baseline:
+        return dict(_daily_prediction_baseline[ticker])
+
+    pred = dict(fallback or {})
+
+    needs_refresh = (
+        not pred
+        or pred.get("predicted_price", 0) <= 0
+        or abs(pred.get("predicted_return", 0) or 0) > 50
+    )
+
+    if needs_refresh and allow_live_refresh and predictor is not None:
+        try:
+            refreshed = predictor.predict_single(ticker, use_cache=True)
+            if refreshed:
+                pred = refreshed
+        except Exception:
+            pass
+
+    if not pred:
+        pred = {
+            "predicted_return": 0.0,
+            "predicted_price": baseline_price,
+            "signal": "HOLD",
+            "confidence": 50.0,
+            "model_agreement": 50.0,
+            "risk_reward": 1.0,
+            "model_predictions": {},
+        }
+
+    pred_return = _normalize_predicted_return_pct(pred.get("predicted_return", 0))
+    pred["predicted_return"] = pred_return
+    _daily_prediction_baseline[ticker] = dict(pred)
+    return pred
+
+
 def _build_daily_analysis() -> dict:
     """Build the full daily analysis payload (called by background thread)."""
     _capture_opening_prices()
@@ -785,33 +883,58 @@ def _build_daily_analysis() -> dict:
             predictions = {}
 
     stocks = []
+    prediction_count = 0
+    refresh_budget = 0
     for ticker in all_tickers:
         if ticker.startswith("^") or ticker in ("USDINR=X", "GC=F", "CL=F"):
             continue
 
         curr = current_prices.get(ticker, {})
         opening = _opening_prices.get(ticker, {})
-        pred = predictions.get(ticker, {})
 
         current_price = curr.get("price", 0)
         open_price = opening.get("open", curr.get("open", 0))
         prev_close = opening.get("prev_close", curr.get("prev_close", 0))
-        predicted_price = pred.get("predicted_price", 0)
-        predicted_return = pred.get("predicted_return", 0)
-        signal = pred.get("signal", "")
-        confidence = pred.get("confidence", 0)
+        pred = _get_prediction_for_ticker(
+            ticker,
+            predictions.get(ticker, {}),
+            allow_live_refresh=refresh_budget > 0,
+            baseline_price=open_price if open_price > 0 else current_price,
+        )
+        if refresh_budget > 0 and ticker not in predictions:
+            refresh_budget -= 1
+        predicted_return = _normalize_predicted_return_pct(pred.get("predicted_return", 0))
+        signal = pred.get("signal", "HOLD")
+        confidence = float(pred.get("confidence", 50) or 50)
+
+        baseline_price = open_price if open_price > 0 else current_price
+        strategy_predicted_price = round(
+            baseline_price * (1 + predicted_return / 100.0),
+            2,
+        ) if baseline_price > 0 else 0.0
+
+        # AI price starts from strategy baseline; a later news-aware layer can adjust this.
+        ai_adjustment_pct = 0.0
+        if signal in ("BUY", "STRONG_BUY"):
+            ai_adjustment_pct = min(confidence / 200.0, 0.5)
+        elif signal in ("SELL", "STRONG_SELL"):
+            ai_adjustment_pct = -min(confidence / 200.0, 0.5)
+        ai_predicted_price = round(strategy_predicted_price * (1 + ai_adjustment_pct / 100.0), 2)
 
         if current_price <= 0 or open_price <= 0:
             continue
 
+        prediction_count += 1
+
         # Calculate percentage changes
         open_to_current_pct = ((current_price - open_price) / open_price * 100) if open_price > 0 else 0
-        open_to_predicted_pct = ((predicted_price - open_price) / open_price * 100) if open_price > 0 and predicted_price > 0 else 0
+        open_to_predicted_pct = ((strategy_predicted_price - open_price) / open_price * 100) if open_price > 0 and strategy_predicted_price > 0 else 0
+        open_to_ai_predicted_pct = ((ai_predicted_price - open_price) / open_price * 100) if open_price > 0 and ai_predicted_price > 0 else 0
         prev_to_current_pct = ((current_price - prev_close) / prev_close * 100) if prev_close > 0 else 0
 
         # Composite score for ranking (higher = better opportunity)
         # Factors: predicted return (40%), confidence (25%), model agreement (20%), R:R (15%)
-        model_agreement = pred.get("model_agreement", 50)
+        model_agreement = float(pred.get("model_agreement", 50) or 50)
         risk_reward = pred.get("risk_reward", 1.0) if pred.get("risk_reward") else 1.0
 
         score = (
@@ -827,11 +950,14 @@ def _build_daily_analysis() -> dict:
             "ticker": ticker,
             "name": ticker_names.get(ticker, _clean_name(ticker)),
             "open_price": round(open_price, 2),
-            "predicted_price": round(predicted_price, 2),
+            "predicted_price": round(strategy_predicted_price, 2),
+            "strategy_predicted_price": round(strategy_predicted_price, 2),
+            "ai_predicted_price": round(ai_predicted_price, 2),
             "current_price": round(current_price, 2),
             "prev_close": round(prev_close, 2),
             "open_to_current_pct": round(open_to_current_pct, 3),
             "open_to_predicted_pct": round(open_to_predicted_pct, 3),
+            "open_to_ai_predicted_pct": round(open_to_ai_predicted_pct, 3),
             "prev_to_current_pct": round(prev_to_current_pct, 3),
             "predicted_return": round(predicted_return, 3),
             "signal": signal,
@@ -856,6 +982,10 @@ def _build_daily_analysis() -> dict:
     return {
         "date": today_str,
         "total_stocks": len(stocks),
+        "prediction_coverage": {
+            "with_predictions": prediction_count,
+            "coverage_pct": round((prediction_count / max(len(stocks), 1)) * 100, 1),
+        },
         "market_summary": {
             "gainers": len(gainers),
             "losers": len(losers),
@@ -943,19 +1073,22 @@ def api_price_tracker(ticker: str):
             pass
 
     current_price = curr.get("price", 0)
-    predicted_price = pred.get("predicted_price", 0)
-    predicted_return = pred.get("predicted_return", 0)
+    predicted_return = _normalize_predicted_return_pct(pred.get("predicted_return", 0))
+    strategy_predicted_price = round(open_price * (1 + predicted_return / 100.0), 2) if open_price > 0 else pred.get("predicted_price", 0)
+    ai_predicted_price = strategy_predicted_price
     signal = pred.get("signal", "")
     confidence = pred.get("confidence", 0)
 
     open_to_current_pct = ((current_price - open_price) / open_price * 100) if open_price > 0 else 0
-    open_to_predicted_pct = ((predicted_price - open_price) / open_price * 100) if open_price > 0 and predicted_price > 0 else 0
+    open_to_predicted_pct = ((strategy_predicted_price - open_price) / open_price * 100) if open_price > 0 and strategy_predicted_price > 0 else 0
 
     return jsonify({
         "ticker": ticker,
         "name": ticker_names.get(ticker, _clean_name(ticker)),
         "open_price": round(open_price, 2),
-        "predicted_price": round(predicted_price, 2),
+        "predicted_price": round(strategy_predicted_price, 2),
+        "strategy_predicted_price": round(strategy_predicted_price, 2),
+        "ai_predicted_price": round(ai_predicted_price, 2),
         "current_price": round(current_price, 2),
         "prev_close": round(prev_close, 2),
         "open_to_current_pct": round(open_to_current_pct, 3),
