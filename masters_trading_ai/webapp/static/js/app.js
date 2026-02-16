@@ -93,7 +93,7 @@ async function loadIndexPrices() {
 
         if (data['^NSEI']) {
             const n = data['^NSEI'];
-            document.getElementById('nifty-price').textContent = `₹${formatNumber(n.price)}`;
+            document.getElementById('nifty-price').textContent = formatPrice(n.price);
             const nChange = document.getElementById('nifty-change');
             nChange.textContent = `${n.change >= 0 ? '+' : ''}${n.change} (${n.change_pct}%)`;
             nChange.className = `banner-change ${n.change >= 0 ? 'up' : 'down'}`;
@@ -101,7 +101,7 @@ async function loadIndexPrices() {
 
         if (data['^NSEBANK']) {
             const bn = data['^NSEBANK'];
-            document.getElementById('banknifty-price').textContent = `₹${formatNumber(bn.price)}`;
+            document.getElementById('banknifty-price').textContent = formatPrice(bn.price);
             const bnChange = document.getElementById('banknifty-change');
             bnChange.textContent = `${bn.change >= 0 ? '+' : ''}${bn.change} (${bn.change_pct}%)`;
             bnChange.className = `banner-change ${bn.change >= 0 ? 'up' : 'down'}`;
@@ -305,12 +305,12 @@ function renderStockGrid(sector) {
                 </div>
                 ${signalBadge}
             </div>
-            <div class="stock-card-bottom">
-                <div class="stock-card-price">
-                    <span class="price">₹${formatNumber(price)}</span>
-                    <span class="change ${direction}">${sign}${change.toFixed(2)} (${changePct.toFixed(2)}%)</span>
-                </div>
-                ${predRow}
+                <div class="stock-card-bottom">
+                    <div class="stock-card-price">
+                        <span class="price">${formatPrice(price)}</span>
+                        <span class="change ${direction}">${sign}${change.toFixed(2)} (${changePct.toFixed(2)}%)</span>
+                    </div>
+                    ${predRow}
             </div>
         </a>`;
     }
@@ -409,16 +409,16 @@ async function showTopAnalysis() {
                 <div class="top10-prices">
                     <div class="top10-price-item">
                         <span class="label">Open</span>
-                        <span class="value">₹${formatNumber(s.open_price)}</span>
+                        <span class="value">${formatPrice(s.open_price)}</span>
                     </div>
                     <div class="top10-price-item predicted">
                         <span class="label">AI Predicted</span>
-                        <span class="value ${isUp ? 'up-color' : 'down-color'}">₹${formatNumber(s.predicted_price)}</span>
+                        <span class="value ${isUp ? 'up-color' : 'down-color'}">${formatPrice(s.predicted_price)}</span>
                         <span class="pct ${isUp ? 'up-color' : 'down-color'}">${predSign}${s.open_to_predicted_pct}%</span>
                     </div>
                     <div class="top10-price-item current">
                         <span class="label">Current</span>
-                        <span class="value">₹${formatNumber(s.current_price)}</span>
+                        <span class="value">${formatPrice(s.current_price)}</span>
                         <span class="pct ${s.open_to_current_pct >= 0 ? 'up-color' : 'down-color'}">${currSign}${s.open_to_current_pct}%</span>
                     </div>
                 </div>
@@ -494,7 +494,7 @@ async function showTopPicks() {
                 <div class="pick-details">
                     <div class="pick-detail">
                         <span class="label">Current Price</span>
-                        <span class="value">₹${formatNumber(pick.current_price)}</span>
+                        <span class="value">${formatPrice(pick.current_price)}</span>
                     </div>
                     <div class="pick-detail">
                         <span class="label">Predicted Return</span>
@@ -502,7 +502,7 @@ async function showTopPicks() {
                     </div>
                     <div class="pick-detail">
                         <span class="label">Target</span>
-                        <span class="value">₹${formatNumber(pick.target_price)}</span>
+                        <span class="value">${formatPrice(pick.target_price || pick.predicted_price)}</span>
                     </div>
                     <div class="pick-detail">
                         <span class="label">Confidence</span>
@@ -613,8 +613,8 @@ async function loadExpectedVsActual() {
                 <td><strong>${r.name}</strong><br><span class="muted-text">${r.ticker}</span></td>
                 <td>${r.signal}</td>
                 <td class="${predColor}">${r.predicted_return_pct >= 0 ? '+' : ''}${r.predicted_return_pct}%</td>
-                <td>₹${formatNumber(r.predicted_price)}</td>
-                <td>₹${formatNumber(r.actual_price)}</td>
+                <td>${formatPrice(r.predicted_price)}</td>
+                <td>${formatPrice(r.actual_price)}</td>
                 <td class="${actColor}">${r.actual_return_pct >= 0 ? '+' : ''}${r.actual_return_pct}%</td>
                 <td><span class="direction-badge ${dirClass}">${dirText}</span></td>
                 <td class="${alpColor}">${r.alpha_pct >= 0 ? '+' : ''}${r.alpha_pct}%</td>
@@ -648,4 +648,12 @@ function formatNumber(n) {
     if (n >= 10000000) return (n / 10000000).toFixed(2) + ' Cr';
     if (n >= 100000) return (n / 100000).toFixed(2) + ' L';
     return n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+}
+
+function formatPrice(n) {
+    const value = Number(n);
+    if (!Number.isFinite(value) || value <= 0) {
+        return '—';
+    }
+    return `₹${formatNumber(value)}`;
 }

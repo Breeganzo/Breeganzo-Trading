@@ -394,6 +394,7 @@ def api_top_picks():
 
     try:
         picks = predictor.predict_top_picks(sectors=sectors, top_n=top_n)
+        picks = [p for p in picks if p.get("current_price", 0) > 0]
         for p in picks:
             p["name"] = ticker_names.get(p.get("ticker", ""), "")
         return jsonify(picks)

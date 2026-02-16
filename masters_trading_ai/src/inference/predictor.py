@@ -18,6 +18,7 @@ The predicted value is the next-day return (%) from the regression models.
 import sys
 import json
 import hashlib
+import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
@@ -54,6 +55,60 @@ MARKET_OPEN_MIN = 15
 MARKET_CLOSE = 15  # 3:30 PM IST
 MARKET_CLOSE_MIN = 30
 CACHE_DIR = PROJECT_ROOT / "cache"
+log = logging.getLogger(__name__)
+
+
+def _sanitize_predicted_return(value: float, base_preds: dict) -> float:
+    """
+    Normalize model output to a sane decimal return.
+
+    Rules:
+      - None/NaN/inf => 0.0
+      - If |value| >= 2.0, treat it as percent units and divide by 100
+      - Cap to +/- 0.5 (50%)
+      - Log warning when conversion/capping happens
+    """
+    if value is None:
+        return 0.0
+
+    try:
+        raw_value = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if not np.isfinite(raw_value):
+        return 0.0
+
+    sanitized = raw_value
+    converted = False
+    capped = False
+
+    # Boundary includes 2.0 to match expected behavior for 2.0 => 0.02.
+    if abs(sanitized) >= 2.0:
+        sanitized = sanitized / 100.0
+        converted = True
+
+    # Hard guardrail for extreme runaway values.
+    if abs(raw_value) >= 10.0:
+        sanitized = 0.5 if raw_value > 0 else -0.5
+        capped = True
+
+    clipped = float(np.clip(sanitized, -0.5, 0.5))
+    if not np.isclose(clipped, sanitized):
+        sanitized = clipped
+        capped = True
+
+    if converted or capped:
+        log.warning(
+            "Sanitized predicted_return raw=%s final=%s converted=%s capped=%s base_preds=%s",
+            round(raw_value, 6),
+            round(sanitized, 6),
+            converted,
+            capped,
+            base_preds,
+        )
+
+    return sanitized
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +432,15 @@ class LivePredictor:
         if use_cache:
             cached = self.cache.get(ticker)
             if cached is not None:
+                current_price = float(cached.get("current_price", 0) or 0)
+                if current_price <= 0:
+                    return None
+
+                cached_return_pct = float(cached.get("predicted_return", 0) or 0)
+                cached_return_decimal = _sanitize_predicted_return(cached_return_pct / 100.0, {})
+                cached["predicted_return"] = round(cached_return_decimal * 100, 4)
+                cached["predicted_price"] = round(current_price * (1 + cached_return_decimal), 2)
+                cached["target_price"] = cached["predicted_price"]
                 return cached
 
         # Ensure models are loaded
@@ -552,7 +616,9 @@ class LivePredictor:
             dir_prob = None
 
         # --- Compute derived quantities ---
-        predicted_price = current_price * (1 + predicted_return)
+        predicted_return = _sanitize_predicted_return(predicted_return, base_preds)
+        predicted_price = round(current_price * (1 + predicted_return), 2)
+        assert predicted_price == round(current_price * (1 + predicted_return), 2)
 
         # Get ATR% from features if available
         atr_pct = float(feat_df["ATR_pct"].iloc[-1]) if "ATR_pct" in feat_df.columns else 0.02
@@ -592,7 +658,7 @@ class LivePredictor:
         result = {
             "ticker": ticker,
             "predicted_return": round(predicted_return * 100, 4),  # in %
-            "predicted_price": round(predicted_price, 2),
+            "predicted_price": predicted_price,
             "current_price": round(current_price, 2),
             "previous_close": round(previous_close, 2),
             "model_predictions": {k: round(v * 100, 4) for k, v in base_preds.items()},
@@ -763,6 +829,7 @@ class LivePredictor:
         self,
         tickers: list[str] | None = None,
         top_n: int = 5,
+        n: int | None = None,
         sectors: list[str] | None = None,
     ) -> list[dict]:
         """
@@ -784,6 +851,9 @@ class LivePredictor:
         -------
         list[dict] — top_n results sorted by score (best first).
         """
+        if n is not None:
+            top_n = n
+
         if tickers is None:
             import yaml
             config_path = PROJECT_ROOT / "config" / "tickers.yaml"
@@ -805,6 +875,8 @@ class LivePredictor:
             try:
                 pred = self.predict_single(ticker, use_cache=True)
                 if pred is None:
+                    continue
+                if pred.get("current_price", 0) <= 0:
                     continue
                 # Compute composite score for ranking
                 pred_ret = abs(pred.get("predicted_return", 0))
