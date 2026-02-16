@@ -34,7 +34,7 @@ curl -s 'http://localhost:5001/api/simulate/portfolio' | jq '.cash,.equity_value
 curl -s -X POST 'http://localhost:5001/api/simulate/trade' \
   -H 'Content-Type: application/json' \
   -d '{"action":"AUTO_CHECK","auto_buy":true}' | jq '.triggered_count,.auto_buy_events,.events'
-curl -s 'http://localhost:5001/api/groq-status' | jq '.degraded_mode,.degraded_reason,.degraded_until_iso'
+curl -s 'http://localhost:5001/api/groq-status' | jq '.degraded_mode,.degraded_reason,.degraded_until_iso,.key_pool_size,.active_key_slot'
 ```
 
 ## 4) Expected vs Actual freeze checks

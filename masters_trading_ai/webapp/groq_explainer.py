@@ -13,6 +13,7 @@ import json
 import time
 import hashlib
 import re
+import warnings
 import threading
 import contextvars
 from collections import defaultdict, deque
@@ -32,12 +33,45 @@ except ImportError:
 
 # ── Config ──────────────────────────────────────────
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-if not GROQ_API_KEY:
-    import warnings
+GROQ_API_KEY_2 = os.environ.get("GROQ_API_KEY_2", "")
+GROQ_API_KEY_3 = os.environ.get("GROQ_API_KEY_3", "")
+GROQ_API_KEYS = os.environ.get("GROQ_API_KEYS", "")
+GROQ_KEY_ROTATION_ENABLED = os.environ.get(
+    "GROQ_KEY_ROTATION_ENABLED", "1"
+).lower() not in (
+    "0",
+    "false",
+    "no",
+)
+GROQ_KEY_COOLDOWN_SEC = max(30, int(os.environ.get("GROQ_KEY_COOLDOWN_SEC", "300")))
 
+
+def _load_groq_keys() -> list[str]:
+    candidates: list[str] = []
+    for raw in (GROQ_API_KEY, GROQ_API_KEY_2, GROQ_API_KEY_3):
+        v = str(raw or "").strip()
+        if v:
+            candidates.append(v)
+    if GROQ_API_KEYS:
+        for raw in re.split(r"[,\n;]+", str(GROQ_API_KEYS)):
+            v = str(raw or "").strip()
+            if v:
+                candidates.append(v)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for key in candidates:
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(key)
+    return unique
+
+
+_groq_keys: list[str] = _load_groq_keys()
+if not _groq_keys:
     warnings.warn(
-        "GROQ_API_KEY not set in .env — AI explanations will be unavailable. "
-        "Get a key at https://console.groq.com/keys",
+        "No GROQ_API_KEY configured (.env). AI explanations will be unavailable. "
+        "Set GROQ_API_KEY (and optional GROQ_API_KEY_2/GROQ_API_KEY_3).",
         stacklevel=2,
     )
 GROQ_MODEL = "llama-3.3-70b-versatile"
@@ -60,6 +94,10 @@ _rate_limit_lock = threading.Lock()
 _endpoint_locks: dict[str, threading.Lock] = {}
 _global_call_ts: deque[float] = deque()
 _endpoint_call_ts: dict[str, deque[float]] = defaultdict(deque)
+_key_lock = threading.Lock()
+_key_cooldown_until: dict[int, float] = {}
+_key_last_429_at: dict[int, float] = {}
+_active_key_index = 0
 _groq_endpoint_ctx = contextvars.ContextVar("groq_endpoint", default="global")
 _degraded_until = 0.0
 _degraded_reason = ""
@@ -68,14 +106,45 @@ _last_error = ""
 _last_success_at = 0.0
 
 
-def _get_client():
-    """Get Groq client instance or None if unavailable."""
+def _get_client_for_key(api_key: str):
+    """Get Groq client instance for a specific key."""
     if Groq is None:
         return None
     try:
-        return Groq(api_key=GROQ_API_KEY)
+        return Groq(api_key=api_key)
     except Exception:
         return None
+
+
+def _ordered_key_indices(now_ts: float) -> list[int]:
+    """Return key indices in rotation order, skipping cooled-down keys first."""
+    if not _groq_keys:
+        return []
+    n = len(_groq_keys)
+    if n == 1 or not GROQ_KEY_ROTATION_ENABLED:
+        return [0]
+
+    with _key_lock:
+        start = _active_key_index % n
+        cooldown_map = dict(_key_cooldown_until)
+
+    order = [(start + offset) % n for offset in range(n)]
+    available = [idx for idx in order if now_ts >= cooldown_map.get(idx, 0.0)]
+    cooled = [idx for idx in order if idx not in available]
+    return available + cooled
+
+
+def _mark_key_429(idx: int, now_ts: float) -> None:
+    with _key_lock:
+        _key_cooldown_until[idx] = now_ts + GROQ_KEY_COOLDOWN_SEC
+        _key_last_429_at[idx] = now_ts
+
+
+def _set_active_key(idx: int) -> None:
+    global _active_key_index
+    with _key_lock:
+        if _groq_keys:
+            _active_key_index = idx % len(_groq_keys)
 
 
 def _cache_key(prompt: str) -> str:
@@ -178,6 +247,27 @@ def get_groq_system_status() -> dict:
         endpoint = _groq_endpoint_ctx.get() or "global"
         endpoint_used = len(_endpoint_call_ts.get(endpoint, deque()))
         global_used = len(_global_call_ts)
+    with _key_lock:
+        active_slot = (_active_key_index + 1) if _groq_keys else None
+        cooldowns = [
+            {
+                "slot": idx + 1,
+                "cooldown_until_iso": (
+                    datetime.fromtimestamp(until).isoformat()
+                    if until > now_ts
+                    else None
+                ),
+                "cooldown_remaining_sec": (
+                    int(max(0.0, until - now_ts)) if until > now_ts else 0
+                ),
+                "last_429_iso": (
+                    datetime.fromtimestamp(_key_last_429_at.get(idx, 0)).isoformat()
+                    if _key_last_429_at.get(idx, 0)
+                    else None
+                ),
+            }
+            for idx, until in sorted(_key_cooldown_until.items())
+        ]
     degraded = now_ts < _degraded_until
     return {
         "degraded_mode": degraded,
@@ -198,12 +288,16 @@ def get_groq_system_status() -> dict:
         "endpoint_limit_per_min": GROQ_ENDPOINT_MAX_PER_MIN,
         "global_used_last_min": global_used,
         "endpoint_used_last_min": endpoint_used,
+        "key_rotation_enabled": bool(GROQ_KEY_ROTATION_ENABLED),
+        "key_pool_size": len(_groq_keys),
+        "active_key_slot": active_slot,
+        "key_cooldowns": cooldowns,
     }
 
 
 def _call_groq(prompt: str, max_tokens: int = 500) -> str:
-    """Call Groq API with strict queueing, hard caps, and cache fallback."""
-    global _last_call_time, _last_success_at
+    """Call Groq API with queueing, key-rotation failover, and cache fallback."""
+    global _last_call_time, _last_success_at, _degraded_until, _degraded_reason
 
     key = _cache_key(prompt)
     cached = _get_cached(key)
@@ -218,9 +312,8 @@ def _call_groq(prompt: str, max_tokens: int = 500) -> str:
             or "Groq degraded mode active (cached-only fallback). Please retry shortly."
         )
 
-    client = _get_client()
-    if client is None:
-        return "Groq API not available. Install: pip install groq"
+    if not _groq_keys:
+        return "Groq API not available. Set GROQ_API_KEY in .env"
 
     with _rate_limit_lock:
         endpoint_lock = _endpoint_locks.setdefault(endpoint, threading.Lock())
@@ -238,46 +331,86 @@ def _call_groq(prompt: str, max_tokens: int = 500) -> str:
         if elapsed < MIN_CALL_INTERVAL:
             time.sleep(MIN_CALL_INTERVAL - elapsed)
 
-        try:
-            resp = client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a concise financial analyst assistant for an Indian stock trading app. "
-                            "Give clear, actionable explanations in 3-5 sentences. "
-                            "Always mention what the current value suggests the investor should consider. "
-                            "Use simple language. Be specific about implications. "
-                            "Never give definitive buy/sell advice — always say 'suggests' or 'indicates'. "
-                            "Format: start with a one-line definition, then explain current value implications."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=max_tokens,
-                temperature=0.3,
-            )
-            _last_call_time = time.time()
-            _last_success_at = _last_call_time
-            text = resp.choices[0].message.content.strip()
-            _set_cache(key, text)
-            return text
-        except Exception as e:
-            err = str(e)
-            lower_err = err.lower()
-            is_429 = "429" in err or "rate limit" in lower_err
-            _mark_degraded(
-                "upstream_429" if is_429 else "upstream_error",
-                error=err,
-                is_429=is_429,
-            )
+        last_err = ""
+        saw_429 = False
+        attempts = 0
+        cooling_skips = 0
+        now_for_keys = time.time()
+        for idx in _ordered_key_indices(now_for_keys):
+            with _key_lock:
+                cooldown_until = _key_cooldown_until.get(idx, 0.0)
+            if now_for_keys < cooldown_until:
+                cooling_skips += 1
+                continue
+            client = _get_client_for_key(_groq_keys[idx])
+            if client is None:
+                continue
+            try:
+                attempts += 1
+                resp = client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a concise financial analyst assistant for an Indian stock trading app. "
+                                "Give clear, actionable explanations in 3-5 sentences. "
+                                "Always mention what the current value suggests the investor should consider. "
+                                "Use simple language. Be specific about implications. "
+                                "Never give definitive buy/sell advice — always say 'suggests' or 'indicates'. "
+                                "Format: start with a one-line definition, then explain current value implications."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=0.3,
+                )
+                _last_call_time = time.time()
+                _last_success_at = _last_call_time
+                _degraded_until = 0.0
+                _degraded_reason = ""
+                _set_active_key((idx + 1) % len(_groq_keys))
+                text = resp.choices[0].message.content.strip()
+                _set_cache(key, text)
+                return text
+            except Exception as e:
+                err = str(e)
+                last_err = err
+                lower_err = err.lower()
+                is_429 = "429" in err or "rate limit" in lower_err
+                if is_429:
+                    saw_429 = True
+                    _mark_key_429(idx, time.time())
+                    if GROQ_KEY_ROTATION_ENABLED and len(_groq_keys) > 1:
+                        continue
+                # Non-429 errors can still fail over to another key.
+                if GROQ_KEY_ROTATION_ENABLED and len(_groq_keys) > 1:
+                    continue
+                break
+
+        if attempts == 0 and cooling_skips > 0:
+            _mark_degraded("all_keys_cooling_down")
             cached_fallback = _get_cached(key)
             if cached_fallback:
                 return cached_fallback
-            if is_429:
-                return "Groq rate-limited (429). Degraded mode enabled with cached-only fallback."
-            return f"Groq API error: {err}"
+            return (
+                "Groq keys are cooling down after rate limits. Using cached-only mode."
+            )
+
+        if saw_429:
+            _mark_degraded("upstream_429", error=last_err, is_429=True)
+        else:
+            _mark_degraded("upstream_error", error=last_err, is_429=False)
+        cached_fallback = _get_cached(key)
+        if cached_fallback:
+            return cached_fallback
+        if saw_429:
+            return (
+                "Groq rate-limited (429) across available keys. "
+                "Degraded mode enabled with cached-only fallback."
+            )
+        return f"Groq API error: {last_err or 'unknown error'}"
 
 
 # ════════════════════════════════════════════════════
