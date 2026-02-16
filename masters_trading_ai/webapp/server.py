@@ -15,6 +15,7 @@ import csv
 import time
 import logging
 import threading
+from uuid import uuid4
 from io import StringIO
 from pathlib import Path
 from datetime import datetime, date, timedelta
@@ -57,6 +58,7 @@ from webapp.groq_explainer import (
     get_stock_overview, get_news_sentiment,
     explain_risk_term, get_groq_price_forecast,
     explain_model, stock_chat_response, portfolio_profit_suggestion,
+    suggest_ticker_shortlist, review_trade_plan, ai_risk_assessment,
 )
 from webapp.prediction_tracker import PredictionTracker
 
@@ -391,6 +393,174 @@ def _mark_ticker_recovered(ticker: str, source: str = "yfinance") -> None:
         _save_delisted_registry_unlocked(registry)
 
 
+def _prune_delisted_registry() -> dict:
+    """
+    Remove noisy batch artifacts from delisted registry.
+    Keep:
+      - symbols not in configured universe (e.g., accidental dummy entries),
+      - entries created from explicit single-ticker failures.
+    """
+    with _delisted_lock:
+        registry = _load_delisted_registry_unlocked()
+        if not registry:
+            return {"changed": False, "removed": 0, "remaining": 0}
+
+        allowed_universe = set(all_tickers)
+        kept: dict[str, dict] = {}
+        removed = 0
+        for ticker, row in registry.items():
+            src = str(row.get("last_source", ""))
+            if ticker not in allowed_universe and not ticker.startswith("^"):
+                kept[ticker] = row
+                continue
+            if src == "yfinance_single":
+                kept[ticker] = row
+                continue
+            removed += 1
+
+        changed = len(kept) != len(registry)
+        if changed:
+            _save_delisted_registry_unlocked(kept)
+        return {"changed": changed, "removed": removed, "remaining": len(kept)}
+
+
+def _is_tradeable_ticker(ticker: str) -> bool:
+    t = str(ticker or "").strip().upper()
+    if not t:
+        return False
+    if t in set(all_tickers) or t in ticker_names:
+        return True
+    # Test/dev fallback before ticker universe is loaded.
+    if not all_tickers and (t.endswith(".NS") or t.endswith(".BO")) and len(t) >= 4:
+        return True
+    return False
+
+
+def _new_trade_entry(ticker: str, side: str, qty: float, price: float) -> dict:
+    return {
+        "id": uuid4().hex[:12],
+        "ticker": ticker,
+        "name": ticker_names.get(ticker, _clean_name(ticker)),
+        "side": side,
+        "quantity": round(float(qty), 4),
+        "price": round(float(price), 2),
+        "timestamp": datetime.now(IST).isoformat(),
+    }
+
+
+def _ensure_trade_ids(trades: list[dict]) -> bool:
+    """Backfill IDs for older trade rows. Returns True if modified."""
+    changed = False
+    seen: set[str] = set()
+    for tr in trades:
+        tid = str(tr.get("id", "")).strip()
+        if not tid or tid in seen:
+            tr["id"] = uuid4().hex[:12]
+            tid = tr["id"]
+            changed = True
+        seen.add(tid)
+    return changed
+
+
+def _validate_trade_sequence(trades: list[dict]) -> tuple[bool, str]:
+    """Simple balance validation: cumulative SELL qty cannot exceed BUY qty per ticker."""
+    qty_open: dict[str, float] = {}
+    for tr in trades:
+        ticker = str(tr.get("ticker", "")).strip().upper()
+        side = str(tr.get("side", "")).strip().upper()
+        if not ticker or side not in {"BUY", "SELL"}:
+            return False, "Invalid trade row"
+        try:
+            qty = float(tr.get("quantity", 0) or 0)
+            price = float(tr.get("price", 0) or 0)
+        except Exception:
+            return False, f"Invalid quantity/price for {ticker}"
+        if qty <= 0 or price <= 0:
+            return False, f"Non-positive quantity/price for {ticker}"
+        if side == "BUY":
+            qty_open[ticker] = qty_open.get(ticker, 0.0) + qty
+        else:
+            have = qty_open.get(ticker, 0.0)
+            if have + 1e-9 < qty:
+                return False, f"SELL exceeds open quantity for {ticker}"
+            qty_open[ticker] = have - qty
+    return True, ""
+
+
+def _sanitize_portfolio_storage() -> dict:
+    """
+    Remove invalid/dummy/unknown portfolio rows and backfill missing trade IDs.
+    This prevents placeholders like ABC.NS/B.NS from polluting portfolio logic.
+    """
+    trades = _read_portfolio_trades()
+    holdings = _read_portfolio()
+    removed_trade_rows = 0
+    removed_holding_rows = 0
+    changed = False
+
+    valid_trades: list[dict] = []
+    for tr in trades:
+        ticker = str(tr.get("ticker", "")).strip().upper()
+        side = str(tr.get("side", "")).strip().upper()
+        try:
+            qty = float(tr.get("quantity", 0) or 0)
+            price = float(tr.get("price", 0) or 0)
+        except Exception:
+            qty, price = 0, 0
+        if not _is_tradeable_ticker(ticker) or side not in {"BUY", "SELL"} or qty <= 0 or price <= 0:
+            removed_trade_rows += 1
+            changed = True
+            continue
+        tr["ticker"] = ticker
+        tr["side"] = side
+        tr["name"] = ticker_names.get(ticker, _clean_name(ticker))
+        valid_trades.append(tr)
+
+    if _ensure_trade_ids(valid_trades):
+        changed = True
+
+    ok, _err = _validate_trade_sequence(valid_trades)
+    if not ok:
+        # Keep only BUY rows if sequence got corrupted beyond recovery.
+        rebuilt = [t for t in valid_trades if t.get("side") == "BUY"]
+        if len(rebuilt) != len(valid_trades):
+            changed = True
+            removed_trade_rows += (len(valid_trades) - len(rebuilt))
+            valid_trades = rebuilt
+
+    valid_holdings: list[dict] = []
+    for row in holdings:
+        ticker = str(row.get("ticker", "")).strip().upper()
+        if not _is_tradeable_ticker(ticker):
+            removed_holding_rows += 1
+            changed = True
+            continue
+        row["ticker"] = ticker
+        row["name"] = ticker_names.get(ticker, _clean_name(ticker))
+        valid_holdings.append(row)
+
+    if changed:
+        _write_portfolio_trades(valid_trades)
+        summary = _portfolio_summary_from_trades(valid_trades)
+        _write_portfolio([
+            {
+                "ticker": row["ticker"],
+                "name": row["name"],
+                "quantity": row["quantity"],
+                "entry_price": row["avg_buy_price"],
+                "updated_at": datetime.now(IST).isoformat(),
+            }
+            for row in summary["positions"]
+        ])
+
+    return {
+        "changed": changed,
+        "removed_trade_rows": removed_trade_rows,
+        "removed_holding_rows": removed_holding_rows,
+        "remaining_trades": len(valid_trades),
+    }
+
+
 def _portfolio_summary_from_trades(trades: list[dict], include_live_prices: bool = True) -> dict:
     positions: dict[str, dict] = {}
     realized_total = 0.0
@@ -460,61 +630,64 @@ def _portfolio_summary_from_trades(trades: list[dict], include_live_prices: bool
 def _get_live_prices_batch(tickers: list[str]) -> dict:
     """Get live prices for multiple tickers using yfinance."""
     import yfinance as yf
-    result = {}
+    result: dict[str, dict] = {}
+
+    clean_tickers = [str(t).strip().upper() for t in tickers if str(t).strip()]
+    if not clean_tickers:
+        return result
+
+    def _extract_field_series(df: pd.DataFrame, field: str, ticker: str):
+        if isinstance(df.columns, pd.MultiIndex):
+            lvl0 = df.columns.get_level_values(0)
+            if field not in lvl0:
+                return None
+            obj = df[field]
+            if isinstance(obj, pd.DataFrame):
+                if ticker in obj.columns:
+                    return obj[ticker]
+                if obj.shape[1] == 1:
+                    return obj.iloc[:, 0]
+                return None
+            return obj
+        return df[field] if field in df.columns else None
+
     try:
         data = yf.download(
-            tickers, period="2d", interval="1d",
+            clean_tickers if len(clean_tickers) > 1 else clean_tickers[0],
+            period="2d",
+            interval="1d",
             progress=False, auto_adjust=True, threads=True,
         )
         if data is None or data.empty:
-            if len(tickers) == 1 and tickers[0]:
-                _record_unavailable_ticker(tickers[0], "empty_batch_data", "yfinance_batch")
+            if len(clean_tickers) == 1:
+                _record_unavailable_ticker(clean_tickers[0], "empty_batch_data", "yfinance_single")
             return result
 
         successful: set[str] = set()
-        for ticker in tickers:
+        for ticker in clean_tickers:
             try:
-                if len(tickers) == 1:
-                    if isinstance(data.columns, pd.MultiIndex):
-                        close_col = data["Close"] if "Close" in data.columns.get_level_values(0) else None
-                    else:
-                        close_col = data["Close"] if "Close" in data.columns else None
-                else:
-                    if not isinstance(data.columns, pd.MultiIndex):
-                        close_col = None
-                    elif "Close" in data.columns.get_level_values(0) and ticker in data["Close"].columns:
-                        close_col = data["Close"][ticker]
-                    else:
-                        close_col = None
+                close_col = _extract_field_series(data, "Close", ticker)
 
                 if close_col is None or close_col.dropna().empty:
-                    _record_unavailable_ticker(ticker, "missing_close_series", "yfinance_batch")
+                    if len(clean_tickers) == 1:
+                        _record_unavailable_ticker(ticker, "missing_close_series", "yfinance_single")
                     continue
 
                 close_vals = close_col.dropna()
-                current = float(close_vals.values[-1])
-                prev = float(close_vals.values[-2]) if len(close_vals) >= 2 else current
+                current = float(close_vals.iloc[-1])
+                prev = float(close_vals.iloc[-2]) if len(close_vals) >= 2 else current
                 change = current - prev
                 change_pct = (change / prev * 100) if prev != 0 else 0
 
-                # Get volume, high, low, open
-                if len(tickers) == 1:
-                    if isinstance(data.columns, pd.MultiIndex):
-                        lvl0 = data.columns.get_level_values(0)
-                        vol = float(data["Volume"].dropna().values[-1]) if "Volume" in lvl0 else 0
-                        high = float(data["High"].dropna().values[-1]) if "High" in lvl0 else current
-                        low = float(data["Low"].dropna().values[-1]) if "Low" in lvl0 else current
-                        open_p = float(data["Open"].dropna().values[-1]) if "Open" in lvl0 else current
-                    else:
-                        vol = float(data["Volume"].dropna().values[-1]) if "Volume" in data.columns else 0
-                        high = float(data["High"].dropna().values[-1]) if "High" in data.columns else current
-                        low = float(data["Low"].dropna().values[-1]) if "Low" in data.columns else current
-                        open_p = float(data["Open"].dropna().values[-1]) if "Open" in data.columns else current
-                else:
-                    vol = float(data["Volume"][ticker].dropna().values[-1]) if "Volume" in data.columns.get_level_values(0) else 0
-                    high = float(data["High"][ticker].dropna().values[-1]) if "High" in data.columns.get_level_values(0) else current
-                    low = float(data["Low"][ticker].dropna().values[-1]) if "Low" in data.columns.get_level_values(0) else current
-                    open_p = float(data["Open"][ticker].dropna().values[-1]) if "Open" in data.columns.get_level_values(0) else current
+                vol_col = _extract_field_series(data, "Volume", ticker)
+                high_col = _extract_field_series(data, "High", ticker)
+                low_col = _extract_field_series(data, "Low", ticker)
+                open_col = _extract_field_series(data, "Open", ticker)
+
+                vol = float(vol_col.dropna().iloc[-1]) if vol_col is not None and not vol_col.dropna().empty else 0
+                high = float(high_col.dropna().iloc[-1]) if high_col is not None and not high_col.dropna().empty else current
+                low = float(low_col.dropna().iloc[-1]) if low_col is not None and not low_col.dropna().empty else current
+                open_p = float(open_col.dropna().iloc[-1]) if open_col is not None and not open_col.dropna().empty else current
 
                 result[ticker] = {
                     "price": round(current, 2),
@@ -527,17 +700,16 @@ def _get_live_prices_batch(tickers: list[str]) -> dict:
                     "open": round(open_p, 2),
                 }
                 successful.add(ticker)
-                _mark_ticker_recovered(ticker, "yfinance_batch")
+                if len(clean_tickers) == 1:
+                    _mark_ticker_recovered(ticker, "yfinance_single")
             except Exception as exc:
                 log.debug(f"Price fetch failed for {ticker}: {exc}")
-                _record_unavailable_ticker(ticker, f"price_fetch_exception:{type(exc).__name__}", "yfinance_batch")
+                if len(clean_tickers) == 1:
+                    _record_unavailable_ticker(ticker, f"price_fetch_exception:{type(exc).__name__}", "yfinance_single")
                 continue
 
-        # If at least one ticker succeeded, treat the missing subset as likely symbol issues.
-        if successful:
-            missing = [t for t in tickers if t and t not in successful]
-            for ticker in missing:
-                _record_unavailable_ticker(ticker, "missing_after_batch", "yfinance_batch")
+        if not successful and len(clean_tickers) == 1:
+            _record_unavailable_ticker(clean_tickers[0], "all_missing_single_ticker", "yfinance_single")
     except Exception as e:
         log.warning(f"Batch price fetch error: {e}")
 
@@ -748,6 +920,9 @@ def api_intraday(ticker: str):
 
     try:
         df = get_intraday_data(ticker, period=period, interval=interval)
+        if (df is None or df.empty) and interval == "1m":
+            # Fallback when 1m bars are not available for the requested period window.
+            df = get_intraday_data(ticker, period=period, interval="5m")
         if df is None or df.empty:
             return jsonify({"error": "No intraday data"}), 404
 
@@ -1429,6 +1604,10 @@ def api_price_tracker(ticker: str):
         "confidence": round(confidence, 1),
         "ai_forecast_available": ai_available,
         "ai_forecast_source": cached_forecast.get("ai_source", "none"),
+        "volume": curr.get("volume", 0),
+        "high": curr.get("high", 0),
+        "low": curr.get("low", 0),
+        "open": curr.get("open", 0),
         "change": curr.get("change", 0),
         "change_pct": curr.get("change_pct", 0),
     })
@@ -1542,6 +1721,7 @@ def api_delisted_tickers():
         min_hits = 1
     status_filter = request.args.get("status", "").strip().lower()
 
+    _prune_delisted_registry()
     with _delisted_lock:
         registry = _load_delisted_registry_unlocked()
 
@@ -1562,6 +1742,7 @@ def api_delisted_tickers():
 @app.route("/api/delisted-tickers/export.csv")
 def api_delisted_tickers_export_csv():
     """Export unavailable/delisted tracking sheet as CSV."""
+    _prune_delisted_registry()
     with _delisted_lock:
         registry = _load_delisted_registry_unlocked()
 
@@ -1589,6 +1770,8 @@ def api_delisted_tickers_export_csv():
 @app.route("/api/portfolio", methods=["GET", "POST", "DELETE"])
 def api_portfolio():
     """Portfolio positions derived from trade ledger; backward compatible POST adds BUY."""
+    _sanitize_portfolio_storage()
+
     if request.method == "GET":
         summary = _portfolio_summary_from_trades(_read_portfolio_trades())
         entries = summary["positions"]
@@ -1614,6 +1797,8 @@ def api_portfolio():
     entry_price = payload.get("entry_price")
     if not ticker:
         return jsonify({"error": "ticker is required"}), 400
+    if not _is_tradeable_ticker(ticker):
+        return jsonify({"error": f"{ticker} is not in configured ticker universe"}), 400
     try:
         qty = float(qty)
         entry_price = float(entry_price)
@@ -1624,19 +1809,12 @@ def api_portfolio():
 
     # Backward-compatible path: this endpoint creates a BUY trade.
     trades = _read_portfolio_trades()
-    trades.append({
-        "ticker": ticker,
-        "name": ticker_names.get(ticker, _clean_name(ticker)),
-        "side": "BUY",
-        "quantity": round(qty, 4),
-        "price": round(entry_price, 2),
-        "timestamp": datetime.now(IST).isoformat(),
-    })
+    trades.append(_new_trade_entry(ticker=ticker, side="BUY", qty=qty, price=entry_price))
     _write_portfolio_trades(trades)
     summary = _portfolio_summary_from_trades(trades)
     _write_portfolio([
         {
-            "ticker": ticker,
+            "ticker": row["ticker"],
             "name": row["name"],
             "quantity": row["quantity"],
             "entry_price": row["avg_buy_price"],
@@ -1650,6 +1828,7 @@ def api_portfolio():
 @app.route("/api/portfolio/trade", methods=["POST"])
 def api_portfolio_trade():
     """Record BUY/SELL trade and return updated P&L summary."""
+    _sanitize_portfolio_storage()
     payload = request.get_json(silent=True) or {}
     ticker = str(payload.get("ticker", "")).strip().upper()
     side = str(payload.get("side", "BUY")).strip().upper()
@@ -1659,6 +1838,8 @@ def api_portfolio_trade():
         return jsonify({"error": "side must be BUY or SELL"}), 400
     if not ticker:
         return jsonify({"error": "ticker is required"}), 400
+    if not _is_tradeable_ticker(ticker):
+        return jsonify({"error": f"{ticker} is not in configured ticker universe"}), 400
     try:
         qty = float(qty)
         price = float(price)
@@ -1675,14 +1856,7 @@ def api_portfolio_trade():
         if open_qty + 1e-9 < qty:
             return jsonify({"error": f"Cannot SELL {qty}; open quantity is {open_qty}"}), 400
 
-    trades.append({
-        "ticker": ticker,
-        "name": ticker_names.get(ticker, _clean_name(ticker)),
-        "side": side,
-        "quantity": round(qty, 4),
-        "price": round(price, 2),
-        "timestamp": datetime.now(IST).isoformat(),
-    })
+    trades.append(_new_trade_entry(ticker=ticker, side=side, qty=qty, price=price))
     _write_portfolio_trades(trades)
     summary = _portfolio_summary_from_trades(trades)
     _write_portfolio([
@@ -1698,9 +1872,88 @@ def api_portfolio_trade():
     return jsonify({"ok": True, "summary": summary})
 
 
+@app.route("/api/portfolio/trade/<trade_id>", methods=["DELETE", "PATCH"])
+def api_portfolio_trade_edit(trade_id: str):
+    """Edit or delete a trade row by ID."""
+    _sanitize_portfolio_storage()
+    trades = _read_portfolio_trades()
+    idx = next((i for i, tr in enumerate(trades) if str(tr.get("id", "")) == trade_id), None)
+    if idx is None:
+        return jsonify({"error": f"trade_id {trade_id} not found"}), 404
+
+    if request.method == "DELETE":
+        trades.pop(idx)
+        _write_portfolio_trades(trades)
+        summary = _portfolio_summary_from_trades(trades)
+        _write_portfolio([
+            {
+                "ticker": row["ticker"],
+                "name": row["name"],
+                "quantity": row["quantity"],
+                "entry_price": row["avg_buy_price"],
+                "updated_at": datetime.now(IST).isoformat(),
+            }
+            for row in summary["positions"]
+        ])
+        return jsonify({"ok": True, "summary": summary, "trade_count": len(trades)})
+
+    payload = request.get_json(silent=True) or {}
+    old = dict(trades[idx])
+
+    ticker = str(payload.get("ticker", old.get("ticker", ""))).strip().upper()
+    side = str(payload.get("side", old.get("side", "BUY"))).strip().upper()
+    try:
+        qty = float(payload.get("quantity", old.get("quantity", 0)) or 0)
+        price = float(payload.get("price", old.get("price", 0)) or 0)
+    except Exception:
+        return jsonify({"error": "quantity and price must be numeric"}), 400
+
+    if side not in {"BUY", "SELL"}:
+        return jsonify({"error": "side must be BUY or SELL"}), 400
+    if qty <= 0 or price <= 0:
+        return jsonify({"error": "quantity and price must be > 0"}), 400
+    if not _is_tradeable_ticker(ticker):
+        return jsonify({"error": f"{ticker} is not in configured ticker universe"}), 400
+
+    trades[idx].update({
+        "ticker": ticker,
+        "name": ticker_names.get(ticker, _clean_name(ticker)),
+        "side": side,
+        "quantity": round(qty, 4),
+        "price": round(price, 2),
+        "edited_at": datetime.now(IST).isoformat(),
+    })
+    valid, err = _validate_trade_sequence(trades)
+    if not valid:
+        trades[idx] = old
+        return jsonify({"error": err}), 400
+
+    _write_portfolio_trades(trades)
+    summary = _portfolio_summary_from_trades(trades)
+    _write_portfolio([
+        {
+            "ticker": row["ticker"],
+            "name": row["name"],
+            "quantity": row["quantity"],
+            "entry_price": row["avg_buy_price"],
+            "updated_at": datetime.now(IST).isoformat(),
+        }
+        for row in summary["positions"]
+    ])
+    return jsonify({"ok": True, "summary": summary, "trade_count": len(trades)})
+
+
+@app.route("/api/portfolio/clean", methods=["POST"])
+def api_portfolio_clean():
+    """Force cleanup of invalid/dummy portfolio rows."""
+    cleaned = _sanitize_portfolio_storage()
+    return jsonify({"ok": True, **cleaned})
+
+
 @app.route("/api/portfolio/summary")
 def api_portfolio_summary():
     """Return portfolio summary with optional Groq suggestion."""
+    _sanitize_portfolio_storage()
     suggest = request.args.get("suggest", "").lower() in ("1", "true", "yes")
     trades = _read_portfolio_trades()
     summary = _portfolio_summary_from_trades(trades)
@@ -1716,9 +1969,12 @@ def api_portfolio_summary():
 @app.route("/api/portfolio/trades")
 def api_portfolio_trades():
     """Return full trade history."""
+    _sanitize_portfolio_storage()
     ticker = request.args.get("ticker", "").strip().upper()
     limit = request.args.get("limit")
     trades = _read_portfolio_trades()
+    if _ensure_trade_ids(trades):
+        _write_portfolio_trades(trades)
     if ticker:
         trades = [t for t in trades if str(t.get("ticker", "")).upper() == ticker]
     trades = sorted(trades, key=lambda x: x.get("timestamp", ""), reverse=True)
@@ -1734,14 +1990,16 @@ def api_portfolio_trades():
 @app.route("/api/portfolio/export.csv")
 def api_portfolio_export_csv():
     """Export trade ledger as CSV."""
+    _sanitize_portfolio_storage()
     trades = sorted(_read_portfolio_trades(), key=lambda x: x.get("timestamp", ""))
     out = StringIO()
     writer = csv.writer(out)
-    writer.writerow(["timestamp", "ticker", "name", "side", "quantity", "price", "notional"])
+    writer.writerow(["id", "timestamp", "ticker", "name", "side", "quantity", "price", "notional"])
     for tr in trades:
         qty = float(tr.get("quantity", 0) or 0)
         price = float(tr.get("price", 0) or 0)
         writer.writerow([
+            tr.get("id", ""),
             tr.get("timestamp", ""),
             tr.get("ticker", ""),
             tr.get("name", ""),
@@ -1754,6 +2012,134 @@ def api_portfolio_export_csv():
     resp.headers["Content-Type"] = "text/csv; charset=utf-8"
     resp.headers["Content-Disposition"] = "attachment; filename=portfolio_trades.csv"
     return resp
+
+
+@app.route("/api/groq-ticker-suggestions")
+def api_groq_ticker_suggestions():
+    """Suggest shortlist of tickers and reasoning from current model outputs."""
+    if not models_loaded or predictor is None:
+        return jsonify({"error": "Models still loading..."}), 503
+    try:
+        n = int(request.args.get("n", 8))
+        n = max(3, min(n, 20))
+    except Exception:
+        n = 8
+
+    try:
+        groups = predictor.predict_top_picks_grouped(
+            sectors=["large_cap", "banking", "mid_cap", "high_volatility", "commodities"],
+            top_n=n,
+        )
+        candidates: list[dict] = []
+        for bucket in ("top_buy", "top_hold", "top_sell"):
+            for p in groups.get(bucket, []):
+                if float(p.get("current_price", 0) or 0) <= 0:
+                    continue
+                candidates.append({
+                    "ticker": p.get("ticker"),
+                    "name": ticker_names.get(p.get("ticker", ""), _clean_name(p.get("ticker", ""))),
+                    "signal": p.get("signal", "HOLD"),
+                    "predicted_return": round(float(p.get("predicted_return", 0) or 0), 3),
+                    "confidence": round(float(p.get("confidence", 0) or 0), 1),
+                    "model_agreement": round(float(p.get("model_agreement", 0) or 0), 1),
+                    "current_price": round(float(p.get("current_price", 0) or 0), 2),
+                })
+        # Keep unique symbols and cap length.
+        seen: set[str] = set()
+        unique_candidates = []
+        for c in candidates:
+            t = c.get("ticker")
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            unique_candidates.append(c)
+            if len(unique_candidates) >= n:
+                break
+
+        recommendation = suggest_ticker_shortlist(unique_candidates)
+        return jsonify({
+            "count": len(unique_candidates),
+            "candidates": unique_candidates,
+            "recommendation": recommendation,
+            "generated_at": datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST"),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/groq-trade-review", methods=["POST"])
+def api_groq_trade_review():
+    """Review user-selected ticker + entry plan with model/news context."""
+    if not models_loaded or predictor is None:
+        return jsonify({"error": "Models still loading..."}), 503
+
+    payload = request.get_json(silent=True) or {}
+    ticker = str(payload.get("ticker", "")).strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    if not _is_tradeable_ticker(ticker):
+        return jsonify({"error": f"{ticker} is not in configured ticker universe"}), 400
+    try:
+        entry_price = float(payload.get("entry_price", 0) or 0)
+        quantity = float(payload.get("quantity", 0) or 0)
+    except Exception:
+        return jsonify({"error": "entry_price and quantity must be numeric"}), 400
+    if entry_price <= 0 or quantity <= 0:
+        return jsonify({"error": "entry_price and quantity must be > 0"}), 400
+
+    try:
+        pred = predictor.predict_single(ticker, use_cache=True) or {}
+        px = _get_live_prices_batch([ticker]).get(ticker, {})
+        current_price = float(px.get("price", 0) or pred.get("current_price", 0) or 0)
+        signal = pred.get("signal", "HOLD")
+        predicted_return = float(pred.get("predicted_return", 0) or 0)
+        confidence = float(pred.get("confidence", 0) or 0)
+        agreement = float(pred.get("model_agreement", 0) or 0)
+        stock_name = ticker_names.get(ticker, _clean_name(ticker))
+        sentiment = get_news_sentiment(ticker, stock_name)
+        review = review_trade_plan(
+            ticker=ticker,
+            stock_name=stock_name,
+            entry_price=entry_price,
+            quantity=quantity,
+            current_price=current_price,
+            signal=signal,
+            predicted_return_pct=predicted_return,
+            confidence=confidence,
+            agreement=agreement,
+            sentiment_text=sentiment,
+        )
+        return jsonify({
+            "ticker": ticker,
+            "name": stock_name,
+            "entry_price": round(entry_price, 2),
+            "quantity": quantity,
+            "current_price": round(current_price, 2) if current_price > 0 else None,
+            "signal": signal,
+            "predicted_return": round(predicted_return, 3),
+            "confidence": round(confidence, 1),
+            "model_agreement": round(agreement, 1),
+            "review": review,
+            "generated_at": datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST"),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ai-risk-analysis")
+def api_ai_risk_analysis():
+    """AI-generated risk analysis page payload based on current portfolio summary."""
+    _sanitize_portfolio_storage()
+    summary = _portfolio_summary_from_trades(_read_portfolio_trades())
+    try:
+        analysis = ai_risk_assessment(summary)
+    except Exception as e:
+        analysis = f"AI risk analysis unavailable: {e}"
+    return jsonify({
+        "summary": summary,
+        "analysis": analysis,
+        "generated_at": datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST"),
+    })
 
 
 @app.route("/api/explain-model")
@@ -2092,12 +2478,33 @@ def risk_dashboard():
     return render_template("risk.html")
 
 
+@app.route("/ai-risk")
+def ai_risk_dashboard():
+    """AI-only risk interpretation page."""
+    return render_template("ai_risk.html")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     load_tickers()
     log.info(f"Loaded {len(all_tickers)} tickers across {len(tickers_by_sector)} sectors")
+    cleaned = _sanitize_portfolio_storage()
+    if cleaned.get("changed"):
+        log.info(
+            "Portfolio sanitized at startup: removed_trades=%s removed_holdings=%s remaining_trades=%s",
+            cleaned.get("removed_trade_rows"),
+            cleaned.get("removed_holding_rows"),
+            cleaned.get("remaining_trades"),
+        )
+    pruned = _prune_delisted_registry()
+    if pruned.get("changed"):
+        log.info(
+            "Delisted registry pruned at startup: removed=%s remaining=%s",
+            pruned.get("removed"),
+            pruned.get("remaining"),
+        )
 
     # Load models in background thread
     model_thread = threading.Thread(target=load_models_background, daemon=True)

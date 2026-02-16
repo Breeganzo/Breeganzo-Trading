@@ -11,6 +11,7 @@ let sectorTickerOrder = {};
 let autoRefreshTimer = null;
 let topPickFilter = 'top_buy';
 let groupedTopPicks = { top_buy: [], top_sell: [], top_hold: [] };
+let metricExplainCache = {};
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -101,6 +102,46 @@ async function checkStatus() {
         console.error('Status check failed:', e);
         setTimeout(checkStatus, 5000);
     }
+}
+
+// ── Metric Tooltip (Groq Explain) ─────────────────
+function moveMetricTooltip(evt) {
+    const tip = document.getElementById('metric-tooltip');
+    if (!tip || !evt) return;
+    tip.style.left = `${evt.pageX + 14}px`;
+    tip.style.top = `${evt.pageY + 14}px`;
+}
+
+async function showMetricTooltip(evt, term, context = '') {
+    const tip = document.getElementById('metric-tooltip');
+    const titleEl = document.getElementById('metric-tooltip-title');
+    const bodyEl = document.getElementById('metric-tooltip-body');
+    if (!tip || !titleEl || !bodyEl) return;
+
+    titleEl.textContent = term;
+    bodyEl.textContent = 'Loading explanation...';
+    moveMetricTooltip(evt);
+    tip.classList.remove('hidden');
+
+    const key = `${term}::${context}`;
+    if (metricExplainCache[key]) {
+        bodyEl.textContent = metricExplainCache[key];
+        return;
+    }
+    try {
+        const res = await fetch(`/api/explain-risk-term?term=${encodeURIComponent(term)}&context=${encodeURIComponent(context || 'top picks metric')}`);
+        const data = await res.json();
+        const text = data.explanation || data.error || 'No explanation';
+        metricExplainCache[key] = text;
+        bodyEl.textContent = text;
+    } catch (e) {
+        bodyEl.textContent = `Explanation unavailable: ${e.message}`;
+    }
+}
+
+function hideMetricTooltip() {
+    const tip = document.getElementById('metric-tooltip');
+    if (tip) tip.classList.add('hidden');
 }
 
 // ── Index Prices ──────────────────────────────────
@@ -263,12 +304,12 @@ function renderStockGrid(sector) {
 
     let tickers;
     if (sector === 'all') {
-        tickers = (sectorTickerOrder.all || []).filter(t => allStockData[t]);
+        tickers = (sectorTickerOrder.all || []);
         if (!tickers.length) {
             tickers = Object.keys(allStockData).filter(t => !t.startsWith('^') && t !== 'USDINR=X' && t !== 'GC=F' && t !== 'CL=F').sort();
         }
     } else if (sectorsData[sector]) {
-        tickers = (sectorTickerOrder[sector] || sectorsData[sector].tickers.map(t => t.symbol)).filter(t => allStockData[t]);
+        tickers = (sectorTickerOrder[sector] || sectorsData[sector].tickers.map(t => t.symbol));
     } else {
         tickers = Object.keys(allStockData).sort();
     }
@@ -282,13 +323,13 @@ function renderStockGrid(sector) {
 
     let html = '';
     for (const ticker of tickers) {
-        const data = allStockData[ticker];
-        if (!data) continue;
+        const data = allStockData[ticker] || {};
 
         const name = data.name || ticker.replace('.NS', '');
-        const price = data.price || 0;
-        const change = data.change || 0;
-        const changePct = data.change_pct || 0;
+        const price = Number(data.price || 0);
+        const change = Number(data.change || 0);
+        const changePct = Number(data.change_pct || 0);
+        const hasQuote = price > 0;
         const direction = change >= 0 ? 'up' : 'down';
         const sign = change >= 0 ? '+' : '';
         const initials = name.substring(0, 2).toUpperCase();
@@ -324,15 +365,17 @@ function renderStockGrid(sector) {
             <div class="stock-card-top">
                 <div class="stock-card-icon">${initials}</div>
                 <div class="stock-card-info">
-                    <div class="stock-card-name">${name}</div>
-                    <div class="stock-card-symbol">${ticker}</div>
-                </div>
+                <div class="stock-card-name">${name}</div>
+                <div class="stock-card-symbol">${ticker}</div>
+            </div>
                 ${signalBadge}
             </div>
                 <div class="stock-card-bottom">
                     <div class="stock-card-price">
                         <span class="price">${formatPrice(price)}</span>
-                        <span class="change ${direction}">${sign}${change.toFixed(2)} (${changePct.toFixed(2)}%)</span>
+                        <span class="change ${hasQuote ? direction : ''}">
+                            ${hasQuote ? `${sign}${change.toFixed(2)} (${changePct.toFixed(2)}%)` : 'Waiting for quote'}
+                        </span>
                     </div>
                     ${predRow}
             </div>
@@ -454,12 +497,18 @@ async function showTopAnalysis() {
 
                 <div class="top10-metrics">
                     <div class="top10-metric">
-                        <span class="label">Confidence</span>
+                        <span class="label clickable-metric"
+                              onmouseenter="showMetricTooltip(event, 'Confidence', 'Top 10 model confidence')"
+                              onmousemove="moveMetricTooltip(event)"
+                              onmouseleave="hideMetricTooltip()">Confidence</span>
                         <div class="metric-bar"><div class="metric-fill" style="width:${s.confidence}%"></div></div>
                         <span class="value">${s.confidence}%</span>
                     </div>
                     <div class="top10-metric">
-                        <span class="label">Agreement</span>
+                        <span class="label clickable-metric"
+                              onmouseenter="showMetricTooltip(event, 'Model Agreement', 'Top 10 model agreement')"
+                              onmousemove="moveMetricTooltip(event)"
+                              onmouseleave="hideMetricTooltip()">Agreement</span>
                         <div class="metric-bar"><div class="metric-fill agreement" style="width:${s.model_agreement}%"></div></div>
                         <span class="value">${s.model_agreement}%</span>
                     </div>
@@ -467,7 +516,10 @@ async function showTopAnalysis() {
                         <span class="label">Score</span>
                         <span class="value score-badge">${s.composite_score}</span>
                     </div>
-                    ${s.risk_reward ? `<div class="top10-metric"><span class="label">R:R</span><span class="value">${s.risk_reward}</span></div>` : ''}
+                    ${s.risk_reward ? `<div class="top10-metric"><span class="label clickable-metric"
+                        onmouseenter="showMetricTooltip(event, 'Risk Reward Ratio', 'Top 10 trade quality')"
+                        onmousemove="moveMetricTooltip(event)"
+                        onmouseleave="hideMetricTooltip()">R:R</span><span class="value">${s.risk_reward}</span></div>` : ''}
                 </div>
             </div>`;
         }
@@ -568,14 +620,20 @@ function renderTopPicks() {
                 </div>
                 <div class="pick-detail">
                     <span class="label">AI Predicted</span>
-                    <span class="value">${formatPrice(pick.ai_predicted_price || pick.predicted_price)}</span>
+                    <span class="value">${Number(pick.ai_predicted_price || 0) > 0 ? formatPrice(pick.ai_predicted_price) : '—'}</span>
                 </div>
                 <div class="pick-detail">
-                    <span class="label">Confidence</span>
+                    <span class="label clickable-metric"
+                          onmouseenter="showMetricTooltip(event, 'Confidence', 'Top picks confidence metric')"
+                          onmousemove="moveMetricTooltip(event)"
+                          onmouseleave="hideMetricTooltip()">Confidence</span>
                     <span class="value">${Number(pick.confidence || 0).toFixed(0)}%</span>
                 </div>
                 <div class="pick-detail">
-                    <span class="label">Agreement</span>
+                    <span class="label clickable-metric"
+                          onmouseenter="showMetricTooltip(event, 'Model Agreement', 'Top picks model agreement')"
+                          onmousemove="moveMetricTooltip(event)"
+                          onmouseleave="hideMetricTooltip()">Agreement</span>
                     <span class="value">${Number(pick.model_agreement || 0).toFixed(0)}%</span>
                 </div>
             </div>

@@ -527,3 +527,61 @@ def portfolio_profit_suggestion(summary: dict) -> str:
         "No guaranteed claims."
     )
     return _call_groq(prompt, max_tokens=520)
+
+
+def suggest_ticker_shortlist(candidates: list[dict]) -> str:
+    """Suggest a concise ticker shortlist from model-ranked candidates."""
+    prompt = (
+        "You are reviewing model-ranked NSE tickers for short-term trading. "
+        f"Candidates JSON: {json.dumps(candidates)[:2200]}\n\n"
+        "Return short bullets:\n"
+        "1) Top 3 tickers to prioritize and why,\n"
+        "2) 2 tickers to avoid and why,\n"
+        "3) One risk-control rule for all picks.\n"
+        "No guaranteed claims."
+    )
+    return _call_groq(prompt, max_tokens=480)
+
+
+def review_trade_plan(
+    ticker: str,
+    stock_name: str,
+    entry_price: float,
+    quantity: float,
+    current_price: float,
+    signal: str,
+    predicted_return_pct: float,
+    confidence: float,
+    agreement: float,
+    sentiment_text: str,
+) -> str:
+    """Review user-selected trade plan and provide corrective suggestions."""
+    prompt = (
+        f"Review this planned trade for {stock_name} ({ticker}) on NSE.\n"
+        f"Planned entry price: {entry_price:.2f}, quantity: {quantity:.2f}.\n"
+        f"Current market price: {current_price:.2f}.\n"
+        f"Model signal: {signal}, predicted_return={predicted_return_pct:.3f}%, "
+        f"confidence={confidence:.1f}%, agreement={agreement:.1f}%.\n"
+        f"News sentiment context: {sentiment_text[:1000]}.\n\n"
+        "Answer in sections:\n"
+        "- Is this plan aligned or misaligned with current context?\n"
+        "- Top 3 risks in this specific plan.\n"
+        "- A safer alternative (entry zone, position sizing, invalidation).\n"
+        "Do not promise profits."
+    )
+    return _call_groq(prompt, max_tokens=620)
+
+
+def ai_risk_assessment(summary: dict) -> str:
+    """Separate AI page narrative: portfolio risk interpretation."""
+    prompt = (
+        "You are generating an AI risk report for an Indian equity portfolio. "
+        f"Portfolio summary JSON: {json.dumps(summary)[:1800]}\n\n"
+        "Provide:\n"
+        "1) Current risk posture,\n"
+        "2) Concentration/liquidity concerns,\n"
+        "3) Drawdown and scenario risks,\n"
+        "4) 3 concrete actions to reduce downside without over-trading.\n"
+        "Keep concise and practical. No guaranteed outcomes."
+    )
+    return _call_groq(prompt, max_tokens=650)

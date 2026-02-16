@@ -13,7 +13,7 @@
     <nav class="navbar">
         <div class="nav-brand">
             <span class="logo">📈</span>
-            <span class="brand-name">Masters AI Trading</span>
+            <a href="/" class="brand-name">Masters AI Trading</a>
         </div>
         <div class="nav-links">
             <a href="/" class="nav-link active" onclick="selectSector('all')">Stocks</a>
@@ -22,6 +22,7 @@
             <a href="#" class="nav-link" onclick="showTopPicks()">Top Picks</a>
             <a href="#" class="nav-link" onclick="showExpectedVsActual()">Expected vs Actual</a>
             <a href="/risk" class="nav-link">Risk Analytics</a>
+            <a href="/ai-risk" class="nav-link">AI Risk Analysis</a>
         </div>
         <div class="nav-status">
             <span id="market-status" class="status-badge"></span>
@@ -120,6 +121,11 @@
         <p>⚠️ DISCLAIMER: Academic research project for educational purposes only. NOT financial advice.
         Past performance does not guarantee future results. Always consult a qualified financial advisor.</p>
     </footer>
+
+    <div id="metric-tooltip" class="risk-tooltip hidden">
+        <div class="risk-tooltip-title" id="metric-tooltip-title">Loading...</div>
+        <div class="risk-tooltip-body" id="metric-tooltip-body">Loading explanation...</div>
+    </div>
 
     <script src="/static/js/app.js"></script>
 </body>

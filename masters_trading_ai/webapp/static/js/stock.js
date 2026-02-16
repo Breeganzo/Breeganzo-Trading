@@ -15,12 +15,15 @@ let indicatorSeries = {};
 let drawMode = null;
 let pendingDrawPoint = null;
 let drawingSeries = [];
+let currentPeriod = '1d';
+let currentInterval = '1m';
+let chartRefreshTimer = null;
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     checkStatus();
     initChart();
-    loadChartData('1d', '5m');
+    loadChartData(currentPeriod, currentInterval);
     loadLivePrice();
     loadPrediction();
     loadPriceTracker();
@@ -29,11 +32,18 @@ document.addEventListener('DOMContentLoaded', () => {
     loadNews();
     refreshPortfolioStatus();
 
-    // Auto-refresh live price every 5 seconds
+    // Auto-refresh live quote every 3 seconds.
     autoRefreshInterval = setInterval(() => {
         loadLivePrice();
         loadPriceTracker();
-    }, 5000);
+    }, 3000);
+
+    // Refresh visible chart data window so graph keeps moving.
+    chartRefreshTimer = setInterval(() => {
+        if (document.visibilityState !== 'visible') return;
+        if (currentInterval === '1d') return;
+        loadChartData(currentPeriod, currentInterval);
+    }, 15000);
 
     // Refresh AI narrative blocks periodically (news + Groq outlook).
     setInterval(() => {
@@ -89,11 +99,13 @@ function initChart() {
     });
 
     // Area/line series for price
-    lineSeries = chart.addAreaSeries({
-        topColor: 'rgba(0, 208, 156, 0.3)',
-        bottomColor: 'rgba(0, 208, 156, 0.0)',
-        lineColor: '#00d09c',
-        lineWidth: 2,
+    lineSeries = chart.addCandlestickSeries({
+        upColor: '#00d09c',
+        downColor: '#eb5757',
+        borderUpColor: '#00d09c',
+        borderDownColor: '#eb5757',
+        wickUpColor: '#00d09c',
+        wickDownColor: '#eb5757',
         priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
     });
 
@@ -230,7 +242,8 @@ function clearDrawings() {
 
 function handleChartClick(param) {
     if (!drawMode || !param || !param.time) return;
-    let price = param.seriesData?.get?.(lineSeries)?.value;
+    const point = param.seriesData?.get?.(lineSeries);
+    let price = point?.close ?? point?.value;
     if (price == null && chartRecords.length) {
         // Fallback if direct series data is unavailable.
         price = chartRecords[chartRecords.length - 1].close;
@@ -272,6 +285,8 @@ function handleChartClick(param) {
 }
 
 async function loadChartData(period, interval) {
+    currentPeriod = period;
+    currentInterval = interval;
     try {
         let url;
         if (interval === '1d') {
@@ -307,7 +322,13 @@ async function loadChartData(period, interval) {
                 close: Number(r.close || 0),
                 volume: Number(r.volume || 0),
             });
-            priceData.push({ time, value: r.close });
+            priceData.push({
+                time,
+                open: Number(r.open || r.close || 0),
+                high: Number(r.high || r.close || 0),
+                low: Number(r.low || r.close || 0),
+                close: Number(r.close || 0),
+            });
             volumeData.push({
                 time,
                 value: r.volume,
@@ -321,19 +342,6 @@ async function loadChartData(period, interval) {
         volumeSeries.setData(volumeData);
         toggleIndicator();
         chart.timeScale().fitContent();
-
-        // Color the line based on overall direction
-        if (priceData.length >= 2) {
-            const first = priceData[0].value;
-            const last = priceData[priceData.length - 1].value;
-            const isUp = last >= first;
-
-            lineSeries.applyOptions({
-                topColor: isUp ? 'rgba(0, 208, 156, 0.3)' : 'rgba(235, 87, 87, 0.3)',
-                bottomColor: isUp ? 'rgba(0, 208, 156, 0.0)' : 'rgba(235, 87, 87, 0.0)',
-                lineColor: isUp ? '#00d09c' : '#eb5757',
-            });
-        }
 
         // Add prediction marker if available
         if (predictionData && interval === '1d') {
@@ -369,44 +377,73 @@ function changeTimeframe(btn) {
 
     const period = btn.dataset.period;
     const interval = btn.dataset.interval;
+    currentPeriod = period;
+    currentInterval = interval;
     loadChartData(period, interval);
 }
 
 // ── Live Price ────────────────────────────────────
 async function loadLivePrice() {
+    const statusEl = document.getElementById('quote-status');
+    const setStatus = (txt) => { if (statusEl) statusEl.textContent = txt; };
     try {
         const res = await fetch(`/api/prices?tickers=${encodeURIComponent(TICKER)}`);
         const data = await res.json();
-        const price = data[TICKER];
+        let price = data[TICKER];
 
-        if (!price) return;
+        // Fallback to price-tracker snapshot if batch quote is missing.
+        if (!price) {
+            const tRes = await fetch(`/api/price-tracker/${encodeURIComponent(TICKER)}`);
+            const tData = await tRes.json();
+            if (!tRes.ok || tData.error) {
+                setStatus('Quote unavailable (retrying)');
+                return;
+            }
+            price = {
+                price: Number(tData.current_price || 0),
+                prev_close: Number(tData.prev_close || 0),
+                open: Number(tData.open_price || 0),
+                high: Number(tData.high || tData.current_price || 0),
+                low: Number(tData.low || tData.current_price || 0),
+                volume: Number(tData.volume || 0),
+                change: Number(tData.change || 0),
+                change_pct: Number(tData.change_pct || 0),
+            };
+            setStatus('Live quote fallback');
+        } else {
+            setStatus('Live quote');
+        }
+
         latestLivePrice = Number(price.price || 0);
+        if (!(latestLivePrice > 0)) {
+            setStatus('Quote unavailable');
+            return;
+        }
 
-        // Update header
         document.getElementById('live-price').textContent = `₹${formatN(price.price)}`;
-
         const changeEl = document.getElementById('live-change');
-        const sign = price.change >= 0 ? '+' : '';
-        changeEl.textContent = `${sign}${price.change.toFixed(2)} (${price.change_pct.toFixed(2)}%)`;
-        changeEl.className = `stock-change-big ${price.change >= 0 ? 'up-color' : 'down-color'}`;
+        const sign = Number(price.change || 0) >= 0 ? '+' : '';
+        changeEl.textContent = `${sign}${Number(price.change || 0).toFixed(2)} (${Number(price.change_pct || 0).toFixed(2)}%)`;
+        changeEl.className = `stock-change-big ${Number(price.change || 0) >= 0 ? 'up-color' : 'down-color'}`;
 
-        // Also update the big price color
-        document.getElementById('live-price').className = `stock-price-big`;
+        const low = Number(price.low || 0) > 0 ? Number(price.low) : latestLivePrice;
+        const high = Number(price.high || 0) > 0 ? Number(price.high) : latestLivePrice;
+        const open = Number(price.open || 0) > 0 ? Number(price.open) : latestLivePrice;
+        const prevClose = Number(price.prev_close || 0) > 0 ? Number(price.prev_close) : open;
 
-        // Performance stats
-        document.getElementById('today-low').textContent = `₹${formatN(price.low)}`;
-        document.getElementById('today-high').textContent = `₹${formatN(price.high)}`;
-        document.getElementById('stat-open').textContent = `₹${formatN(price.open)}`;
-        document.getElementById('stat-prev-close').textContent = `₹${formatN(price.prev_close)}`;
+        document.getElementById('today-low').textContent = `₹${formatN(low)}`;
+        document.getElementById('today-high').textContent = `₹${formatN(high)}`;
+        document.getElementById('stat-open').textContent = `₹${formatN(open)}`;
+        document.getElementById('stat-prev-close').textContent = `₹${formatN(prevClose)}`;
         document.getElementById('stat-volume').textContent = formatVolume(price.volume);
 
-        // Position marker on range bar
-        if (price.low > 0 && price.high > price.low) {
-            const pct = ((price.price - price.low) / (price.high - price.low)) * 100;
+        if (high > low) {
+            const pct = ((latestLivePrice - low) / (high - low)) * 100;
             document.getElementById('price-marker').style.left = `${Math.max(0, Math.min(100, pct))}%`;
         }
     } catch (e) {
         console.error('Live price failed:', e);
+        setStatus('Quote error');
     }
 }
 
@@ -1228,6 +1265,41 @@ async function sellFromPortfolio() {
         loadPortfolioSuggestion();
     } catch (e) {
         if (statusEl) statusEl.textContent = `Sell failed: ${e.message}`;
+    }
+}
+
+async function reviewPlannedTrade() {
+    const qty = Number(document.getElementById('portfolio-qty')?.value || 0);
+    const customPrice = Number(document.getElementById('portfolio-price')?.value || 0);
+    const entryPrice = Number(customPrice || latestLivePrice || predictionData?.current_price || 0);
+    const output = document.getElementById('stock-chat-output');
+    if (!qty || qty <= 0 || !entryPrice || entryPrice <= 0) {
+        if (output) output.textContent = 'Enter a valid buy quantity and price before review.';
+        return;
+    }
+    if (output) output.textContent = 'Groq is reviewing your plan...';
+    try {
+        const res = await fetch('/api/groq-trade-review', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                ticker: TICKER,
+                entry_price: entryPrice,
+                quantity: qty,
+            }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+            if (output) output.textContent = `Review unavailable: ${data.error || res.status}`;
+            return;
+        }
+        if (output) {
+            output.innerHTML = `
+                <strong>Planned Trade Review (${data.generated_at || 'now'})</strong>
+                ${formatAIText(data.review || 'No review text')}`;
+        }
+    } catch (e) {
+        if (output) output.textContent = `Review failed: ${e.message}`;
     }
 }
 
