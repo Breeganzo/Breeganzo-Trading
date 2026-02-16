@@ -29,7 +29,6 @@ Optional Groq failover keys:
 GROQ_API_KEY_2=...
 GROQ_API_KEY_3=...
 GROQ_KEY_ROTATION_ENABLED=1
-GROQ_KEY_COOLDOWN_SEC=300
 ```
 
 ## 2) Run locally
@@ -265,7 +264,7 @@ This codebase uses caching and hard limits to avoid Groq overuse:
 - UI explanation cache (`webapp/groq_explainer.py`): prompt cache + endpoint queue
 - strict limits: `GROQ_GLOBAL_MAX_PER_MIN` and `GROQ_ENDPOINT_MAX_PER_MIN`
 - multi-key failover: `GROQ_API_KEY` -> `GROQ_API_KEY_2` -> `GROQ_API_KEY_3` (or `GROQ_API_KEYS`)
-- key-rotation controls: `GROQ_KEY_ROTATION_ENABLED`, `GROQ_KEY_COOLDOWN_SEC`
+- round-robin controls: `GROQ_KEY_ROTATION_ENABLED` (no key cooldown blocking)
 - AI forecast cache (`webapp/server.py`): `GROQ_FORECAST_TTL=900s`
 - News-sentiment scoring cache (`src/inference/predictor.py`): `SENTIMENT_CACHE_TTL_SECONDS` (default 1800s)
 - News-sentiment call budget: `GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE` (default 8)
@@ -283,7 +282,6 @@ GROQ_API_KEY=...
 GROQ_API_KEY_2=
 GROQ_API_KEY_3=
 GROQ_KEY_ROTATION_ENABLED=1
-GROQ_KEY_COOLDOWN_SEC=300
 ENABLE_GROQ_NEWS_SENTIMENT=1
 GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE=8
 SENTIMENT_CACHE_TTL_SECONDS=1800

@@ -1,4 +1,3 @@
-import time
 from types import SimpleNamespace
 
 from webapp import groq_explainer as ge
@@ -7,7 +6,6 @@ from webapp import groq_explainer as ge
 def _reset_groq_state():
     ge._groq_keys = ["key-1", "key-2"]
     ge._active_key_index = 0
-    ge._key_cooldown_until = {}
     ge._key_last_429_at = {}
     ge._degraded_until = 0.0
     ge._degraded_reason = ""
@@ -51,10 +49,38 @@ def test_groq_rotates_to_next_key_on_429(monkeypatch):
 
     out = ge._call_groq("rotation-test")
     assert out == "ok-from-key-2"
-    assert ge._key_cooldown_until.get(0, 0) > time.time()
+    assert ge._key_last_429_at.get(0, 0) > 0
     status = ge.get_groq_system_status()
     assert status["degraded_mode"] is False
     assert status["key_pool_size"] == 2
+    assert status["key_last_429"][0]["last_429_iso"] is not None
+
+
+def test_groq_round_robin_across_calls(monkeypatch):
+    _reset_groq_state()
+    monkeypatch.setattr(ge, "_get_cached", lambda _key: None)
+    monkeypatch.setattr(ge, "_set_cache", lambda _key, _text: None)
+    monkeypatch.setattr(ge, "_reserve_rate_slot", lambda *_args, **_kwargs: True)
+
+    def _client_for_key(api_key: str):
+        class _Client:
+            def __init__(self, key: str):
+                self.key = key
+                self.chat = SimpleNamespace(
+                    completions=SimpleNamespace(create=self._create)
+                )
+
+            def _create(self, **_kwargs):
+                return _fake_response(f"ok-{self.key}")
+
+        return _Client(api_key)
+
+    monkeypatch.setattr(ge, "_get_client_for_key", _client_for_key)
+
+    out1 = ge._call_groq("rotation-1")
+    out2 = ge._call_groq("rotation-2")
+    assert out1 == "ok-key-1"
+    assert out2 == "ok-key-2"
 
 
 def test_groq_enters_degraded_mode_when_all_keys_429(monkeypatch):
@@ -83,4 +109,4 @@ def test_groq_enters_degraded_mode_when_all_keys_429(monkeypatch):
     assert "rate-limited" in out.lower()
     status = ge.get_groq_system_status()
     assert status["degraded_mode"] is True
-    assert status["degraded_reason"] in {"upstream_429", "all_keys_cooling_down"}
+    assert status["degraded_reason"] == "upstream_429"
