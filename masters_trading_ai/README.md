@@ -76,7 +76,40 @@ source .venv/bin/activate
 pytest -q
 ```
 
-## 5) Troubleshooting
+## 5) Push changes to `main` (GitHub)
+
+Use this flow from repo root (`/Users/anto/Trading_Project`):
+
+```bash
+# 1) Check branch and changes
+git branch --show-current
+git status
+
+# 2) Create/switch to your feature branch (example)
+git checkout -b fix/predictor-sanity
+
+# 3) Stage and commit
+git add .
+git commit -m "your commit message"
+
+# 4) Push branch to GitHub
+git push -u origin fix/predictor-sanity
+```
+
+Open PR to merge into `main`:
+
+```text
+https://github.com/Breeganzo/Breeganzo-Trading/compare/main...fix/predictor-sanity?expand=1
+```
+
+After PR approval/merge, sync local `main`:
+
+```bash
+git checkout main
+git pull origin main
+```
+
+## 6) Troubleshooting
 
 ### Port already in use
 ```bash
