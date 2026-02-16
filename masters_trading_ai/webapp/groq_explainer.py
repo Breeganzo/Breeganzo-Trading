@@ -13,6 +13,7 @@ import json
 import time
 import hashlib
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -300,8 +301,10 @@ def get_news_sentiment(ticker: str, stock_name: str) -> str:
     Get news-based sentiment analysis for a stock.
     Note: This uses Groq's knowledge - for real-time news, integrate a news API.
     """
+    today = datetime.utcnow().strftime("%Y-%m-%d")
     prompt = (
         f"Analyze the recent news sentiment for {stock_name} ({ticker}) on the Indian stock market. "
+        f"Today date: {today}. "
         f"Based on your knowledge of recent events and market conditions:\n\n"
         f"1. **Overall Sentiment**: Is the sentiment Bullish, Bearish, or Neutral?\n"
         f"2. **Key factors affecting sentiment**: List 3 recent factors or events.\n"
@@ -417,8 +420,10 @@ def get_groq_price_forecast(
     Ask Groq for a JSON-only AI price forecast from current context.
     Returns dict with keys: ai_predicted_price, outlook, rationale.
     """
+    today = datetime.utcnow().strftime("%Y-%m-%d")
     prompt = (
         f"You are analyzing {stock_name} ({ticker}) on NSE. "
+        f"Today date: {today}. "
         f"Open price: {open_price:.2f}. "
         f"Strategy predicted price (before market): {strategy_predicted_price:.2f}. "
         f"Current price: {current_price:.2f}. "
@@ -442,16 +447,25 @@ def get_groq_price_forecast(
 
     if not isinstance(payload, dict):
         return {
-            "ai_predicted_price": round(strategy_predicted_price, 2) if strategy_predicted_price else round(current_price, 2),
-            "outlook": "Neutral",
+            "ai_predicted_price": None,
+            "outlook": "Unavailable",
             "rationale": raw[:240] if isinstance(raw, str) else "AI forecast unavailable",
+            "source": "fallback_non_json",
         }
 
     ai_price = payload.get("ai_predicted_price", strategy_predicted_price or current_price)
     try:
         ai_price = float(ai_price)
     except Exception:
-        ai_price = float(strategy_predicted_price or current_price or 0.0)
+        ai_price = 0.0
+
+    if ai_price <= 0:
+        return {
+            "ai_predicted_price": None,
+            "outlook": str(payload.get("outlook", "Unavailable"))[:20],
+            "rationale": str(payload.get("rationale", ""))[:600],
+            "source": "fallback_invalid_price",
+        }
 
     base = current_price if current_price > 0 else strategy_predicted_price
     if base > 0:
@@ -462,6 +476,7 @@ def get_groq_price_forecast(
         "ai_predicted_price": round(ai_price, 2),
         "outlook": str(payload.get("outlook", "Neutral"))[:20],
         "rationale": str(payload.get("rationale", ""))[:600],
+        "source": "groq_json",
     }
 
 

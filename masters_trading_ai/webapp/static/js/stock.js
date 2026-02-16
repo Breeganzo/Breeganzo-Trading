@@ -34,6 +34,12 @@ document.addEventListener('DOMContentLoaded', () => {
         loadLivePrice();
         loadPriceTracker();
     }, 5000);
+
+    // Refresh AI narrative blocks periodically (news + Groq outlook).
+    setInterval(() => {
+        loadNews();
+        loadGroqForecast();
+    }, 15 * 60 * 1000);
 });
 
 // ── Status ────────────────────────────────────────
@@ -1027,19 +1033,22 @@ async function loadPriceTracker() {
         const openPrice = stock.open_price;
         const predPrice = stock.strategy_predicted_price || stock.predicted_price;
         const currPrice = stock.current_price;
-        const aiPrice = stock.ai_predicted_price || predPrice;
+        const aiPrice = Number(stock.ai_predicted_price || 0);
+        const aiAvailable = aiPrice > 0;
 
         // Update tracker cards
         document.getElementById('tracker-open').textContent = `₹${formatN(openPrice)}`;
         document.getElementById('tracker-predicted').textContent = `₹${formatN(predPrice)}`;
         document.getElementById('tracker-current').textContent = `₹${formatN(currPrice)}`;
         const aiEl = document.getElementById('tracker-ai');
-        if (aiEl) aiEl.textContent = `₹${formatN(aiPrice)}`;
+        if (aiEl) aiEl.textContent = aiAvailable ? `₹${formatN(aiPrice)}` : '—';
 
         // Percentage changes from open
         const predPct = stock.open_to_predicted_pct;
         const currPct = stock.open_to_current_pct;
-        const aiPct = stock.open_to_ai_predicted_pct ?? ((aiPrice - openPrice) / (openPrice || 1) * 100);
+        const aiPct = aiAvailable
+            ? Number(stock.open_to_ai_predicted_pct ?? ((aiPrice - openPrice) / (openPrice || 1) * 100))
+            : null;
 
         const predEl = document.getElementById('tracker-predicted-pct');
         predEl.textContent = `${predPct >= 0 ? '+' : ''}${predPct}% from open`;
@@ -1051,8 +1060,13 @@ async function loadPriceTracker() {
 
         const aiPctEl = document.getElementById('tracker-ai-pct');
         if (aiPctEl) {
-            aiPctEl.textContent = `${aiPct >= 0 ? '+' : ''}${Number(aiPct).toFixed(3)}% from open`;
-            aiPctEl.className = `tracker-change ${aiPct >= 0 ? 'up-color' : 'down-color'}`;
+            if (aiAvailable && Number.isFinite(aiPct)) {
+                aiPctEl.textContent = `${aiPct >= 0 ? '+' : ''}${Number(aiPct).toFixed(3)}% from open`;
+                aiPctEl.className = `tracker-change ${aiPct >= 0 ? 'up-color' : 'down-color'}`;
+            } else {
+                aiPctEl.textContent = 'Awaiting Groq forecast';
+                aiPctEl.className = 'tracker-change';
+            }
         }
 
         // Progress bar: how far current is toward predicted
@@ -1104,7 +1118,23 @@ async function loadGroqForecast() {
             return;
         }
         const aiPrice = Number(data.ai_predicted_price || 0);
-        const aiPct = Number(data.open_to_ai_predicted_pct || 0);
+        const aiAvailable = Boolean(data.ai_available) && aiPrice > 0;
+        const aiPctRaw = data.open_to_ai_predicted_pct;
+        const aiPct = Number.isFinite(Number(aiPctRaw))
+            ? Number(aiPctRaw)
+            : ((aiPrice - Number(data.open_price || 0)) / Math.max(Number(data.open_price || 1), 1)) * 100;
+        if (!aiAvailable) {
+            container.innerHTML = `
+                <div class="news-card">
+                    <div class="news-body">
+                        <p><strong>Groq AI price forecast:</strong> unavailable right now.</p>
+                        <p><strong>Outlook:</strong> ${data.outlook || 'Unavailable'}</p>
+                        <p>${formatAIText(data.rationale || '').replace(/^<p>|<\/p>$/g, '')}</p>
+                        <p class="muted-text">Source: ${data.ai_source || 'fallback'} | Generated: ${data.generated_at || 'now'}</p>
+                    </div>
+                </div>`;
+            return;
+        }
         container.innerHTML = `
             <div class="news-card">
                 <div class="news-body">
@@ -1112,11 +1142,11 @@ async function loadGroqForecast() {
                     <span class="${aiPct >= 0 ? 'up-color' : 'down-color'}">(${aiPct >= 0 ? '+' : ''}${aiPct.toFixed(3)}% vs open)</span></p>
                     <p><strong>Outlook:</strong> ${data.outlook || 'Neutral'}</p>
                     <p>${formatAIText(data.rationale || '').replace(/^<p>|<\/p>$/g, '')}</p>
-                    <p class="muted-text">Generated: ${data.generated_at || 'now'}</p>
+                    <p class="muted-text">Source: ${data.ai_source || 'groq'} | Generated: ${data.generated_at || 'now'}</p>
                 </div>
             </div>`;
         const aiTracker = document.getElementById('tracker-ai');
-        if (aiTracker && aiPrice > 0) aiTracker.textContent = `₹${formatN(aiPrice)}`;
+        if (aiTracker) aiTracker.textContent = `₹${formatN(aiPrice)}`;
     } catch (e) {
         container.innerHTML = `<p class="muted-text">Groq AI forecast failed: ${e.message}</p>`;
     }
@@ -1296,7 +1326,7 @@ async function loadFeatureImportance() {
 async function loadNews() {
     const container = document.getElementById('news-content');
     try {
-        const res = await fetch(`/api/news/${encodeURIComponent(TICKER)}`);
+        const res = await fetch(`/api/news/${encodeURIComponent(TICKER)}?t=${Date.now()}`);
         if (!res.ok) {
             container.innerHTML = '<p class="muted-text">News sentiment unavailable.</p>';
             return;
@@ -1310,7 +1340,10 @@ async function loadNews() {
         if (data.sentiment) {
             container.innerHTML = `
             <div class="news-card">
-                <div class="news-body">${formatAIText(data.sentiment)}</div>
+                <div class="news-body">
+                    ${formatAIText(data.sentiment)}
+                    <p class="muted-text">Updated: ${data.generated_at || 'now'}</p>
+                </div>
             </div>`;
         } else {
             container.innerHTML = '<p class="muted-text">No news sentiment available.</p>';

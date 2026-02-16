@@ -120,11 +120,13 @@ CACHE_DIR = PROJECT_ROOT / "cache"
 PREDICTION_LOG_DIR = CACHE_DIR / "prediction_log"
 PORTFOLIO_FILE = CACHE_DIR / "portfolio.json"
 PORTFOLIO_TRADES_FILE = CACHE_DIR / "portfolio_trades.json"
+DELISTED_TICKERS_FILE = CACHE_DIR / "delisted_tickers.csv"
 PREDICTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # Thread-safe lock for file I/O
 _log_lock = threading.Lock()
 _portfolio_lock = threading.Lock()
+_delisted_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Global state (loaded once at startup)
@@ -282,6 +284,113 @@ def _write_portfolio_trades(entries: list[dict]) -> None:
         PORTFOLIO_TRADES_FILE.write_text(json.dumps(entries, indent=2))
 
 
+def _load_delisted_registry_unlocked() -> dict[str, dict]:
+    registry: dict[str, dict] = {}
+    if not DELISTED_TICKERS_FILE.exists():
+        return registry
+    try:
+        with open(DELISTED_TICKERS_FILE, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                ticker = str(row.get("ticker", "")).strip().upper()
+                if not ticker:
+                    continue
+                try:
+                    hit_count = int(float(row.get("hit_count", 0) or 0))
+                except Exception:
+                    hit_count = 0
+                registry[ticker] = {
+                    "ticker": ticker,
+                    "first_seen": row.get("first_seen", ""),
+                    "last_seen": row.get("last_seen", ""),
+                    "hit_count": hit_count,
+                    "last_reason": row.get("last_reason", ""),
+                    "last_source": row.get("last_source", ""),
+                    "status": row.get("status", "watchlist"),
+                }
+    except Exception as e:
+        log.warning(f"Failed to read delisted ticker registry: {e}")
+    return registry
+
+
+def _save_delisted_registry_unlocked(registry: dict[str, dict]) -> None:
+    DELISTED_TICKERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "ticker",
+        "first_seen",
+        "last_seen",
+        "hit_count",
+        "last_reason",
+        "last_source",
+        "status",
+    ]
+    with open(DELISTED_TICKERS_FILE, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for ticker in sorted(registry):
+            row = registry[ticker]
+            writer.writerow({
+                "ticker": row.get("ticker", ticker),
+                "first_seen": row.get("first_seen", ""),
+                "last_seen": row.get("last_seen", ""),
+                "hit_count": int(row.get("hit_count", 0) or 0),
+                "last_reason": row.get("last_reason", ""),
+                "last_source": row.get("last_source", ""),
+                "status": row.get("status", "watchlist"),
+            })
+
+
+def _record_unavailable_ticker(ticker: str, reason: str, source: str = "yfinance") -> None:
+    """Track tickers that repeatedly fail to return valid price data."""
+    t = str(ticker or "").strip().upper()
+    if not t:
+        return
+    now = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+    with _delisted_lock:
+        registry = _load_delisted_registry_unlocked()
+        row = registry.get(t)
+        if row is None:
+            row = {
+                "ticker": t,
+                "first_seen": now,
+                "last_seen": now,
+                "hit_count": 1,
+                "last_reason": reason,
+                "last_source": source,
+                "status": "watchlist",
+            }
+        else:
+            row["last_seen"] = now
+            row["hit_count"] = int(row.get("hit_count", 0) or 0) + 1
+            row["last_reason"] = reason
+            row["last_source"] = source
+        if int(row.get("hit_count", 0) or 0) >= 3:
+            row["status"] = "delisted_candidate"
+        elif row.get("status") != "recovered":
+            row["status"] = "watchlist"
+        registry[t] = row
+        _save_delisted_registry_unlocked(registry)
+
+
+def _mark_ticker_recovered(ticker: str, source: str = "yfinance") -> None:
+    """Mark previously unavailable ticker as recovered once data is back."""
+    t = str(ticker or "").strip().upper()
+    if not t:
+        return
+    now = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+    with _delisted_lock:
+        registry = _load_delisted_registry_unlocked()
+        row = registry.get(t)
+        if not row:
+            return
+        row["last_seen"] = now
+        row["last_source"] = source
+        row["last_reason"] = "price_available"
+        row["status"] = "recovered"
+        registry[t] = row
+        _save_delisted_registry_unlocked(registry)
+
+
 def _portfolio_summary_from_trades(trades: list[dict], include_live_prices: bool = True) -> dict:
     positions: dict[str, dict] = {}
     realized_total = 0.0
@@ -358,20 +467,28 @@ def _get_live_prices_batch(tickers: list[str]) -> dict:
             progress=False, auto_adjust=True, threads=True,
         )
         if data is None or data.empty:
+            if len(tickers) == 1 and tickers[0]:
+                _record_unavailable_ticker(tickers[0], "empty_batch_data", "yfinance_batch")
             return result
 
+        successful: set[str] = set()
         for ticker in tickers:
             try:
                 if len(tickers) == 1:
                     if isinstance(data.columns, pd.MultiIndex):
-                        cols = data.columns.get_level_values(0)
+                        close_col = data["Close"] if "Close" in data.columns.get_level_values(0) else None
                     else:
-                        cols = data.columns
-                    close_col = data["Close"]
+                        close_col = data["Close"] if "Close" in data.columns else None
                 else:
-                    close_col = data["Close"][ticker] if "Close" in data.columns.get_level_values(0) else None
+                    if not isinstance(data.columns, pd.MultiIndex):
+                        close_col = None
+                    elif "Close" in data.columns.get_level_values(0) and ticker in data["Close"].columns:
+                        close_col = data["Close"][ticker]
+                    else:
+                        close_col = None
 
                 if close_col is None or close_col.dropna().empty:
+                    _record_unavailable_ticker(ticker, "missing_close_series", "yfinance_batch")
                     continue
 
                 close_vals = close_col.dropna()
@@ -382,10 +499,17 @@ def _get_live_prices_batch(tickers: list[str]) -> dict:
 
                 # Get volume, high, low, open
                 if len(tickers) == 1:
-                    vol = float(data["Volume"].dropna().values[-1]) if "Volume" in data.columns else 0
-                    high = float(data["High"].dropna().values[-1]) if "High" in data.columns else current
-                    low = float(data["Low"].dropna().values[-1]) if "Low" in data.columns else current
-                    open_p = float(data["Open"].dropna().values[-1]) if "Open" in data.columns else current
+                    if isinstance(data.columns, pd.MultiIndex):
+                        lvl0 = data.columns.get_level_values(0)
+                        vol = float(data["Volume"].dropna().values[-1]) if "Volume" in lvl0 else 0
+                        high = float(data["High"].dropna().values[-1]) if "High" in lvl0 else current
+                        low = float(data["Low"].dropna().values[-1]) if "Low" in lvl0 else current
+                        open_p = float(data["Open"].dropna().values[-1]) if "Open" in lvl0 else current
+                    else:
+                        vol = float(data["Volume"].dropna().values[-1]) if "Volume" in data.columns else 0
+                        high = float(data["High"].dropna().values[-1]) if "High" in data.columns else current
+                        low = float(data["Low"].dropna().values[-1]) if "Low" in data.columns else current
+                        open_p = float(data["Open"].dropna().values[-1]) if "Open" in data.columns else current
                 else:
                     vol = float(data["Volume"][ticker].dropna().values[-1]) if "Volume" in data.columns.get_level_values(0) else 0
                     high = float(data["High"][ticker].dropna().values[-1]) if "High" in data.columns.get_level_values(0) else current
@@ -402,9 +526,18 @@ def _get_live_prices_batch(tickers: list[str]) -> dict:
                     "low": round(low, 2),
                     "open": round(open_p, 2),
                 }
+                successful.add(ticker)
+                _mark_ticker_recovered(ticker, "yfinance_batch")
             except Exception as exc:
                 log.debug(f"Price fetch failed for {ticker}: {exc}")
+                _record_unavailable_ticker(ticker, f"price_fetch_exception:{type(exc).__name__}", "yfinance_batch")
                 continue
+
+        # If at least one ticker succeeded, treat the missing subset as likely symbol issues.
+        if successful:
+            missing = [t for t in tickers if t and t not in successful]
+            for ticker in missing:
+                _record_unavailable_ticker(ticker, "missing_after_batch", "yfinance_batch")
     except Exception as e:
         log.warning(f"Batch price fetch error: {e}")
 
@@ -1265,14 +1398,19 @@ def api_price_tracker(ticker: str):
     predicted_return = _normalize_predicted_return_pct(pred.get("predicted_return", 0))
     strategy_predicted_price = round(open_price * (1 + predicted_return / 100.0), 2) if open_price > 0 else pred.get("predicted_price", 0)
     cached_forecast = _groq_forecast_cache.get(ticker, {})
-    ai_predicted_price = float(cached_forecast.get("ai_predicted_price", strategy_predicted_price) or strategy_predicted_price)
+    ai_raw = cached_forecast.get("ai_predicted_price")
+    try:
+        ai_predicted_price = float(ai_raw) if ai_raw not in (None, "") else 0.0
+    except Exception:
+        ai_predicted_price = 0.0
+    ai_available = ai_predicted_price > 0
     signal = pred.get("signal", "")
     confidence = pred.get("confidence", 0)
 
     open_to_current_pct = ((current_price - open_price) / open_price * 100) if open_price > 0 else 0
     open_to_predicted_pct = ((strategy_predicted_price - open_price) / open_price * 100) if open_price > 0 and strategy_predicted_price > 0 else 0
 
-    open_to_ai_predicted_pct = ((ai_predicted_price - open_price) / open_price * 100) if open_price > 0 and ai_predicted_price > 0 else 0
+    open_to_ai_predicted_pct = ((ai_predicted_price - open_price) / open_price * 100) if open_price > 0 and ai_available else None
 
     return jsonify({
         "ticker": ticker,
@@ -1280,15 +1418,17 @@ def api_price_tracker(ticker: str):
         "open_price": round(open_price, 2),
         "predicted_price": round(strategy_predicted_price, 2),
         "strategy_predicted_price": round(strategy_predicted_price, 2),
-        "ai_predicted_price": round(ai_predicted_price, 2),
+        "ai_predicted_price": round(ai_predicted_price, 2) if ai_available else None,
         "current_price": round(current_price, 2),
         "prev_close": round(prev_close, 2),
         "open_to_current_pct": round(open_to_current_pct, 3),
         "open_to_predicted_pct": round(open_to_predicted_pct, 3),
-        "open_to_ai_predicted_pct": round(open_to_ai_predicted_pct, 3),
+        "open_to_ai_predicted_pct": round(open_to_ai_predicted_pct, 3) if open_to_ai_predicted_pct is not None else None,
         "predicted_return": round(predicted_return, 3),
         "signal": signal,
         "confidence": round(confidence, 1),
+        "ai_forecast_available": ai_available,
+        "ai_forecast_source": cached_forecast.get("ai_source", "none"),
         "change": curr.get("change", 0),
         "change_pct": curr.get("change_pct", 0),
     })
@@ -1304,6 +1444,7 @@ def api_news(ticker: str):
             "ticker": ticker,
             "name": stock_name,
             "sentiment": sentiment,
+            "generated_at": datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST"),
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1342,21 +1483,28 @@ def api_groq_price_forecast(ticker: str):
             current_price=float(tracker_payload.get("current_price") or 0),
             sentiment_text=sentiment or "",
         )
-        ai_price = float(forecast.get("ai_predicted_price") or tracker_payload.get("strategy_predicted_price") or 0)
+        ai_raw = forecast.get("ai_predicted_price")
+        try:
+            ai_price = float(ai_raw) if ai_raw not in (None, "") else 0.0
+        except Exception:
+            ai_price = 0.0
+        ai_available = ai_price > 0
         open_price = float(tracker_payload.get("open_price") or 0)
-        open_to_ai_pct = ((ai_price - open_price) / open_price * 100) if open_price > 0 else 0.0
+        open_to_ai_pct = ((ai_price - open_price) / open_price * 100) if open_price > 0 and ai_available else None
 
         payload = {
             "ticker": ticker,
             "name": stock_name,
             "strategy_predicted_price": tracker_payload.get("strategy_predicted_price"),
             "current_price": tracker_payload.get("current_price"),
-            "ai_predicted_price": round(ai_price, 2),
+            "ai_predicted_price": round(ai_price, 2) if ai_available else None,
             "open_price": tracker_payload.get("open_price"),
-            "open_to_ai_predicted_pct": round(open_to_ai_pct, 3),
+            "open_to_ai_predicted_pct": round(open_to_ai_pct, 3) if open_to_ai_pct is not None else None,
             "outlook": forecast.get("outlook", "Neutral"),
             "rationale": forecast.get("rationale", ""),
             "news_sentiment": sentiment,
+            "ai_available": ai_available,
+            "ai_source": forecast.get("source", "groq"),
             "generated_at": datetime.now(IST).strftime("%d %b %Y, %I:%M %p IST"),
         }
         _groq_forecast_cache[ticker] = payload
@@ -1378,6 +1526,64 @@ def api_explain_risk_term():
         return jsonify({"term": term, "explanation": explanation})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/delisted-tickers")
+def api_delisted_tickers():
+    """
+    Return tracked unavailable tickers.
+    Query params:
+      - min_hits (default 1)
+      - status (optional: watchlist|delisted_candidate|recovered)
+    """
+    try:
+        min_hits = int(request.args.get("min_hits", 1))
+    except Exception:
+        min_hits = 1
+    status_filter = request.args.get("status", "").strip().lower()
+
+    with _delisted_lock:
+        registry = _load_delisted_registry_unlocked()
+
+    rows = []
+    for row in registry.values():
+        hits = int(row.get("hit_count", 0) or 0)
+        status = str(row.get("status", "")).lower()
+        if hits < min_hits:
+            continue
+        if status_filter and status != status_filter:
+            continue
+        rows.append(row)
+
+    rows.sort(key=lambda r: (int(r.get("hit_count", 0) or 0), r.get("last_seen", "")), reverse=True)
+    return jsonify({"count": len(rows), "tickers": rows, "file": str(DELISTED_TICKERS_FILE)})
+
+
+@app.route("/api/delisted-tickers/export.csv")
+def api_delisted_tickers_export_csv():
+    """Export unavailable/delisted tracking sheet as CSV."""
+    with _delisted_lock:
+        registry = _load_delisted_registry_unlocked()
+
+    fieldnames = [
+        "ticker",
+        "first_seen",
+        "last_seen",
+        "hit_count",
+        "last_reason",
+        "last_source",
+        "status",
+    ]
+    out = StringIO()
+    writer = csv.DictWriter(out, fieldnames=fieldnames)
+    writer.writeheader()
+    for ticker in sorted(registry):
+        writer.writerow(registry[ticker])
+
+    resp = make_response(out.getvalue())
+    resp.headers["Content-Type"] = "text/csv; charset=utf-8"
+    resp.headers["Content-Disposition"] = "attachment; filename=delisted_tickers.csv"
+    return resp
 
 
 @app.route("/api/portfolio", methods=["GET", "POST", "DELETE"])
