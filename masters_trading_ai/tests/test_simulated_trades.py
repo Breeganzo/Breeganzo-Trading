@@ -8,14 +8,27 @@ def test_simulated_trade_flow_stop_loss_autosell(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "PORTFOLIO_SIM_FILE", sim_file)
     monkeypatch.setattr(server, "SIMULATED_TRADE_LOG_FILE", sim_log)
     monkeypatch.setattr(server, "_is_tradeable_ticker", lambda ticker: True)
-    monkeypatch.setattr(server, "_estimate_entry_fee", lambda notional, trade_type="equity_delivery": 0.0)
-    monkeypatch.setattr(server, "_estimate_exit_fee", lambda notional, trade_type="equity_delivery": 0.0)
+    monkeypatch.setattr(
+        server,
+        "_estimate_entry_fee",
+        lambda notional, trade_type="equity_delivery": 0.0,
+    )
+    monkeypatch.setattr(
+        server, "_estimate_exit_fee", lambda notional, trade_type="equity_delivery": 0.0
+    )
+    monkeypatch.setattr(server, "_is_market_trade_window", lambda *_: True)
 
     prices = {"AAA.NS": {"price": 94.0}}
-    monkeypatch.setattr(server, "_get_live_prices_batch", lambda tickers: {t: prices.get(t, {"price": 0}) for t in tickers})
+    monkeypatch.setattr(
+        server,
+        "_get_live_prices_batch",
+        lambda tickers: {t: prices.get(t, {"price": 0}) for t in tickers},
+    )
 
     with server.app.test_client() as client:
-        reset = client.post("/api/simulate/trade", json={"action": "RESET", "budget": 40000})
+        reset = client.post(
+            "/api/simulate/trade", json={"action": "RESET", "budget": 40000}
+        )
         assert reset.status_code == 200
 
         bad_sell = client.post(
@@ -47,3 +60,32 @@ def test_simulated_trade_flow_stop_loss_autosell(monkeypatch, tmp_path):
         assert summary.status_code == 200
         payload = summary.get_json()
         assert payload["open_positions_count"] == 0
+
+
+def test_simulated_trade_rejects_outside_market_hours(monkeypatch, tmp_path):
+    sim_file = tmp_path / "portfolio_sim.json"
+    sim_log = tmp_path / "simulated_trades.jsonl"
+
+    monkeypatch.setattr(server, "PORTFOLIO_SIM_FILE", sim_file)
+    monkeypatch.setattr(server, "SIMULATED_TRADE_LOG_FILE", sim_log)
+    monkeypatch.setattr(server, "_is_tradeable_ticker", lambda ticker: True)
+    monkeypatch.setattr(server, "_is_market_trade_window", lambda *_: False)
+
+    with server.app.test_client() as client:
+        reset = client.post(
+            "/api/simulate/trade", json={"action": "RESET", "budget": 40000}
+        )
+        assert reset.status_code == 200
+
+        buy = client.post(
+            "/api/simulate/trade",
+            json={
+                "action": "BUY",
+                "ticker": "AAA.NS",
+                "quantity": 1,
+                "price": 100,
+            },
+        )
+        assert buy.status_code == 403
+        payload = buy.get_json()
+        assert "market hours" in payload.get("error", "").lower()

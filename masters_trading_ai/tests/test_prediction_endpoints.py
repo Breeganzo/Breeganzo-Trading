@@ -92,3 +92,23 @@ def test_api_debug_prediction_status_shape(monkeypatch):
     assert payload["prediction_window"] == "market_open_locked"
     assert payload["snapshot_type"] == "market_open_locked"
     assert payload["predicted_price_formula_ok"] is True
+
+
+def test_api_groq_status_shape(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "get_groq_system_status",
+        lambda: {
+            "degraded_mode": True,
+            "degraded_reason": "upstream_429",
+            "degraded_until_iso": "2026-02-16T12:00:00+05:30",
+            "global_limit_per_min": 45,
+            "endpoint_limit_per_min": 12,
+        },
+    )
+    with server.app.test_client() as client:
+        resp = client.get("/api/groq-status")
+        assert resp.status_code == 200
+        payload = resp.get_json()
+    assert payload["degraded_mode"] is True
+    assert payload["degraded_reason"] == "upstream_429"

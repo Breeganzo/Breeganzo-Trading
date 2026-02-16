@@ -75,6 +75,10 @@ Snapshot windows (IST, server-side):
 - `09:30-15:30`: `market_open_locked` strategy snapshot (frozen)
 - `15:30-next day 00:00`: `after_hours_live` (AI/strategy can refresh and fluctuate)
 
+Scheduled precompute slots (IST):
+- `09:28`: warm premarket/open snapshots for instant UI load
+- `15:31`: warm after-hours snapshot for close-to-next-session flow
+
 Timestamp behavior:
 - In live windows (`after_hours_live`), displayed prediction timestamps use real generation time.
 - During open-window fields (`*_at_open`) inside lock windows, timestamps are normalized to the 09:15-09:30 IST band.
@@ -154,6 +158,7 @@ Simulation risk controls:
 - position sizing by risk-per-trade and max-position cap
 - trailing-stop updates after favorable move
 - daily loss circuit breaker (`MAX_DAILY_LOSS`)
+- BUY/SELL/AUTO_CHECK triggers are allowed only during `09:30-15:30 IST` on trading days
 
 Important: this is simulation only; no live brokerage order is sent.
 
@@ -249,11 +254,18 @@ Runs on `masters_trading_ai/**` changes:
 
 ## 11.1) Groq API Usage Controls
 This codebase uses caching and hard limits to avoid Groq overuse:
-- UI explanation cache (`webapp/groq_explainer.py`): prompt cache + `MIN_CALL_INTERVAL=1s`
+- UI explanation cache (`webapp/groq_explainer.py`): prompt cache + endpoint queue
+- strict limits: `GROQ_GLOBAL_MAX_PER_MIN` and `GROQ_ENDPOINT_MAX_PER_MIN`
 - AI forecast cache (`webapp/server.py`): `GROQ_FORECAST_TTL=900s`
 - News-sentiment scoring cache (`src/inference/predictor.py`): `SENTIMENT_CACHE_TTL_SECONDS` (default 1800s)
 - News-sentiment call budget: `GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE` (default 8)
 - Toggle sentiment Groq usage: `ENABLE_GROQ_NEWS_SENTIMENT` (`1`/`0`)
+- degraded mode: if Groq returns `429`, app enters cached-only mode and shows a UI banner
+
+Groq health endpoint:
+```bash
+curl -s 'http://localhost:5001/api/groq-status' | jq
+```
 
 Recommended `.env` knobs:
 ```bash

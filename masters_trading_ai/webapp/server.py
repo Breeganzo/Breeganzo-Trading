@@ -74,6 +74,9 @@ from webapp.groq_explainer import (
     suggest_ticker_shortlist,
     review_trade_plan,
     ai_risk_assessment,
+    get_groq_system_status,
+    set_groq_request_endpoint,
+    reset_groq_request_endpoint,
 )
 from webapp.prediction_tracker import PredictionTracker
 
@@ -133,6 +136,21 @@ class NumpyJSONProvider(DefaultJSONProvider):
 app.json_provider_class = NumpyJSONProvider
 app.json = NumpyJSONProvider(app)
 
+
+@app.before_request
+def _bind_groq_endpoint_scope():
+    endpoint_name = request.endpoint or request.path or "unknown_endpoint"
+    request._groq_endpoint_token = set_groq_request_endpoint(endpoint_name)  # type: ignore[attr-defined]
+
+
+@app.teardown_request
+def _clear_groq_endpoint_scope(_exc=None):
+    token = getattr(request, "_groq_endpoint_token", None)
+    if token is not None:
+        reset_groq_request_endpoint(token)
+    return None
+
+
 IST = ZoneInfo("Asia/Kolkata")
 CONFIG_DIR = PROJECT_ROOT / "config"
 CACHE_DIR = PROJECT_ROOT / "cache"
@@ -165,7 +183,9 @@ ATR_MULT_MED_CONF = float(os.environ.get("ATR_MULT_MED_CONF", "2.0"))
 ATR_MULT_LOW_CONF = float(os.environ.get("ATR_MULT_LOW_CONF", "2.5"))
 INDIAN_MARKET_BUFFER = float(os.environ.get("INDIAN_MARKET_BUFFER", "0.005"))
 HIGH_CONFIDENCE_THRESHOLD = float(os.environ.get("HIGH_CONFIDENCE_THRESHOLD", "0.80"))
-MEDIUM_CONFIDENCE_THRESHOLD = float(os.environ.get("MEDIUM_CONFIDENCE_THRESHOLD", "0.60"))
+MEDIUM_CONFIDENCE_THRESHOLD = float(
+    os.environ.get("MEDIUM_CONFIDENCE_THRESHOLD", "0.60")
+)
 AI_STRATEGY_GAP_WARN = float(os.environ.get("AI_STRATEGY_GAP_WARN", "0.10"))
 AI_STRATEGY_GAP_BLOCK = float(os.environ.get("AI_STRATEGY_GAP_BLOCK", "0.50"))
 
@@ -250,6 +270,30 @@ MARKET_LOCK_END_MINUTE = int(
         _webapp_settings.get("market_lock_end_minute", 30),
     )
 )
+PRECOMPUTE_OPEN_HOUR = int(
+    os.environ.get(
+        "PRECOMPUTE_OPEN_HOUR", _webapp_settings.get("precompute_open_hour", 9)
+    )
+)
+PRECOMPUTE_OPEN_MINUTE = int(
+    os.environ.get(
+        "PRECOMPUTE_OPEN_MINUTE", _webapp_settings.get("precompute_open_minute", 28)
+    )
+)
+PRECOMPUTE_CLOSE_HOUR = int(
+    os.environ.get(
+        "PRECOMPUTE_CLOSE_HOUR", _webapp_settings.get("precompute_close_hour", 15)
+    )
+)
+PRECOMPUTE_CLOSE_MINUTE = int(
+    os.environ.get(
+        "PRECOMPUTE_CLOSE_MINUTE", _webapp_settings.get("precompute_close_minute", 31)
+    )
+)
+PRECOMPUTE_OPEN_HOUR = int(np.clip(PRECOMPUTE_OPEN_HOUR, 0, 23))
+PRECOMPUTE_OPEN_MINUTE = int(np.clip(PRECOMPUTE_OPEN_MINUTE, 0, 59))
+PRECOMPUTE_CLOSE_HOUR = int(np.clip(PRECOMPUTE_CLOSE_HOUR, 0, 23))
+PRECOMPUTE_CLOSE_MINUTE = int(np.clip(PRECOMPUTE_CLOSE_MINUTE, 0, 59))
 ALPHA_RISK_FREE_ANNUAL = float(
     os.environ.get(
         "ALPHA_RISK_FREE_ANNUAL", _market_settings.get("risk_free_rate", 0.0)
@@ -751,7 +795,9 @@ def _read_portfolio_sim_state() -> dict:
             if isinstance(state, dict):
                 state.setdefault("schema_version", 1)
                 state.setdefault("initial_cash", SIMULATION_DEFAULT_CASH)
-                state.setdefault("cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH))
+                state.setdefault(
+                    "cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH)
+                )
                 state.setdefault("open_positions", {})
                 state.setdefault("closed_trades", [])
                 state.setdefault("trade_history", [])
@@ -816,7 +862,9 @@ def _estimate_exit_fee(sell_value: float, trade_type: str = "equity_delivery") -
     if _groww_cost_calculator is None:
         return round(value * 0.0008, 2)
     try:
-        return round(float(_groww_cost_calculator.sell_cost(value, trade_type).total), 2)
+        return round(
+            float(_groww_cost_calculator.sell_cost(value, trade_type).total), 2
+        )
     except Exception:
         return round(value * 0.0008, 2)
 
@@ -963,7 +1011,8 @@ def _execute_sim_sell(
     max_loss_amount = float(
         tracker.get(
             "max_daily_loss_amount",
-            float(state.get("initial_cash", SIMULATION_DEFAULT_CASH) or 0) * MAX_DAILY_LOSS,
+            float(state.get("initial_cash", SIMULATION_DEFAULT_CASH) or 0)
+            * MAX_DAILY_LOSS,
         )
         or 0
     )
@@ -977,7 +1026,9 @@ def _execute_sim_sell(
         )
     state["daily_loss_tracker"] = tracker
 
-    cash = float(state.get("cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH)) or 0)
+    cash = float(
+        state.get("cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH)) or 0
+    )
     state["cash"] = round(cash + sell_value - sell_fee, 2)
 
     remaining_qty = open_qty - qty
@@ -1049,12 +1100,18 @@ def _execute_sim_buy(
 
     tracker = _daily_tracker_for_state(state, now_ts=ts)
     if tracker.get("trading_paused"):
-        return state, None, str(tracker.get("paused_reason") or "Trading paused for the day")
+        return (
+            state,
+            None,
+            str(tracker.get("paused_reason") or "Trading paused for the day"),
+        )
 
     notional = round(px * qty, 2)
     entry_fee = _estimate_entry_fee(notional, trade_type=trade_type)
     total_debit = round(notional + entry_fee, 2)
-    cash = float(state.get("cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH)) or 0)
+    cash = float(
+        state.get("cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH)) or 0
+    )
     if total_debit > cash + 1e-9:
         return (
             state,
@@ -1667,8 +1724,13 @@ def api_status():
                 "default_tickers": PREMARKET_DEFAULT_TICKERS,
                 "premarket_window": f"{PREMARKET_WINDOW_START_HOUR:02d}:{PREMARKET_WINDOW_START_MINUTE:02d}-{MARKET_LOCK_START_HOUR:02d}:{MARKET_LOCK_START_MINUTE:02d} IST",
                 "market_lock_window": f"{MARKET_LOCK_START_HOUR:02d}:{MARKET_LOCK_START_MINUTE:02d}-{MARKET_LOCK_END_HOUR:02d}:{MARKET_LOCK_END_MINUTE:02d} IST",
+                "precompute_slots_ist": [
+                    f"{PRECOMPUTE_OPEN_HOUR:02d}:{PRECOMPUTE_OPEN_MINUTE:02d}",
+                    f"{PRECOMPUTE_CLOSE_HOUR:02d}:{PRECOMPUTE_CLOSE_MINUTE:02d}",
+                ],
             },
             "premarket_snapshot": premarket_meta,
+            "groq": get_groq_system_status(),
         }
     )
 
@@ -1686,6 +1748,12 @@ def api_sectors():
             ],
         }
     return jsonify(result)
+
+
+@app.route("/api/groq-status")
+def api_groq_status():
+    """Expose Groq queue/degraded-mode state for frontend banners."""
+    return jsonify(get_groq_system_status())
 
 
 @app.route("/api/prices")
@@ -1931,7 +1999,9 @@ def api_advisor_open_buy_list():
         ranked: list[dict] = []
         for row in buy_candidates:
             conf = max(0.0, min(100.0, _safe_float(row.get("confidence")))) / 100.0
-            agree = max(0.0, min(100.0, _safe_float(row.get("model_agreement")))) / 100.0
+            agree = (
+                max(0.0, min(100.0, _safe_float(row.get("model_agreement")))) / 100.0
+            )
             pred_ret_dec = abs(_safe_float(row.get("predicted_return"))) / 100.0
             atr_pct = abs(_safe_float(row.get("atr_pct")))
             liq_raw = _safe_float(row.get("liquidity_factor"))
@@ -1950,7 +2020,9 @@ def api_advisor_open_buy_list():
                 volatility_factor = 0.9
             else:
                 volatility_factor = 1.05
-            edge_score = pred_ret_dec * conf * agree * liq * volatility_factor * sent_penalty
+            edge_score = (
+                pred_ret_dec * conf * agree * liq * volatility_factor * sent_penalty
+            )
             ranked.append(
                 {
                     **row,
@@ -1986,7 +2058,9 @@ def api_advisor_open_buy_list():
                     f"{ticker} skipped: projected alpha/return {pred_ret_pct:.2f}% is above conservative cap."
                 )
                 continue
-            strategy_price = _safe_float(row.get("target_price") or row.get("predicted_price"))
+            strategy_price = _safe_float(
+                row.get("target_price") or row.get("predicted_price")
+            )
             if strategy_price <= 0:
                 strategy_price = current_price
             if strategy_price <= 0:
@@ -2084,10 +2158,16 @@ def api_advisor_open_buy_list():
                     "risk_reward": round(rr, 2),
                     "predicted_return_pct": round(pred_ret_pct, 3),
                     "confidence": round(_safe_float(row.get("confidence")), 1),
-                    "model_agreement": round(_safe_float(row.get("model_agreement")), 1),
+                    "model_agreement": round(
+                        _safe_float(row.get("model_agreement")), 1
+                    ),
                     "liquidity_factor": round(liq_factor, 3),
-                    "avg_volume_30d": round(avg_volume_30d, 2) if avg_volume_30d > 0 else None,
-                    "volatility_atr_pct": round(abs(_safe_float(row.get("atr_pct"))), 2),
+                    "avg_volume_30d": (
+                        round(avg_volume_30d, 2) if avg_volume_30d > 0 else None
+                    ),
+                    "volatility_atr_pct": round(
+                        abs(_safe_float(row.get("atr_pct"))), 2
+                    ),
                     "edge_score": round(_safe_float(row.get("_edge_score")), 6),
                     "sentiment_weighted_score": round(
                         _safe_float(row.get("weighted_sentiment_raw")),
@@ -2096,7 +2176,8 @@ def api_advisor_open_buy_list():
                     "next_recommended_sell_time": _next_recommended_sell_time(
                         current_price, stop_loss, target_price
                     ),
-                    "strategy_generated_at": row.get("timestamp") or datetime.now(IST).isoformat(),
+                    "strategy_generated_at": row.get("timestamp")
+                    or datetime.now(IST).isoformat(),
                 }
             )
 
@@ -2153,7 +2234,9 @@ def api_simulate_portfolio():
                 "quantity": round(qty, 4),
                 "entry_price": round(entry, 2),
                 "current_price": round(live, 2) if live > 0 else None,
-                "target_price": round(strategy_target, 2) if strategy_target > 0 else None,
+                "target_price": (
+                    round(strategy_target, 2) if strategy_target > 0 else None
+                ),
                 "stop_loss_price": round(stop_loss, 2) if stop_loss > 0 else None,
                 "unrealized_pnl": round(mark - entry_value, 2),
                 "next_recommended_sell_time": _next_recommended_sell_time(
@@ -2163,12 +2246,16 @@ def api_simulate_portfolio():
                 "opened_at": pos.get("opened_at"),
             }
         )
-    cash = float(state.get("cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH)) or 0)
+    cash = float(
+        state.get("cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH)) or 0
+    )
     return jsonify(
         {
             "schema_version": int(state.get("schema_version", 1)),
             "source": "strategy_simulation",
-            "initial_cash": round(float(state.get("initial_cash", SIMULATION_DEFAULT_CASH)), 2),
+            "initial_cash": round(
+                float(state.get("initial_cash", SIMULATION_DEFAULT_CASH)), 2
+            ),
             "cash": round(cash, 2),
             "invested_value": round(invested, 2),
             "mark_to_market_value": round(mtm_value, 2),
@@ -2220,6 +2307,24 @@ def api_simulate_trade():
                 "message": "Simulation portfolio reset.",
                 "state": state,
             }
+        )
+
+    if not _is_market_trade_window():
+        now_iso = datetime.now(IST).isoformat()
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "Simulated BUY/SELL triggers are allowed only during market hours "
+                        "(09:30-15:30 IST, trading days)."
+                    ),
+                    "action": action,
+                    "market_window": _prediction_window_type(),
+                    "server_time_ist": now_iso,
+                    "source": "strategy_simulation",
+                }
+            ),
+            403,
         )
 
     if action == "AUTO_CHECK":
@@ -2300,7 +2405,9 @@ def api_simulate_trade():
         ):
             try:
                 snapshot = _get_prediction_snapshot(use_latest_stored=True)
-                snap_rows = snapshot.get("items", []) if isinstance(snapshot, dict) else []
+                snap_rows = (
+                    snapshot.get("items", []) if isinstance(snapshot, dict) else []
+                )
                 candidates = []
                 for row in snap_rows:
                     if not isinstance(row, dict):
@@ -2425,7 +2532,9 @@ def api_simulate_trade():
 
     price = _safe_float(payload.get("price"))
     if price <= 0:
-        price = _safe_float(_get_live_prices_batch([ticker]).get(ticker, {}).get("price"))
+        price = _safe_float(
+            _get_live_prices_batch([ticker]).get(ticker, {}).get("price")
+        )
     if price <= 0:
         return jsonify({"error": f"price not available for {ticker}"}), 400
 
@@ -2452,7 +2561,12 @@ def api_simulate_trade():
                 uses_sentiment=uses_sentiment,
             )
             if skip:
-                return jsonify({"error": "Trade blocked: low confidence under risk policy"}), 400
+                return (
+                    jsonify(
+                        {"error": "Trade blocked: low confidence under risk policy"}
+                    ),
+                    400,
+                )
             stop_loss = _round_to_tick(price * (1 - sl_pct))
         if target_price <= 0:
             target_price = _round_to_tick(
@@ -3356,6 +3470,14 @@ def _prediction_window_type(now: datetime | None = None) -> str:
     return "after_hours_live"
 
 
+def _is_market_trade_window(now: datetime | None = None) -> bool:
+    """BUY/SELL simulation triggers are allowed only during locked market hours."""
+    ts = now or datetime.now(IST)
+    if ts.weekday() >= 5:
+        return False
+    return _prediction_window_type(ts) == "market_open_locked"
+
+
 def _load_prediction_snapshots_from_disk() -> dict:
     if not PREDICTION_SNAPSHOTS_FILE.exists():
         return {}
@@ -3685,7 +3807,9 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
         return {}
     out = dict(snapshot)
     snap_date = out.get("date") or datetime.now(IST).strftime("%Y-%m-%d")
-    preserve_live_today = _prediction_window_type(datetime.now(IST)) == "after_hours_live"
+    preserve_live_today = (
+        _prediction_window_type(datetime.now(IST)) == "after_hours_live"
+    )
     snap_captured_actual = out.get("captured_at_actual") or out.get("captured_at")
     snap_captured = _normalize_open_window_timestamp(
         out.get("captured_at") or snap_captured_actual,
@@ -4037,7 +4161,10 @@ def _get_recent_legit_news_context(ticker: str, max_items: int = 6) -> str:
         if not title:
             continue
         publisher = str(
-            row.get("publisher") or row.get("provider") or row.get("source") or "unknown"
+            row.get("publisher")
+            or row.get("provider")
+            or row.get("source")
+            or "unknown"
         ).strip()
         published = row.get("providerPublishTime")
         try:
@@ -4046,7 +4173,9 @@ def _get_recent_legit_news_context(ticker: str, max_items: int = 6) -> str:
             )
         except Exception:
             pub_ts = ""
-        lines.append(f"- [{publisher}] {title}" + (f" ({pub_ts} IST)" if pub_ts else ""))
+        lines.append(
+            f"- [{publisher}] {title}" + (f" ({pub_ts} IST)" if pub_ts else "")
+        )
         if len(lines) >= max_items:
             break
     return "\n".join(lines)
@@ -4115,7 +4244,9 @@ def _resolve_ai_forecast_price(
         sentiment = get_news_sentiment(ticker, stock_name)
         legit_news_ctx = _get_recent_legit_news_context(ticker)
         if legit_news_ctx:
-            sentiment = (sentiment or "") + "\n\nRecent source headlines:\n" + legit_news_ctx
+            sentiment = (
+                (sentiment or "") + "\n\nRecent source headlines:\n" + legit_news_ctx
+            )
         forecast = get_groq_price_forecast(
             ticker=ticker,
             stock_name=stock_name,
@@ -4577,6 +4708,60 @@ def _daily_analysis_background_loop():
         time.sleep(DAILY_ANALYSIS_TTL)
 
 
+def _run_scheduled_precompute(tag: str) -> None:
+    """Warm critical snapshots around open/close so UI loads instantly."""
+    global _daily_analysis_cache, _daily_analysis_cache_time
+    if not models_loaded or predictor is None:
+        return
+    now = datetime.now(IST)
+    token = set_groq_request_endpoint(f"scheduler:{tag}")
+    try:
+        if tag == "open_0928":
+            _capture_opening_prices()
+            _capture_premarket_snapshot_if_due(force=True)
+            _get_prediction_snapshot(force=True, use_latest_stored=False)
+        elif tag == "close_1531":
+            _get_prediction_snapshot(force=True, use_latest_stored=False)
+
+        result = _build_daily_analysis()
+        with _daily_analysis_lock:
+            _daily_analysis_cache = result
+            _daily_analysis_cache_time = time.time()
+        log.info("Scheduled precompute complete (%s) at %s", tag, now.isoformat())
+    except Exception as exc:
+        log.warning("Scheduled precompute failed (%s): %s", tag, exc)
+    finally:
+        reset_groq_request_endpoint(token)
+
+
+def _scheduled_precompute_loop():
+    """Cron-style scheduler: precompute at 09:28 and 15:31 IST (trading days)."""
+    executed: set[str] = set()
+    while True:
+        now = datetime.now(IST)
+        if now.weekday() < 5:
+            slot = None
+            if (
+                now.hour == PRECOMPUTE_OPEN_HOUR
+                and now.minute == PRECOMPUTE_OPEN_MINUTE
+            ):
+                slot = "open_0928"
+            elif (
+                now.hour == PRECOMPUTE_CLOSE_HOUR
+                and now.minute == PRECOMPUTE_CLOSE_MINUTE
+            ):
+                slot = "close_1531"
+            if slot:
+                run_key = f"{now.strftime('%Y-%m-%d %H:%M')}::{slot}"
+                if run_key not in executed:
+                    executed.add(run_key)
+                    _run_scheduled_precompute(slot)
+
+        today_prefix = now.strftime("%Y-%m-%d")
+        executed = {k for k in executed if k.startswith(today_prefix)}
+        time.sleep(12)
+
+
 @app.route("/api/daily-analysis")
 def api_daily_analysis():
     """
@@ -4673,6 +4858,7 @@ def api_price_tracker(ticker: str):
     market = get_market_status()
     market_status = market.get("status", "")
     now_ist = datetime.now(IST)
+    prediction_window = _prediction_window_type(now_ist)
     next_day_mode = (
         _is_next_day_prediction_window(now_ist) or market_status == "weekend"
     )
@@ -4715,6 +4901,22 @@ def api_price_tracker(ticker: str):
         )
         or datetime.now(IST).isoformat()
     )
+    live_strategy_return = predicted_return
+    if prediction_window == "after_hours_live":
+        try:
+            live_pred = predictor.predict_single(ticker, use_cache=False) or {}
+        except Exception:
+            live_pred = {}
+        live_strategy_return = _normalize_predicted_return_pct(
+            live_pred.get("predicted_return", predicted_return)
+        )
+        signal = live_pred.get("signal", signal)
+        confidence = live_pred.get("confidence", confidence)
+        current_strategy_predicted_at = (
+            live_pred.get("timestamp")
+            or live_pred.get("generated_at_iso")
+            or now_ist.isoformat()
+        )
 
     if open_price <= 0:
         open_price = current_price
@@ -4723,33 +4925,69 @@ def api_price_tracker(ticker: str):
     if ai_open_price <= 0:
         ai_open_price = ai_predicted_price if ai_predicted_price > 0 else 0.0
 
-    if next_day_mode:
-        reference_price = current_price if current_price > 0 else open_price
-        next_day_strategy_price = (
-            round(reference_price * (1 + predicted_return / 100.0), 2)
-            if reference_price > 0
-            else strategy_price_at_open
-        )
-        ai_meta_now = _resolve_ai_forecast_price(
+    current_strategy_ref = current_price if current_price > 0 else open_price
+    current_strategy_price = (
+        round(current_strategy_ref * (1 + live_strategy_return / 100.0), 2)
+        if current_strategy_ref > 0
+        else strategy_price_at_open
+    )
+    ai_meta_live = {
+        "available": ai_open_price > 0,
+        "price": float(ai_open_price or 0),
+        "source": str(
+            premarket_row.get("ai_source") or ai_meta_open.get("source", "none")
+        ),
+        "generated_at_iso": ai_meta_open.get("generated_at_iso")
+        or ai_predicted_at_open,
+    }
+    if prediction_window == "after_hours_live" or ai_open_price <= 0:
+        ai_meta_live = _resolve_ai_forecast_price(
             ticker,
             open_price=float(open_price or 0),
-            strategy_price=float(next_day_strategy_price or 0),
+            strategy_price=float(current_strategy_price or strategy_price_at_open or 0),
             current_price=float(current_price or 0),
             allow_generate=bool(os.environ.get("GROQ_API_KEY")),
         )
-        next_day_ai_price = float(ai_meta_now.get("price") or 0)
+    current_ai_price = float(ai_meta_live.get("price") or ai_open_price or 0)
+    if prediction_window == "after_hours_live":
+        current_ai_predicted_at = (
+            ai_meta_live.get("generated_at_iso")
+            or current_ai_predicted_at
+            or now_ist.isoformat()
+        )
+
+    if next_day_mode:
+        reference_price = current_price if current_price > 0 else open_price
+        next_day_strategy_price = (
+            round(reference_price * (1 + live_strategy_return / 100.0), 2)
+            if reference_price > 0
+            else strategy_price_at_open
+        )
+        next_day_ai_price = (
+            current_ai_price
+            if current_ai_price > 0
+            else float(ai_meta_open.get("price") or 0)
+        )
         next_day_predicted_at = now_ist.isoformat()
         current_strategy_predicted_at = next_day_predicted_at
-        current_ai_predicted_at = ai_meta_now.get("generated_at_iso") or None
-        ai_source = str(ai_meta_now.get("source", ai_meta_open.get("source", "none")))
+        current_ai_predicted_at = ai_meta_live.get("generated_at_iso") or None
+        ai_source = str(ai_meta_live.get("source", ai_meta_open.get("source", "none")))
     else:
         reference_price = open_price
-        next_day_strategy_price = strategy_price_at_open
-        next_day_ai_price = ai_open_price
-        next_day_predicted_at = strategy_predicted_at_open
-        ai_source = str(
-            premarket_row.get("ai_source") or ai_meta_open.get("source", "none")
-        )
+        if prediction_window == "after_hours_live":
+            next_day_strategy_price = current_strategy_price
+            next_day_ai_price = current_ai_price
+            next_day_predicted_at = current_strategy_predicted_at
+            ai_source = str(
+                ai_meta_live.get("source", ai_meta_open.get("source", "none"))
+            )
+        else:
+            next_day_strategy_price = strategy_price_at_open
+            next_day_ai_price = ai_open_price
+            next_day_predicted_at = strategy_predicted_at_open
+            ai_source = str(
+                premarket_row.get("ai_source") or ai_meta_open.get("source", "none")
+            )
 
     open_to_current_pct = (
         ((current_price - open_price) / open_price * 100) if open_price > 0 else 0
@@ -4776,6 +5014,30 @@ def api_price_tracker(ticker: str):
         else None
     )
 
+    display_strategy_price = (
+        next_day_strategy_price
+        if prediction_window == "after_hours_live"
+        else strategy_price_at_open
+    )
+    display_ai_price = (
+        next_day_ai_price if prediction_window == "after_hours_live" else ai_open_price
+    )
+    strategy_display_predicted_at = (
+        current_strategy_predicted_at
+        if prediction_window == "after_hours_live"
+        else strategy_predicted_at_open
+    )
+    ai_display_predicted_at = (
+        current_ai_predicted_at
+        if prediction_window == "after_hours_live"
+        else ai_predicted_at_open
+    )
+    display_predicted_return = (
+        live_strategy_return
+        if prediction_window == "after_hours_live"
+        else predicted_return
+    )
+
     snapshot_now_iso = datetime.now(IST).isoformat()
     return jsonify(
         {
@@ -4786,10 +5048,10 @@ def api_price_tracker(ticker: str):
             "open_price_captured_at_display": _format_ist_timestamp(
                 open_price_captured_at
             ),
-            "predicted_price": round(strategy_price_at_open, 2),
-            "strategy_predicted_price": round(strategy_price_at_open, 2),
+            "predicted_price": round(display_strategy_price, 2),
+            "strategy_predicted_price": round(display_strategy_price, 2),
             "ai_predicted_price": (
-                round(ai_open_price, 2) if ai_open_price > 0 else None
+                round(display_ai_price, 2) if display_ai_price > 0 else None
             ),
             "current_strategy_predicted_price": round(next_day_strategy_price, 2),
             "current_ai_predicted_price": (
@@ -4799,6 +5061,7 @@ def api_price_tracker(ticker: str):
             "close_price": round(current_price, 2) if is_market_closed else None,
             "display_price_label": display_price_label,
             "market_status": market_status,
+            "prediction_window": prediction_window,
             "prediction_mode": prediction_mode,
             "predicted_for_date": predicted_for_date,
             "prediction_reference_price": (
@@ -4820,8 +5083,16 @@ def api_price_tracker(ticker: str):
             "strategy_predicted_at_open_display": _format_ist_timestamp(
                 strategy_predicted_at_open
             ),
+            "strategy_display_predicted_at": strategy_display_predicted_at,
+            "strategy_display_predicted_at_display": _format_ist_timestamp(
+                strategy_display_predicted_at
+            ),
             "ai_predicted_at_open": ai_predicted_at_open,
             "ai_predicted_at_open_display": _format_ist_timestamp(ai_predicted_at_open),
+            "ai_display_predicted_at": ai_display_predicted_at,
+            "ai_display_predicted_at_display": _format_ist_timestamp(
+                ai_display_predicted_at
+            ),
             "current_strategy_predicted_at": current_strategy_predicted_at,
             "current_strategy_predicted_at_display": _format_ist_timestamp(
                 current_strategy_predicted_at
@@ -4848,7 +5119,7 @@ def api_price_tracker(ticker: str):
             "close_to_ai_pct": (
                 round(close_to_ai_pct, 3) if close_to_ai_pct is not None else None
             ),
-            "predicted_return": round(predicted_return, 3),
+            "predicted_return": round(display_predicted_return, 3),
             "signal": signal,
             "confidence": round(confidence, 1),
             "ai_forecast_available": bool(ai_open_price > 0 or next_day_ai_price > 0),
@@ -6145,6 +6416,16 @@ if __name__ == "__main__":
     )
     analysis_thread.start()
     log.info("Daily analysis background thread started")
+
+    precompute_thread = threading.Thread(target=_scheduled_precompute_loop, daemon=True)
+    precompute_thread.start()
+    log.info(
+        "Scheduled precompute thread started (%02d:%02d and %02d:%02d IST)",
+        PRECOMPUTE_OPEN_HOUR,
+        PRECOMPUTE_OPEN_MINUTE,
+        PRECOMPUTE_CLOSE_HOUR,
+        PRECOMPUTE_CLOSE_MINUTE,
+    )
 
     port = int(os.environ.get("FLASK_PORT", 5001))
     log.info(f"Starting Flask server at http://localhost:{port}")

@@ -17,6 +17,7 @@ let highlightedPremarketTicker = null;
 let metricTooltipHideTimer = null;
 let useLatestStoredPredictions = false;
 let currentMarketStatus = '';
+let groqStatusTimer = null;
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -25,6 +26,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadIndexPrices();
     loadPricesForSector('all');
     loadDailyAnalysis();
+    checkGroqStatus();
     startISTClock();
     // Auto-refresh prices every 5 seconds
     autoRefreshTimer = setInterval(() => {
@@ -39,6 +41,11 @@ document.addEventListener('DOMContentLoaded', () => {
             loadDailyAnalysis();
         }
     }, 60000);
+    groqStatusTimer = setInterval(() => {
+        if (document.visibilityState === 'visible') {
+            checkGroqStatus();
+        }
+    }, 12000);
     document.addEventListener('keydown', (evt) => {
         if (evt.key === 'Escape') hideMetricTooltip(true);
     });
@@ -117,9 +124,40 @@ async function checkStatus() {
             }
             setTimeout(checkStatus, 3000);
         }
+        if (data.groq) {
+            updateGroqDegradedBanner(data.groq);
+        }
     } catch (e) {
         console.error('Status check failed:', e);
         setTimeout(checkStatus, 5000);
+    }
+}
+
+function updateGroqDegradedBanner(groqStatus) {
+    const banner = document.getElementById('groq-degraded-banner');
+    const text = document.getElementById('groq-degraded-text');
+    if (!banner || !text) return;
+    const degraded = Boolean(groqStatus?.degraded_mode);
+    if (!degraded) {
+        banner.classList.add('hidden');
+        return;
+    }
+    const reason = groqStatus?.degraded_reason || 'rate-limited';
+    const until = groqStatus?.degraded_until_iso ? formatIstTimestamp(groqStatus.degraded_until_iso) : '';
+    text.textContent = until
+        ? `${reason}. Cached Groq content only until ${until}.`
+        : `${reason}. Cached Groq content only until limits recover.`;
+    banner.classList.remove('hidden');
+}
+
+async function checkGroqStatus() {
+    try {
+        const res = await fetch('/api/groq-status');
+        if (!res.ok) return;
+        const data = await res.json();
+        updateGroqDegradedBanner(data);
+    } catch (_) {
+        // Ignore banner failures; dashboard remains functional without Groq.
     }
 }
 

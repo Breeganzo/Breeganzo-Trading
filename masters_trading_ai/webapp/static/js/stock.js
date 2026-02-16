@@ -20,10 +20,12 @@ let currentInterval = '1m';
 let chartRefreshTimer = null;
 let metricExplainCache = {};
 let metricTooltipHideTimer = null;
+let groqStatusTimer = null;
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     checkStatus();
+    checkGroqStatus();
     initChart();
     loadChartData(currentPeriod, currentInterval);
     loadLivePrice();
@@ -53,6 +55,11 @@ document.addEventListener('DOMContentLoaded', () => {
         loadNews();
         loadGroqForecast();
     }, 15 * 60 * 1000);
+    groqStatusTimer = setInterval(() => {
+        if (document.visibilityState === 'visible') {
+            checkGroqStatus();
+        }
+    }, 12000);
     document.addEventListener('keydown', (evt) => {
         if (evt.key === 'Escape') hideMetricTooltip(true);
     });
@@ -80,8 +87,39 @@ async function checkStatus() {
             mktBadge.textContent = '🔴 ' + data.market.description;
             mktBadge.className = 'status-badge closed';
         }
+        if (data.groq) {
+            updateGroqDegradedBanner(data.groq);
+        }
     } catch (e) {
         console.error('Status check failed:', e);
+    }
+}
+
+function updateGroqDegradedBanner(groqStatus) {
+    const banner = document.getElementById('groq-degraded-banner');
+    const text = document.getElementById('groq-degraded-text');
+    if (!banner || !text) return;
+    const degraded = Boolean(groqStatus?.degraded_mode);
+    if (!degraded) {
+        banner.classList.add('hidden');
+        return;
+    }
+    const reason = groqStatus?.degraded_reason || 'rate-limited';
+    const until = formatTimestamp(groqStatus?.degraded_until_iso);
+    text.textContent = until && until !== '—'
+        ? `${reason}. Cached Groq content only until ${until}.`
+        : `${reason}. Cached Groq content only until limits recover.`;
+    banner.classList.remove('hidden');
+}
+
+async function checkGroqStatus() {
+    try {
+        const res = await fetch('/api/groq-status');
+        if (!res.ok) return;
+        const data = await res.json();
+        updateGroqDegradedBanner(data);
+    } catch (_) {
+        // Keep page functional even if status check fails.
     }
 }
 
@@ -1554,19 +1592,25 @@ async function loadPriceTracker() {
 
         const openPrice = Number(stock.open_price || 0);
         const nextDayMode = stock.prediction_mode === 'next_day_after_close';
+        const predictionWindow = String(stock.prediction_window || '');
+        const liveWindow = predictionWindow === 'after_hours_live' && !nextDayMode;
         const predPrice = Number(
-            (nextDayMode
-                ? stock.next_day_strategy_predicted_price
-                : stock.strategy_predicted_price)
+            (liveWindow
+                ? stock.current_strategy_predicted_price
+                : (nextDayMode
+                    ? stock.next_day_strategy_predicted_price
+                    : stock.strategy_predicted_price))
             || stock.strategy_predicted_price
             || stock.predicted_price
             || 0
         );
         const currPrice = Number(stock.current_price || 0);
         const aiPrice = Number(
-            (nextDayMode
-                ? stock.next_day_ai_predicted_price
-                : stock.ai_predicted_price)
+            (liveWindow
+                ? stock.current_ai_predicted_price
+                : (nextDayMode
+                    ? stock.next_day_ai_predicted_price
+                    : stock.ai_predicted_price))
             || stock.ai_predicted_price
             || 0
         );
@@ -1591,11 +1635,15 @@ async function loadPriceTracker() {
         document.getElementById('tracker-current').textContent = `₹${formatN(currPrice)}`;
         const strategyLabelEl = document.getElementById('tracker-strategy-label');
         if (strategyLabelEl) {
-            strategyLabelEl.textContent = nextDayMode ? `Strategy Prediction (Next Day ${stock.predicted_for_date || ''})` : 'Strategy Predicted';
+            strategyLabelEl.textContent = nextDayMode
+                ? `Strategy Prediction (Next Day ${stock.predicted_for_date || ''})`
+                : (liveWindow ? 'Strategy Predicted (Live)' : 'Strategy Predicted');
         }
         const aiLabelEl = document.getElementById('tracker-ai-label');
         if (aiLabelEl) {
-            aiLabelEl.textContent = nextDayMode ? `AI Prediction (Next Day ${stock.predicted_for_date || ''})` : 'AI Predicted (Groq)';
+            aiLabelEl.textContent = nextDayMode
+                ? `AI Prediction (Next Day ${stock.predicted_for_date || ''})`
+                : (liveWindow ? 'AI Predicted (Live Groq)' : 'AI Predicted (Groq)');
         }
         const currentLabelEl = document.getElementById('tracker-current-label');
         if (currentLabelEl) currentLabelEl.textContent = stock.display_price_label || 'Current Price';
@@ -1609,15 +1657,23 @@ async function loadPriceTracker() {
         }
         const strategyOpenTimeEl = document.getElementById('tracker-strategy-open-time');
         if (strategyOpenTimeEl) {
-            strategyOpenTimeEl.textContent = nextDayMode
-                ? `Predicted: ${formatTimestamp(stock.next_day_predicted_at || stock.current_strategy_predicted_at)}`
-                : `Predicted: ${formatOpenWindowTime(stock.strategy_predicted_at_open, istDateStrNow(), 20)}`;
+            const strategyDisplayTime = stock.strategy_display_predicted_at
+                || (nextDayMode
+                    ? (stock.next_day_predicted_at || stock.current_strategy_predicted_at)
+                    : (liveWindow
+                        ? stock.current_strategy_predicted_at
+                        : stock.strategy_predicted_at_open));
+            strategyOpenTimeEl.textContent = `Predicted: ${formatTimestamp(strategyDisplayTime)}`;
         }
         const aiOpenTimeEl = document.getElementById('tracker-ai-open-time');
         if (aiOpenTimeEl) {
-            aiOpenTimeEl.textContent = nextDayMode
-                ? `Predicted: ${formatTimestamp(stock.next_day_predicted_at || stock.current_ai_predicted_at)}`
-                : `Predicted: ${formatOpenWindowTime(stock.ai_predicted_at_open, istDateStrNow(), 22)}`;
+            const aiDisplayTime = stock.ai_display_predicted_at
+                || (nextDayMode
+                    ? (stock.next_day_predicted_at || stock.current_ai_predicted_at)
+                    : (liveWindow
+                        ? stock.current_ai_predicted_at
+                        : stock.ai_predicted_at_open));
+            aiOpenTimeEl.textContent = `Predicted: ${formatTimestamp(aiDisplayTime)}`;
         }
         const currentTimeEl = document.getElementById('tracker-current-time');
         if (currentTimeEl) {

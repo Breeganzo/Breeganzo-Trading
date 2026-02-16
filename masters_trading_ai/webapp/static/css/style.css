@@ -177,6 +177,17 @@ a:hover { text-decoration: underline; }
     overflow-x: auto;
 }
 
+.groq-degraded-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 24px;
+    border-bottom: 1px solid #7a5c00;
+    background: rgba(240, 185, 11, 0.18);
+    color: #f7d76a;
+    font-size: 13px;
+}
+
 .banner-item {
     display: flex;
     align-items: center;

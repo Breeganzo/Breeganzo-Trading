@@ -13,6 +13,9 @@ import json
 import time
 import hashlib
 import re
+import threading
+import contextvars
+from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -31,6 +34,7 @@ except ImportError:
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 if not GROQ_API_KEY:
     import warnings
+
     warnings.warn(
         "GROQ_API_KEY not set in .env — AI explanations will be unavailable. "
         "Get a key at https://console.groq.com/keys",
@@ -42,7 +46,26 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Rate limit ──────────────────────────────────────
 _last_call_time = 0.0
-MIN_CALL_INTERVAL = 1.0  # seconds between API calls
+MIN_CALL_INTERVAL = float(os.environ.get("GROQ_MIN_CALL_INTERVAL_SEC", "1.0"))
+GROQ_GLOBAL_MAX_PER_MIN = max(1, int(os.environ.get("GROQ_GLOBAL_MAX_PER_MIN", "45")))
+GROQ_ENDPOINT_MAX_PER_MIN = max(
+    1, int(os.environ.get("GROQ_ENDPOINT_MAX_PER_MIN", "12"))
+)
+GROQ_QUEUE_WAIT_SEC = float(os.environ.get("GROQ_QUEUE_WAIT_SEC", "8.0"))
+GROQ_DEGRADED_COOLDOWN_SEC = max(
+    30, int(os.environ.get("GROQ_DEGRADED_COOLDOWN_SEC", "120"))
+)
+
+_rate_limit_lock = threading.Lock()
+_endpoint_locks: dict[str, threading.Lock] = {}
+_global_call_ts: deque[float] = deque()
+_endpoint_call_ts: dict[str, deque[float]] = defaultdict(deque)
+_groq_endpoint_ctx = contextvars.ContextVar("groq_endpoint", default="global")
+_degraded_until = 0.0
+_degraded_reason = ""
+_last_429_at = 0.0
+_last_error = ""
+_last_success_at = 0.0
 
 
 def _get_client():
@@ -74,60 +97,197 @@ def _get_cached(key: str) -> Optional[str]:
 
 def _set_cache(key: str, text: str):
     path = CACHE_DIR / f"{key}.json"
-    path.write_text(json.dumps({"text": text, "ts": time.time()}))
+    try:
+        path.write_text(json.dumps({"text": text, "ts": time.time()}))
+    except Exception:
+        pass
+
+
+def set_groq_request_endpoint(endpoint: str):
+    """Set current Groq endpoint scope for request-level rate limiting."""
+    name = str(endpoint or "global")
+    return _groq_endpoint_ctx.set(name)
+
+
+def reset_groq_request_endpoint(token) -> None:
+    """Restore previous endpoint scope token."""
+    try:
+        _groq_endpoint_ctx.reset(token)
+    except Exception:
+        pass
+
+
+def _prune_rate_windows(now_ts: float) -> None:
+    cutoff = now_ts - 60.0
+    while _global_call_ts and _global_call_ts[0] <= cutoff:
+        _global_call_ts.popleft()
+    for dq in _endpoint_call_ts.values():
+        while dq and dq[0] <= cutoff:
+            dq.popleft()
+
+
+def _reserve_rate_slot(
+    endpoint: str, max_wait_sec: float = GROQ_QUEUE_WAIT_SEC
+) -> bool:
+    """
+    Strict global + per-endpoint limiter.
+    Returns True if a slot is reserved, False if exhausted for max_wait_sec.
+    """
+    start = time.time()
+    while True:
+        now_ts = time.time()
+        with _rate_limit_lock:
+            _prune_rate_windows(now_ts)
+            ep_dq = _endpoint_call_ts[endpoint]
+            global_ok = len(_global_call_ts) < GROQ_GLOBAL_MAX_PER_MIN
+            endpoint_ok = len(ep_dq) < GROQ_ENDPOINT_MAX_PER_MIN
+            if global_ok and endpoint_ok:
+                _global_call_ts.append(now_ts)
+                ep_dq.append(now_ts)
+                return True
+
+            global_wait = (
+                max(0.0, 60.0 - (now_ts - _global_call_ts[0]))
+                if _global_call_ts
+                else 0.5
+            )
+            endpoint_wait = max(0.0, 60.0 - (now_ts - ep_dq[0])) if ep_dq else 0.5
+            wait_for = min(max(global_wait, endpoint_wait), 1.0)
+
+        if (time.time() - start) >= max_wait_sec:
+            return False
+        time.sleep(max(wait_for, 0.05))
+
+
+def _mark_degraded(reason: str, *, error: str = "", is_429: bool = False) -> None:
+    global _degraded_until, _degraded_reason, _last_429_at, _last_error
+    now_ts = time.time()
+    _degraded_until = max(_degraded_until, now_ts + GROQ_DEGRADED_COOLDOWN_SEC)
+    _degraded_reason = str(reason or "temporary_unavailable")
+    if is_429:
+        _last_429_at = now_ts
+    if error:
+        _last_error = str(error)[:300]
+
+
+def get_groq_system_status() -> dict:
+    """Expose Groq queue/degraded status for UI and diagnostics."""
+    now_ts = time.time()
+    with _rate_limit_lock:
+        _prune_rate_windows(now_ts)
+        endpoint = _groq_endpoint_ctx.get() or "global"
+        endpoint_used = len(_endpoint_call_ts.get(endpoint, deque()))
+        global_used = len(_global_call_ts)
+    degraded = now_ts < _degraded_until
+    return {
+        "degraded_mode": degraded,
+        "degraded_reason": _degraded_reason if degraded else "",
+        "degraded_until_iso": (
+            datetime.fromtimestamp(_degraded_until).isoformat() if degraded else None
+        ),
+        "last_429_iso": (
+            datetime.fromtimestamp(_last_429_at).isoformat() if _last_429_at else None
+        ),
+        "last_success_iso": (
+            datetime.fromtimestamp(_last_success_at).isoformat()
+            if _last_success_at
+            else None
+        ),
+        "last_error": _last_error,
+        "global_limit_per_min": GROQ_GLOBAL_MAX_PER_MIN,
+        "endpoint_limit_per_min": GROQ_ENDPOINT_MAX_PER_MIN,
+        "global_used_last_min": global_used,
+        "endpoint_used_last_min": endpoint_used,
+    }
 
 
 def _call_groq(prompt: str, max_tokens: int = 500) -> str:
-    """Call Groq API with rate limiting and caching."""
-    global _last_call_time
+    """Call Groq API with strict queueing, hard caps, and cache fallback."""
+    global _last_call_time, _last_success_at
 
     key = _cache_key(prompt)
     cached = _get_cached(key)
     if cached:
         return cached
 
+    endpoint = str(_groq_endpoint_ctx.get() or "global")
+    now_ts = time.time()
+    if now_ts < _degraded_until:
+        return (
+            cached
+            or "Groq degraded mode active (cached-only fallback). Please retry shortly."
+        )
+
     client = _get_client()
     if client is None:
         return "Groq API not available. Install: pip install groq"
 
-    # Rate limit
-    elapsed = time.time() - _last_call_time
-    if elapsed < MIN_CALL_INTERVAL:
-        time.sleep(MIN_CALL_INTERVAL - elapsed)
+    with _rate_limit_lock:
+        endpoint_lock = _endpoint_locks.setdefault(endpoint, threading.Lock())
 
-    try:
-        resp = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a concise financial analyst assistant for an Indian stock trading app. "
-                        "Give clear, actionable explanations in 3-5 sentences. "
-                        "Always mention what the current value suggests the investor should consider. "
-                        "Use simple language. Be specific about implications. "
-                        "Never give definitive buy/sell advice — always say 'suggests' or 'indicates'. "
-                        "Format: start with a one-line definition, then explain current value implications."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=max_tokens,
-            temperature=0.3,
-        )
-        _last_call_time = time.time()
-        text = resp.choices[0].message.content.strip()
-        _set_cache(key, text)
-        return text
-    except Exception as e:
-        return f"Groq API error: {str(e)}"
+    # Strict per-endpoint queue (single in-flight request per endpoint).
+    with endpoint_lock:
+        if not _reserve_rate_slot(endpoint):
+            _mark_degraded("local_queue_limit")
+            return (
+                cached
+                or "Groq request budget exhausted for this minute. Using cached-only mode."
+            )
+
+        elapsed = time.time() - _last_call_time
+        if elapsed < MIN_CALL_INTERVAL:
+            time.sleep(MIN_CALL_INTERVAL - elapsed)
+
+        try:
+            resp = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a concise financial analyst assistant for an Indian stock trading app. "
+                            "Give clear, actionable explanations in 3-5 sentences. "
+                            "Always mention what the current value suggests the investor should consider. "
+                            "Use simple language. Be specific about implications. "
+                            "Never give definitive buy/sell advice — always say 'suggests' or 'indicates'. "
+                            "Format: start with a one-line definition, then explain current value implications."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=max_tokens,
+                temperature=0.3,
+            )
+            _last_call_time = time.time()
+            _last_success_at = _last_call_time
+            text = resp.choices[0].message.content.strip()
+            _set_cache(key, text)
+            return text
+        except Exception as e:
+            err = str(e)
+            lower_err = err.lower()
+            is_429 = "429" in err or "rate limit" in lower_err
+            _mark_degraded(
+                "upstream_429" if is_429 else "upstream_error",
+                error=err,
+                is_429=is_429,
+            )
+            cached_fallback = _get_cached(key)
+            if cached_fallback:
+                return cached_fallback
+            if is_429:
+                return "Groq rate-limited (429). Degraded mode enabled with cached-only fallback."
+            return f"Groq API error: {err}"
 
 
 # ════════════════════════════════════════════════════
 # Public API — Called from Flask routes
 # ════════════════════════════════════════════════════
 
-def explain_fundamental(metric_name: str, value, ticker: str = "", stock_name: str = "") -> str:
+
+def explain_fundamental(
+    metric_name: str, value, ticker: str = "", stock_name: str = ""
+) -> str:
     """Explain a fundamental metric (PE ratio, ROE, etc.) with current value context."""
     stock_ctx = f" for {stock_name} ({ticker})" if ticker else ""
     prompt = (
@@ -140,8 +300,13 @@ def explain_fundamental(metric_name: str, value, ticker: str = "", stock_name: s
     return _call_groq(prompt)
 
 
-def explain_greek(greek_name: str, value: float, option_type: str = "call",
-                  ticker: str = "", stock_name: str = "") -> str:
+def explain_greek(
+    greek_name: str,
+    value: float,
+    option_type: str = "call",
+    ticker: str = "",
+    stock_name: str = "",
+) -> str:
     """Explain an option Greek and what its current value means for trading."""
     stock_ctx = f" for {stock_name} ({ticker})" if ticker else ""
     prompt = (
@@ -160,56 +325,61 @@ INDICATOR_THRESHOLDS = {
         "buy_below": 30,
         "sell_above": 70,
         "desc": "RSI (Relative Strength Index) measures momentum on a 0-100 scale.",
-        "interpretation": "Below 30 = oversold (potential buy), Above 70 = overbought (potential sell)"
+        "interpretation": "Below 30 = oversold (potential buy), Above 70 = overbought (potential sell)",
     },
     "MACD": {
         "buy_condition": "MACD crosses above signal line",
         "sell_condition": "MACD crosses below signal line",
         "desc": "MACD shows momentum by comparing two moving averages.",
-        "interpretation": "Positive = bullish momentum, Negative = bearish momentum"
+        "interpretation": "Positive = bullish momentum, Negative = bearish momentum",
     },
     "ADX": {
         "strong_trend": 25,
         "very_strong": 50,
         "desc": "ADX measures trend strength (not direction) on a 0-100 scale.",
-        "interpretation": "Below 20 = weak/no trend, 20-25 = potential trend, Above 25 = strong trend"
+        "interpretation": "Below 20 = weak/no trend, 20-25 = potential trend, Above 25 = strong trend",
     },
     "Stochastic": {
         "buy_below": 20,
         "sell_above": 80,
         "desc": "Stochastic compares closing price to price range over a period.",
-        "interpretation": "Below 20 = oversold (potential buy), Above 80 = overbought (potential sell)"
+        "interpretation": "Below 20 = oversold (potential buy), Above 80 = overbought (potential sell)",
     },
     "Bollinger Bands": {
         "buy_condition": "Price touches lower band",
         "sell_condition": "Price touches upper band",
         "desc": "Bollinger Bands show volatility with 2 standard deviations from moving average.",
-        "interpretation": "Price at lower band = potential buy, Price at upper band = potential sell"
+        "interpretation": "Price at lower band = potential buy, Price at upper band = potential sell",
     },
     "ATR": {
         "desc": "ATR (Average True Range) measures volatility in absolute terms.",
-        "interpretation": "Higher ATR = more volatile, use for stop-loss sizing (typically 1.5-2x ATR)"
+        "interpretation": "Higher ATR = more volatile, use for stop-loss sizing (typically 1.5-2x ATR)",
     },
     "Volume Ratio": {
         "high_volume": 1.5,
         "low_volume": 0.5,
         "desc": "Volume Ratio compares current volume to average volume.",
-        "interpretation": "Above 1.5 = high interest (confirms trend), Below 0.5 = low interest"
+        "interpretation": "Above 1.5 = high interest (confirms trend), Below 0.5 = low interest",
     },
     "RVOL": {
         "high_volume": 1.5,
         "desc": "RVOL (Relative Volume) compares current volume to historical average.",
-        "interpretation": "Above 1.5 = unusual activity, important for breakout confirmation"
+        "interpretation": "Above 1.5 = unusual activity, important for breakout confirmation",
     },
     "OBV": {
         "desc": "OBV (On-Balance Volume) tracks cumulative volume flow.",
-        "interpretation": "Rising OBV with rising price = bullish confirmation, Divergence = warning"
-    }
+        "interpretation": "Rising OBV with rising price = bullish confirmation, Divergence = warning",
+    },
 }
 
 
-def explain_indicator(indicator_name: str, app_value, actual_value=None,
-                      ticker: str = "", stock_name: str = "") -> str:
+def explain_indicator(
+    indicator_name: str,
+    app_value,
+    actual_value=None,
+    ticker: str = "",
+    stock_name: str = "",
+) -> str:
     """Explain a technical indicator with buy/sell thresholds and current value context."""
     stock_ctx = f" for {stock_name} ({ticker})" if ticker else ""
     value_ctx = f"The current value is {app_value}."
@@ -230,10 +400,14 @@ def explain_indicator(indicator_name: str, app_value, actual_value=None,
             if "sell_condition" in thresholds:
                 threshold_info += f"• SELL condition: {thresholds['sell_condition']}\n"
             if "strong_trend" in thresholds:
-                threshold_info += f"• Strong trend: Above {thresholds['strong_trend']}\n"
+                threshold_info += (
+                    f"• Strong trend: Above {thresholds['strong_trend']}\n"
+                )
             if "high_volume" in thresholds:
                 threshold_info += f"• High volume: Above {thresholds['high_volume']}\n"
-            threshold_info += f"\nInterpretation: {thresholds.get('interpretation', '')}"
+            threshold_info += (
+                f"\nInterpretation: {thresholds.get('interpretation', '')}"
+            )
             break
 
     prompt = (
@@ -249,8 +423,13 @@ def explain_indicator(indicator_name: str, app_value, actual_value=None,
     return _call_groq(prompt, max_tokens=600)
 
 
-def get_stock_overview(ticker: str, stock_name: str, fundamentals: dict = None,
-                       current_price: float = 0, prediction_signal: str = "") -> str:
+def get_stock_overview(
+    ticker: str,
+    stock_name: str,
+    fundamentals: dict = None,
+    current_price: float = 0,
+    prediction_signal: str = "",
+) -> str:
     """
     Get a comprehensive stock overview including what the company does,
     recent sentiment, and investment thesis.
@@ -264,7 +443,7 @@ def get_stock_overview(ticker: str, stock_name: str, fundamentals: dict = None,
         if fundamentals.get("pe_ratio"):
             fund_items.append(f"P/E: {fundamentals['pe_ratio']:.1f}")
         if fundamentals.get("market_cap"):
-            mc = fundamentals['market_cap']
+            mc = fundamentals["market_cap"]
             mc_str = f"₹{mc/1e12:.2f}T" if mc > 1e12 else f"₹{mc/1e9:.2f}B"
             fund_items.append(f"Market Cap: {mc_str}")
         if fundamentals.get("revenue_growth"):
@@ -274,9 +453,13 @@ def get_stock_overview(ticker: str, stock_name: str, fundamentals: dict = None,
         if fundamentals.get("debt_to_equity"):
             fund_items.append(f"Debt/Equity: {fundamentals['debt_to_equity']:.1f}")
         if fundamentals.get("fifty_two_high") and fundamentals.get("fifty_two_low"):
-            fund_items.append(f"52W Range: ₹{fundamentals['fifty_two_low']:.0f} - ₹{fundamentals['fifty_two_high']:.0f}")
+            fund_items.append(
+                f"52W Range: ₹{fundamentals['fifty_two_low']:.0f} - ₹{fundamentals['fifty_two_high']:.0f}"
+            )
         if fundamentals.get("analyst_upside"):
-            fund_items.append(f"Analyst Target Upside: {fundamentals['analyst_upside']:.1f}%")
+            fund_items.append(
+                f"Analyst Target Upside: {fundamentals['analyst_upside']:.1f}%"
+            )
         if fund_items:
             fund_ctx = "Key Metrics: " + ", ".join(fund_items)
 
@@ -329,31 +512,43 @@ def get_groq_strategy(ticker: str, stock_name: str, prediction_data: dict) -> st
     pred_return = prediction_data.get("predicted_return", 0)
     signal = prediction_data.get("signal", "HOLD")
     confidence = prediction_data.get("confidence", 50)
-    ctx_parts.append(f"ML Prediction: {signal} (predicted return: {pred_return:.3f}%, confidence: {confidence:.0f}%)")
+    ctx_parts.append(
+        f"ML Prediction: {signal} (predicted return: {pred_return:.3f}%, confidence: {confidence:.0f}%)"
+    )
 
     model_preds = prediction_data.get("model_predictions", {})
     if model_preds:
-        ctx_parts.append("Individual model predictions: " + ", ".join(
-            f"{k}: {v:.3f}%" for k, v in model_preds.items()
-        ))
+        ctx_parts.append(
+            "Individual model predictions: "
+            + ", ".join(f"{k}: {v:.3f}%" for k, v in model_preds.items())
+        )
 
     fund = prediction_data.get("fundamentals", {})
     if fund:
         fund_items = []
-        if fund.get("pe_ratio"): fund_items.append(f"P/E: {fund['pe_ratio']:.1f}")
-        if fund.get("pb_ratio"): fund_items.append(f"P/B: {fund['pb_ratio']:.1f}")
-        if fund.get("roe"): fund_items.append(f"ROE: {fund['roe']*100:.1f}%")
-        if fund.get("debt_to_equity"): fund_items.append(f"D/E: {fund['debt_to_equity']:.1f}")
-        if fund.get("dividend_yield"): fund_items.append(f"Div Yield: {fund['dividend_yield']*100:.2f}%")
-        if fund.get("revenue_growth"): fund_items.append(f"Rev Growth: {fund['revenue_growth']*100:.1f}%")
-        if fund.get("beta"): fund_items.append(f"Beta: {fund['beta']:.2f}")
+        if fund.get("pe_ratio"):
+            fund_items.append(f"P/E: {fund['pe_ratio']:.1f}")
+        if fund.get("pb_ratio"):
+            fund_items.append(f"P/B: {fund['pb_ratio']:.1f}")
+        if fund.get("roe"):
+            fund_items.append(f"ROE: {fund['roe']*100:.1f}%")
+        if fund.get("debt_to_equity"):
+            fund_items.append(f"D/E: {fund['debt_to_equity']:.1f}")
+        if fund.get("dividend_yield"):
+            fund_items.append(f"Div Yield: {fund['dividend_yield']*100:.2f}%")
+        if fund.get("revenue_growth"):
+            fund_items.append(f"Rev Growth: {fund['revenue_growth']*100:.1f}%")
+        if fund.get("beta"):
+            fund_items.append(f"Beta: {fund['beta']:.2f}")
         if fund_items:
             ctx_parts.append("Fundamentals: " + ", ".join(fund_items))
 
     current_price = prediction_data.get("current_price", 0)
     target = prediction_data.get("target_price", 0)
     sl = prediction_data.get("stop_loss", 0)
-    ctx_parts.append(f"Current price: ₹{current_price:.2f}, Target: ₹{target:.2f}, Stop Loss: ₹{sl:.2f}")
+    ctx_parts.append(
+        f"Current price: ₹{current_price:.2f}, Target: ₹{target:.2f}, Stop Loss: ₹{sl:.2f}"
+    )
 
     atr = prediction_data.get("atr_pct", 0)
     vol_ratio = prediction_data.get("volume_ratio", 1)
@@ -373,8 +568,9 @@ def get_groq_strategy(ticker: str, stock_name: str, prediction_data: dict) -> st
     return _call_groq(prompt, max_tokens=400)
 
 
-def get_combined_strategy(ticker: str, stock_name: str,
-                          prediction_data: dict, groq_strategy: str) -> str:
+def get_combined_strategy(
+    ticker: str, stock_name: str, prediction_data: dict, groq_strategy: str
+) -> str:
     """
     Get a combined recommendation merging ML prediction + Groq analysis.
 
@@ -449,11 +645,15 @@ def get_groq_price_forecast(
         return {
             "ai_predicted_price": None,
             "outlook": "Unavailable",
-            "rationale": raw[:240] if isinstance(raw, str) else "AI forecast unavailable",
+            "rationale": (
+                raw[:240] if isinstance(raw, str) else "AI forecast unavailable"
+            ),
             "source": "fallback_non_json",
         }
 
-    ai_price = payload.get("ai_predicted_price", strategy_predicted_price or current_price)
+    ai_price = payload.get(
+        "ai_predicted_price", strategy_predicted_price or current_price
+    )
     try:
         ai_price = float(ai_price)
     except Exception:

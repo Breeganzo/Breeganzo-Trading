@@ -12,6 +12,7 @@ python webapp/server.py
 - `09:15-09:30`: `premarket_open` snapshot window.
 - `09:30-15:30`: `market_open_locked` strategy snapshot should stay fixed.
 - `15:30-next day 00:00`: `after_hours_live` should refresh live AI/strategy values.
+- Scheduled precompute: `09:28` and `15:31` IST (snapshot warming).
 
 Checks:
 ```bash
@@ -24,6 +25,7 @@ curl -s 'http://localhost:5001/api/debug/prediction-status/INFY.NS' | jq '.predi
 - Open-buy list must respect budget + estimated fees.
 - Auto-check should trigger simulated sells when stop-loss/target is hit.
 - Auto-check can optionally trigger simulated auto-buys from snapshot candidates.
+- BUY/SELL/AUTO_CHECK triggers run only during `09:30-15:30 IST` on trading days.
 
 Checks:
 ```bash
@@ -32,6 +34,7 @@ curl -s 'http://localhost:5001/api/simulate/portfolio' | jq '.cash,.equity_value
 curl -s -X POST 'http://localhost:5001/api/simulate/trade' \
   -H 'Content-Type: application/json' \
   -d '{"action":"AUTO_CHECK","auto_buy":true}' | jq '.triggered_count,.auto_buy_events,.events'
+curl -s 'http://localhost:5001/api/groq-status' | jq '.degraded_mode,.degraded_reason,.degraded_until_iso'
 ```
 
 ## 4) Expected vs Actual freeze checks
