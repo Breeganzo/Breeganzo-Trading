@@ -10,6 +10,8 @@ let volumeSeries = null;
 let predictionData = null;
 let autoRefreshInterval = null;
 let latestLivePrice = 0;
+let chartRecords = [];
+let indicatorSeries = {};
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -103,6 +105,75 @@ function initChart() {
     });
 }
 
+function clearIndicatorSeries() {
+    for (const key of Object.keys(indicatorSeries)) {
+        try { chart.removeSeries(indicatorSeries[key]); } catch (_) {}
+    }
+    indicatorSeries = {};
+}
+
+function calcSMA(values, n) {
+    const out = [];
+    let sum = 0;
+    for (let i = 0; i < values.length; i++) {
+        sum += values[i];
+        if (i >= n) sum -= values[i - n];
+        out.push(i >= n - 1 ? sum / n : null);
+    }
+    return out;
+}
+
+function calcEMA(values, n) {
+    const out = [];
+    const k = 2 / (n + 1);
+    let ema = null;
+    for (let i = 0; i < values.length; i++) {
+        if (ema === null) ema = values[i];
+        else ema = values[i] * k + ema * (1 - k);
+        out.push(ema);
+    }
+    return out;
+}
+
+function calcVWAP(records) {
+    let cumPV = 0;
+    let cumV = 0;
+    return records.map(r => {
+        const tp = ((r.high + r.low + r.close) / 3);
+        const vol = Math.max(r.volume || 0, 0);
+        cumPV += tp * vol;
+        cumV += vol;
+        return cumV > 0 ? (cumPV / cumV) : r.close;
+    });
+}
+
+function toggleIndicator() {
+    if (!chartRecords.length) return;
+    clearIndicatorSeries();
+
+    const closes = chartRecords.map(r => r.close);
+    const times = chartRecords.map(r => r.time);
+
+    if (document.getElementById('ind-sma20')?.checked) {
+        const sma = calcSMA(closes, 20);
+        const s = chart.addLineSeries({ color: '#f0b90b', lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+        s.setData(times.map((t, i) => ({ time: t, value: sma[i] })).filter(x => x.value != null));
+        indicatorSeries.sma20 = s;
+    }
+    if (document.getElementById('ind-ema20')?.checked) {
+        const ema = calcEMA(closes, 20);
+        const s = chart.addLineSeries({ color: '#a78bfa', lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+        s.setData(times.map((t, i) => ({ time: t, value: ema[i] })));
+        indicatorSeries.ema20 = s;
+    }
+    if (document.getElementById('ind-vwap')?.checked) {
+        const vwap = calcVWAP(chartRecords);
+        const s = chart.addLineSeries({ color: '#5b8def', lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+        s.setData(times.map((t, i) => ({ time: t, value: vwap[i] })));
+        indicatorSeries.vwap = s;
+    }
+}
+
 async function loadChartData(period, interval) {
     try {
         let url;
@@ -125,11 +196,20 @@ async function loadChartData(period, interval) {
         const volumeData = [];
 
         const IST_OFFSET = 5.5 * 60 * 60; // 19800s — shifts UTC→IST for chart labels
+        chartRecords = [];
         for (const r of records) {
             const time = r.time.includes('T')
                 ? Math.floor(new Date(r.time).getTime() / 1000) + IST_OFFSET
                 : r.time;  // Already YYYY-MM-DD
 
+            chartRecords.push({
+                time,
+                open: Number(r.open || 0),
+                high: Number(r.high || r.close || 0),
+                low: Number(r.low || r.close || 0),
+                close: Number(r.close || 0),
+                volume: Number(r.volume || 0),
+            });
             priceData.push({ time, value: r.close });
             volumeData.push({
                 time,
@@ -142,6 +222,7 @@ async function loadChartData(period, interval) {
 
         lineSeries.setData(priceData);
         volumeSeries.setData(volumeData);
+        toggleIndicator();
         chart.timeScale().fitContent();
 
         // Color the line based on overall direction
@@ -299,7 +380,7 @@ async function loadPrediction() {
             const wPct = (wVal * 100).toFixed(1) + '%';
             const barW = Math.max(wVal * 100, 2);  // min 2% for visibility
             bhtml += `
-            <div class="model-chip">
+            <div class="model-chip clickable-metric" onclick="explainModel('${model}')">
                 <span class="model-name">${model}</span>
                 <span class="model-pred ${color}">${sign}${pred?.toFixed(3)}%</span>
                 <span class="model-weight">${wPct}</span>
@@ -954,7 +1035,8 @@ async function addToPortfolio() {
     const qtyEl = document.getElementById('portfolio-qty');
     const statusEl = document.getElementById('portfolio-add-status');
     const qty = Number(qtyEl?.value || 0);
-    const entryPrice = Number(latestLivePrice || predictionData?.current_price || 0);
+    const custom = Number(document.getElementById('portfolio-price')?.value || 0);
+    const entryPrice = Number(custom || latestLivePrice || predictionData?.current_price || 0);
     if (!qty || qty <= 0) {
         if (statusEl) statusEl.textContent = 'Enter valid quantity (>0)';
         return;
@@ -964,10 +1046,10 @@ async function addToPortfolio() {
         return;
     }
     try {
-        const res = await fetch('/api/portfolio', {
+        const res = await fetch('/api/portfolio/trade', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ticker: TICKER, quantity: qty, entry_price: entryPrice }),
+            body: JSON.stringify({ ticker: TICKER, side: 'BUY', quantity: qty, price: entryPrice }),
         });
         const data = await res.json();
         if (!res.ok || data.error) {
@@ -976,6 +1058,7 @@ async function addToPortfolio() {
         }
         if (statusEl) statusEl.textContent = `Added ${qty} @ ₹${formatN(entryPrice)} to portfolio`;
         refreshPortfolioStatus();
+        loadPortfolioSuggestion();
     } catch (e) {
         if (statusEl) statusEl.textContent = `Portfolio update failed: ${e.message}`;
     }
@@ -992,9 +1075,82 @@ async function refreshPortfolioStatus() {
             statusEl.textContent = 'Not in portfolio yet';
             return;
         }
-        statusEl.textContent = `Holding: ${row.quantity} shares @ avg ₹${formatN(row.entry_price)}`;
+        statusEl.textContent = `Holding: ${row.quantity} shares @ avg ₹${formatN(row.avg_buy_price || row.entry_price)}`;
     } catch (e) {
         statusEl.textContent = 'Portfolio status unavailable';
+    }
+}
+
+async function sellFromPortfolio() {
+    const qty = Number(document.getElementById('portfolio-sell-qty')?.value || 0);
+    const custom = Number(document.getElementById('portfolio-sell-price')?.value || 0);
+    const sellPrice = Number(custom || latestLivePrice || predictionData?.current_price || 0);
+    const statusEl = document.getElementById('portfolio-add-status');
+    if (!qty || qty <= 0 || !sellPrice || sellPrice <= 0) {
+        if (statusEl) statusEl.textContent = 'Enter valid sell qty and price';
+        return;
+    }
+    try {
+        const res = await fetch('/api/portfolio/trade', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ticker: TICKER, side: 'SELL', quantity: qty, price: sellPrice }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+            if (statusEl) statusEl.textContent = `Sell failed: ${data.error || res.status}`;
+            return;
+        }
+        const pnl = data.summary?.realized_pnl ?? 0;
+        if (statusEl) statusEl.textContent = `Recorded SELL ${qty} @ ₹${formatN(sellPrice)} | Realized P&L: ₹${formatN(pnl)}`;
+        refreshPortfolioStatus();
+        loadPortfolioSuggestion();
+    } catch (e) {
+        if (statusEl) statusEl.textContent = `Sell failed: ${e.message}`;
+    }
+}
+
+async function explainModel(modelName) {
+    showExplanation(`${modelName} Model`);
+    try {
+        const res = await fetch(`/api/explain-model?model=${encodeURIComponent(modelName)}`);
+        const data = await res.json();
+        document.getElementById('explanation-body').innerHTML = `<p>${data.explanation || data.error}</p>`;
+    } catch (e) {
+        document.getElementById('explanation-body').innerHTML = `<p>Error: ${e.message}</p>`;
+    }
+}
+
+async function askStockAssistant() {
+    const input = document.getElementById('stock-chat-input');
+    const output = document.getElementById('stock-chat-output');
+    const q = (input?.value || '').trim();
+    if (!q) return;
+    output.textContent = 'Thinking...';
+    try {
+        const res = await fetch(`/api/stock-chat/${encodeURIComponent(TICKER)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question: q }),
+        });
+        const data = await res.json();
+        output.innerHTML = formatAIText(data.answer || data.error || 'No response');
+    } catch (e) {
+        output.textContent = `Assistant error: ${e.message}`;
+    }
+}
+
+async function loadPortfolioSuggestion() {
+    const output = document.getElementById('stock-chat-output');
+    if (!output) return;
+    try {
+        const res = await fetch('/api/portfolio/summary?suggest=true');
+        const data = await res.json();
+        if (!data.strategy_suggestion) return;
+        const cur = output.innerHTML || '';
+        output.innerHTML = `${cur}<hr style="border-color:var(--border);margin:10px 0;"><strong>Portfolio Suggestion:</strong>${formatAIText(data.strategy_suggestion)}`;
+    } catch (_) {
+        // best effort
     }
 }
 

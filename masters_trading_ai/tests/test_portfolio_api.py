@@ -5,6 +5,7 @@ from webapp import server
 
 def test_portfolio_add_merge_and_fetch(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(server, "PORTFOLIO_FILE", tmp_path / "portfolio.json")
+    monkeypatch.setattr(server, "PORTFOLIO_TRADES_FILE", tmp_path / "portfolio_trades.json")
     monkeypatch.setattr(server, "ticker_names", {"ABC.NS": "ABC"})
 
     with server.app.test_client() as client:
@@ -13,7 +14,7 @@ def test_portfolio_add_merge_and_fetch(tmp_path: Path, monkeypatch):
         p1 = r1.get_json()
         assert p1["count"] == 1
         assert p1["holdings"][0]["quantity"] == 2
-        assert p1["holdings"][0]["entry_price"] == 100
+        assert p1["holdings"][0]["avg_buy_price"] == 100
 
         # Merge with weighted average entry
         r2 = client.post("/api/portfolio", json={"ticker": "ABC.NS", "quantity": 1, "entry_price": 130})
@@ -21,7 +22,7 @@ def test_portfolio_add_merge_and_fetch(tmp_path: Path, monkeypatch):
         p2 = r2.get_json()
         assert p2["count"] == 1
         assert p2["holdings"][0]["quantity"] == 3
-        assert p2["holdings"][0]["entry_price"] == 110.0
+        assert p2["holdings"][0]["avg_buy_price"] == 110.0
 
         r3 = client.get("/api/portfolio?ticker=ABC.NS")
         assert r3.status_code == 200
@@ -32,6 +33,7 @@ def test_portfolio_add_merge_and_fetch(tmp_path: Path, monkeypatch):
 
 def test_portfolio_delete(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(server, "PORTFOLIO_FILE", tmp_path / "portfolio.json")
+    monkeypatch.setattr(server, "PORTFOLIO_TRADES_FILE", tmp_path / "portfolio_trades.json")
 
     with server.app.test_client() as client:
         client.post("/api/portfolio", json={"ticker": "A.NS", "quantity": 1, "entry_price": 10})

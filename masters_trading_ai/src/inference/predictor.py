@@ -544,7 +544,13 @@ class LivePredictor:
         if use_cache:
             cached = self.cache.get(ticker)
             if cached is not None:
-                current_price = float(cached.get("current_price", 0) or 0)
+                live = self.get_live_price(ticker)
+                if live:
+                    current_price = float(live.get("price", 0) or 0)
+                    cached["current_price"] = round(current_price, 2)
+                    cached["previous_close"] = float(live.get("previous_close", cached.get("previous_close", current_price)) or current_price)
+                else:
+                    current_price = float(cached.get("current_price", 0) or 0)
                 if current_price <= 0:
                     return None
 
@@ -580,19 +586,25 @@ class LivePredictor:
         if feat_df is None or len(feat_df) < 60:
             return None
 
-        # Get current price info from the feature DataFrame (avoid redundant yfinance call)
-        try:
-            if "Close" in feat_df.columns:
-                current_price = float(feat_df["Close"].iloc[-1])
-                previous_close = float(feat_df["Close"].iloc[-2]) if len(feat_df) >= 2 else current_price
-            else:
+        # Use true live market price (prevents split-adjusted drift from long-window feature data).
+        live = self.get_live_price(ticker)
+        if live:
+            current_price = float(live.get("price", 0) or 0)
+            previous_close = float(live.get("previous_close", current_price) or current_price)
+            current_volume = float(live.get("volume", 0) or 0)
+        else:
+            try:
+                if "Close" in feat_df.columns:
+                    current_price = float(feat_df["Close"].iloc[-1])
+                    previous_close = float(feat_df["Close"].iloc[-2]) if len(feat_df) >= 2 else current_price
+                else:
+                    current_price = 0
+                    previous_close = 0
+                current_volume = float(feat_df["Volume"].iloc[-1]) if "Volume" in feat_df.columns else 0
+            except Exception:
                 current_price = 0
-                previous_close = 0
-            current_volume = float(feat_df["Volume"].iloc[-1]) if "Volume" in feat_df.columns else 0
-        except Exception:
-            current_price = 0
-            previous_close = current_price
-            current_volume = 0
+                previous_close = current_price
+                current_volume = 0
 
         # --- Base model predictions ---
         base_preds = {}

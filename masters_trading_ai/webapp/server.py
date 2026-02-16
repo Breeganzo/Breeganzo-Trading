@@ -54,6 +54,7 @@ from webapp.groq_explainer import (
     get_groq_strategy, get_combined_strategy,
     get_stock_overview, get_news_sentiment,
     explain_risk_term, get_groq_price_forecast,
+    explain_model, stock_chat_response, portfolio_profit_suggestion,
 )
 from webapp.prediction_tracker import PredictionTracker
 
@@ -116,6 +117,7 @@ CONFIG_DIR = PROJECT_ROOT / "config"
 CACHE_DIR = PROJECT_ROOT / "cache"
 PREDICTION_LOG_DIR = CACHE_DIR / "prediction_log"
 PORTFOLIO_FILE = CACHE_DIR / "portfolio.json"
+PORTFOLIO_TRADES_FILE = CACHE_DIR / "portfolio_trades.json"
 PREDICTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # Thread-safe lock for file I/O
@@ -259,6 +261,91 @@ def _write_portfolio(entries: list[dict]) -> None:
         PORTFOLIO_FILE.write_text(json.dumps(entries, indent=2))
 
 
+def _read_portfolio_trades() -> list[dict]:
+    with _portfolio_lock:
+        if not PORTFOLIO_TRADES_FILE.exists():
+            return []
+        try:
+            data = json.loads(PORTFOLIO_TRADES_FILE.read_text())
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+        return []
+
+
+def _write_portfolio_trades(entries: list[dict]) -> None:
+    with _portfolio_lock:
+        PORTFOLIO_TRADES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PORTFOLIO_TRADES_FILE.write_text(json.dumps(entries, indent=2))
+
+
+def _portfolio_summary_from_trades(trades: list[dict], include_live_prices: bool = True) -> dict:
+    positions: dict[str, dict] = {}
+    realized_total = 0.0
+
+    # FIFO lot accounting for accurate realized pnl
+    lots: dict[str, list[dict]] = {}
+    for tr in trades:
+        ticker = tr.get("ticker")
+        side = str(tr.get("side", "BUY")).upper()
+        qty = float(tr.get("quantity", 0) or 0)
+        price = float(tr.get("price", 0) or 0)
+        if not ticker or qty <= 0 or price <= 0:
+            continue
+        lots.setdefault(ticker, [])
+        if side == "BUY":
+            lots[ticker].append({"qty": qty, "price": price})
+        elif side == "SELL":
+            remaining = qty
+            while remaining > 1e-9 and lots[ticker]:
+                lot = lots[ticker][0]
+                consume = min(remaining, lot["qty"])
+                realized_total += (price - lot["price"]) * consume
+                lot["qty"] -= consume
+                remaining -= consume
+                if lot["qty"] <= 1e-9:
+                    lots[ticker].pop(0)
+
+    for ticker, ticker_lots in lots.items():
+        qty = sum(l["qty"] for l in ticker_lots)
+        if qty <= 1e-9:
+            continue
+        cost = sum(l["qty"] * l["price"] for l in ticker_lots)
+        avg_price = cost / qty
+        positions[ticker] = {
+            "ticker": ticker,
+            "name": ticker_names.get(ticker, _clean_name(ticker)),
+            "quantity": round(qty, 4),
+            "avg_buy_price": round(avg_price, 2),
+            "cost_value": round(cost, 2),
+        }
+
+    if include_live_prices and positions:
+        live = _get_live_prices_batch(list(positions.keys()))
+    else:
+        live = {}
+
+    unrealized_total = 0.0
+    for ticker, row in positions.items():
+        l = live.get(ticker, {})
+        curr = float(l.get("price", 0) or 0)
+        row["current_price"] = round(curr, 2)
+        m2m = curr * row["quantity"] if curr > 0 else 0.0
+        row["market_value"] = round(m2m, 2)
+        row["unrealized_pnl"] = round(m2m - row["cost_value"], 2)
+        row["unrealized_pnl_pct"] = round(((m2m - row["cost_value"]) / row["cost_value"] * 100), 3) if row["cost_value"] > 0 and m2m > 0 else 0.0
+        unrealized_total += (m2m - row["cost_value"])
+
+    return {
+        "positions": sorted(positions.values(), key=lambda x: x["cost_value"], reverse=True),
+        "position_count": len(positions),
+        "realized_pnl": round(realized_total, 2),
+        "unrealized_pnl": round(unrealized_total, 2),
+        "total_pnl": round(realized_total + unrealized_total, 2),
+    }
+
+
 def _get_live_prices_batch(tickers: list[str]) -> dict:
     """Get live prices for multiple tickers using yfinance."""
     import yfinance as yf
@@ -320,6 +407,58 @@ def _get_live_prices_batch(tickers: list[str]) -> dict:
         log.warning(f"Batch price fetch error: {e}")
 
     return result
+
+
+def _get_close_prices_for_date(tickers: list[str], date_str: str) -> dict[str, float]:
+    """Fetch close price for the specific trading date for each ticker."""
+    import yfinance as yf
+
+    try:
+        day = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except Exception:
+        return {}
+
+    # yfinance end is exclusive; add 2 days to safely capture next trading day.
+    start = day.strftime("%Y-%m-%d")
+    end = (day + timedelta(days=2)).strftime("%Y-%m-%d")
+
+    prices: dict[str, float] = {}
+    if not tickers:
+        return prices
+
+    try:
+        data = yf.download(
+            tickers,
+            start=start,
+            end=end,
+            interval="1d",
+            progress=False,
+            auto_adjust=False,
+            threads=True,
+        )
+        if data is None or data.empty:
+            return prices
+
+        if len(tickers) == 1:
+            ticker = tickers[0]
+            close_series = data["Close"] if "Close" in data.columns else None
+            if close_series is not None and not close_series.dropna().empty:
+                prices[ticker] = round(float(close_series.dropna().iloc[0]), 2)
+            return prices
+
+        if isinstance(data.columns, pd.MultiIndex):
+            lvl0 = data.columns.get_level_values(0)
+            if "Close" in lvl0:
+                close_df = data["Close"]
+                for ticker in tickers:
+                    if ticker in close_df.columns:
+                        ser = close_df[ticker].dropna()
+                        if not ser.empty:
+                            prices[ticker] = round(float(ser.iloc[0]), 2)
+    except Exception as e:
+        log.warning(f"Date-close fetch failed for {date_str}: {e}")
+
+    return prices
 
 
 # ---------------------------------------------------------------------------
@@ -533,7 +672,12 @@ def api_expected_vs_actual():
 
     # Fetch actual prices
     tickers_to_check = list(predictions.keys())
-    actuals = _get_live_prices_batch(tickers_to_check)
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    if date_str == today_str:
+        actuals = _get_live_prices_batch(tickers_to_check)
+        actual_prices = {k: v.get("price", 0) for k, v in actuals.items()}
+    else:
+        actual_prices = _get_close_prices_for_date(tickers_to_check, date_str)
 
     # Fetch benchmark (Nifty 50) return for alpha
     benchmark_data = _get_live_prices_batch(["^NSEI"])
@@ -545,16 +689,26 @@ def api_expected_vs_actual():
 
     results = []
     for ticker, pred in predictions.items():
-        if ticker not in actuals:
+        if ticker not in actual_prices:
             continue
 
-        actual = actuals[ticker]
         pred_price_at_prediction = pred.get("current_price", 0)
         pred_return_pct = pred.get("predicted_return", 0)  # already in %
-        actual_price = actual["price"]
+        actual_price = actual_prices[ticker]
 
         if pred_price_at_prediction <= 0:
             continue
+
+        # Corporate-action guardrail: normalize stale pre-split logged prices.
+        # Example: logged 450 vs actual 204 after 2:1 split-like event.
+        ratio = (pred_price_at_prediction / actual_price) if actual_price > 0 else 1.0
+        split_factor = 1.0
+        for factor in (2.0, 3.0, 5.0, 10.0):
+            if abs(ratio - factor) / factor <= 0.30:
+                split_factor = factor
+                break
+        if split_factor > 1.0:
+            pred_price_at_prediction = pred_price_at_prediction / split_factor
 
         actual_return = (actual_price - pred_price_at_prediction) / pred_price_at_prediction
         actual_return_pct = actual_return * 100
@@ -573,7 +727,7 @@ def api_expected_vs_actual():
             "name": ticker_names.get(ticker, _clean_name(ticker)),
             "signal": pred.get("signal", "N/A"),
             "predicted_return_pct": round(pred_return_pct, 3),
-            "predicted_price": round(pred.get("predicted_price", 0), 2),
+            "predicted_price": round((pred.get("predicted_price", 0) / split_factor) if split_factor > 1.0 else pred.get("predicted_price", 0), 2),
             "actual_price": round(actual_price, 2),
             "actual_return_pct": round(actual_return_pct, 3),
             "direction_predicted": pred_dir,
@@ -1220,9 +1374,10 @@ def api_explain_risk_term():
 
 @app.route("/api/portfolio", methods=["GET", "POST", "DELETE"])
 def api_portfolio():
-    """Simple persistent portfolio: add ticker/qty/price and list holdings."""
+    """Portfolio positions derived from trade ledger; backward compatible POST adds BUY."""
     if request.method == "GET":
-        entries = _read_portfolio()
+        summary = _portfolio_summary_from_trades(_read_portfolio_trades())
+        entries = summary["positions"]
         ticker = request.args.get("ticker", "").strip()
         if ticker:
             entries = [e for e in entries if e.get("ticker") == ticker]
@@ -1232,10 +1387,12 @@ def api_portfolio():
         ticker = request.args.get("ticker", "").strip()
         if not ticker:
             _write_portfolio([])
+            _write_portfolio_trades([])
             return jsonify({"ok": True, "holdings": [], "count": 0})
-        entries = [e for e in _read_portfolio() if e.get("ticker") != ticker]
-        _write_portfolio(entries)
-        return jsonify({"ok": True, "holdings": entries, "count": len(entries)})
+        trades = [e for e in _read_portfolio_trades() if e.get("ticker") != ticker]
+        _write_portfolio_trades(trades)
+        summary = _portfolio_summary_from_trades(trades)
+        return jsonify({"ok": True, "holdings": summary["positions"], "count": summary["position_count"]})
 
     payload = request.get_json(silent=True) or {}
     ticker = str(payload.get("ticker", "")).strip().upper()
@@ -1251,30 +1408,132 @@ def api_portfolio():
     if qty <= 0 or entry_price <= 0:
         return jsonify({"error": "quantity and entry_price must be > 0"}), 400
 
-    entries = _read_portfolio()
-    merged = False
-    for row in entries:
-        if row.get("ticker") == ticker:
-            old_qty = float(row.get("quantity", 0))
-            old_price = float(row.get("entry_price", 0))
-            total_qty = old_qty + qty
-            row["entry_price"] = round(((old_qty * old_price) + (qty * entry_price)) / max(total_qty, 1e-9), 2)
-            row["quantity"] = round(total_qty, 4)
-            row["name"] = ticker_names.get(ticker, _clean_name(ticker))
-            row["updated_at"] = datetime.now(IST).isoformat()
-            merged = True
-            break
-    if not merged:
-        entries.append({
+    # Backward-compatible path: this endpoint creates a BUY trade.
+    trades = _read_portfolio_trades()
+    trades.append({
+        "ticker": ticker,
+        "name": ticker_names.get(ticker, _clean_name(ticker)),
+        "side": "BUY",
+        "quantity": round(qty, 4),
+        "price": round(entry_price, 2),
+        "timestamp": datetime.now(IST).isoformat(),
+    })
+    _write_portfolio_trades(trades)
+    summary = _portfolio_summary_from_trades(trades)
+    _write_portfolio([
+        {
             "ticker": ticker,
-            "name": ticker_names.get(ticker, _clean_name(ticker)),
-            "quantity": round(qty, 4),
-            "entry_price": round(entry_price, 2),
-            "created_at": datetime.now(IST).isoformat(),
+            "name": row["name"],
+            "quantity": row["quantity"],
+            "entry_price": row["avg_buy_price"],
             "updated_at": datetime.now(IST).isoformat(),
-        })
-    _write_portfolio(entries)
-    return jsonify({"ok": True, "holdings": entries, "count": len(entries)})
+        }
+        for row in summary["positions"]
+    ])
+    return jsonify({"ok": True, "holdings": summary["positions"], "count": summary["position_count"]})
+
+
+@app.route("/api/portfolio/trade", methods=["POST"])
+def api_portfolio_trade():
+    """Record BUY/SELL trade and return updated P&L summary."""
+    payload = request.get_json(silent=True) or {}
+    ticker = str(payload.get("ticker", "")).strip().upper()
+    side = str(payload.get("side", "BUY")).strip().upper()
+    qty = payload.get("quantity")
+    price = payload.get("price")
+    if side not in {"BUY", "SELL"}:
+        return jsonify({"error": "side must be BUY or SELL"}), 400
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        qty = float(qty)
+        price = float(price)
+    except (TypeError, ValueError):
+        return jsonify({"error": "quantity and price must be numeric"}), 400
+    if qty <= 0 or price <= 0:
+        return jsonify({"error": "quantity and price must be > 0"}), 400
+
+    trades = _read_portfolio_trades()
+    summary_before = _portfolio_summary_from_trades(trades, include_live_prices=False)
+    pos_before = {p["ticker"]: p for p in summary_before["positions"]}
+    if side == "SELL":
+        open_qty = float(pos_before.get(ticker, {}).get("quantity", 0) or 0)
+        if open_qty + 1e-9 < qty:
+            return jsonify({"error": f"Cannot SELL {qty}; open quantity is {open_qty}"}), 400
+
+    trades.append({
+        "ticker": ticker,
+        "name": ticker_names.get(ticker, _clean_name(ticker)),
+        "side": side,
+        "quantity": round(qty, 4),
+        "price": round(price, 2),
+        "timestamp": datetime.now(IST).isoformat(),
+    })
+    _write_portfolio_trades(trades)
+    summary = _portfolio_summary_from_trades(trades)
+    _write_portfolio([
+        {
+            "ticker": row["ticker"],
+            "name": row["name"],
+            "quantity": row["quantity"],
+            "entry_price": row["avg_buy_price"],
+            "updated_at": datetime.now(IST).isoformat(),
+        }
+        for row in summary["positions"]
+    ])
+    return jsonify({"ok": True, "summary": summary})
+
+
+@app.route("/api/portfolio/summary")
+def api_portfolio_summary():
+    """Return portfolio summary with optional Groq suggestion."""
+    suggest = request.args.get("suggest", "").lower() in ("1", "true", "yes")
+    trades = _read_portfolio_trades()
+    summary = _portfolio_summary_from_trades(trades)
+    if suggest:
+        try:
+            summary["strategy_suggestion"] = portfolio_profit_suggestion(summary)
+        except Exception as e:
+            summary["strategy_suggestion"] = f"Suggestion unavailable: {e}"
+    summary["trade_count"] = len(trades)
+    return jsonify(summary)
+
+
+@app.route("/api/explain-model")
+def api_explain_model():
+    """Explain model purpose and behavior."""
+    model = request.args.get("model", "").strip()
+    if not model:
+        return jsonify({"error": "model is required"}), 400
+    try:
+        return jsonify({"model": model, "explanation": explain_model(model)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/stock-chat/<ticker>", methods=["POST"])
+def api_stock_chat(ticker: str):
+    """Contextual stock Q&A assistant."""
+    payload = request.get_json(silent=True) or {}
+    question = str(payload.get("question", "")).strip()
+    if not question:
+        return jsonify({"error": "question is required"}), 400
+    if not models_loaded or predictor is None:
+        return jsonify({"error": "Models still loading..."}), 503
+    try:
+        pred = predictor.predict_single(ticker, use_cache=True) or {}
+        indicators = pred.get("indicators", {})
+        stock_name = ticker_names.get(ticker, _clean_name(ticker))
+        answer = stock_chat_response(
+            ticker=ticker,
+            stock_name=stock_name,
+            question=question,
+            prediction_data=pred,
+            indicator_snapshot=indicators,
+        )
+        return jsonify({"ticker": ticker, "answer": answer})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/feature-importance/<ticker>")

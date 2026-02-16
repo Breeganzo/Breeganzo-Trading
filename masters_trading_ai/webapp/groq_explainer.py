@@ -463,3 +463,52 @@ def get_groq_price_forecast(
         "outlook": str(payload.get("outlook", "Neutral"))[:20],
         "rationale": str(payload.get("rationale", ""))[:600],
     }
+
+
+def explain_model(model_name: str) -> str:
+    """Explain a model in practical trading terms."""
+    prompt = (
+        f"Explain the ML model '{model_name}' used in stock prediction. "
+        f"Give 1) what it does, 2) strengths, 3) weaknesses, "
+        f"4) when trader should trust it less. Keep it concise."
+    )
+    return _call_groq(prompt, max_tokens=320)
+
+
+def stock_chat_response(
+    ticker: str,
+    stock_name: str,
+    question: str,
+    prediction_data: dict | None = None,
+    indicator_snapshot: dict | None = None,
+) -> str:
+    """Answer contextual stock question with current model and indicator context."""
+    prediction_data = prediction_data or {}
+    indicator_snapshot = indicator_snapshot or {}
+    prompt = (
+        f"You are a trading assistant for {stock_name} ({ticker}). "
+        f"User question: {question}\n\n"
+        f"Prediction context: signal={prediction_data.get('signal')}, "
+        f"predicted_return={prediction_data.get('predicted_return')}, "
+        f"confidence={prediction_data.get('confidence')}, "
+        f"model_agreement={prediction_data.get('model_agreement')}.\n"
+        f"Indicators: {json.dumps(indicator_snapshot)[:1000]}.\n\n"
+        f"Answer in short bullets: meaning now, risk, and one actionable next step. "
+        f"Do not give guaranteed returns."
+    )
+    return _call_groq(prompt, max_tokens=450)
+
+
+def portfolio_profit_suggestion(summary: dict) -> str:
+    """Suggest practical improvement steps for portfolio profitability."""
+    prompt = (
+        "You are assisting with an Indian equity portfolio. "
+        f"Summary: {json.dumps(summary)[:1400]}\n\n"
+        "Give a concise response with:\n"
+        "1) current health,\n"
+        "2) top 3 improvements to increase risk-adjusted profit,\n"
+        "3) what to avoid,\n"
+        "4) one immediate action.\n"
+        "No guaranteed claims."
+    )
+    return _call_groq(prompt, max_tokens=520)

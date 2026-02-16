@@ -40,7 +40,11 @@
             <div class="stock-change-big" id="live-change">---</div>
             <div class="portfolio-add-inline">
                 <input id="portfolio-qty" type="number" min="1" step="1" value="1" class="portfolio-qty-input" />
-                <button class="portfolio-add-btn" onclick="addToPortfolio()">Add to Portfolio</button>
+                <input id="portfolio-price" type="number" min="0" step="0.01" placeholder="Buy Price" class="portfolio-qty-input" />
+                <button class="portfolio-add-btn" onclick="addToPortfolio()">Add Buy</button>
+                <input id="portfolio-sell-qty" type="number" min="1" step="1" value="1" class="portfolio-qty-input" />
+                <input id="portfolio-sell-price" type="number" min="0" step="0.01" placeholder="Sell Price" class="portfolio-qty-input" />
+                <button class="portfolio-add-btn" onclick="sellFromPortfolio()">Add Sell</button>
             </div>
             <div class="portfolio-add-status muted-text" id="portfolio-add-status"></div>
         </div>
@@ -120,6 +124,11 @@
         <button class="tf-btn" data-period="6mo" data-interval="1d" onclick="changeTimeframe(this)">6M</button>
         <button class="tf-btn" data-period="1y" data-interval="1d" onclick="changeTimeframe(this)">1Y</button>
     </div>
+    <div class="chart-controls" style="margin-top:8px;">
+        <label><input type="checkbox" id="ind-sma20" onchange="toggleIndicator('sma20')"> SMA20</label>
+        <label><input type="checkbox" id="ind-ema20" onchange="toggleIndicator('ema20')"> EMA20</label>
+        <label><input type="checkbox" id="ind-vwap" onchange="toggleIndicator('vwap')"> VWAP</label>
+    </div>
 
     <!-- Price chart -->
     <div class="chart-container" id="chart-container"></div>
@@ -173,7 +182,7 @@
             </div>
 
             <!-- Individual model predictions -->
-            <h4 class="sub-heading">Model Breakdown <span class="ensemble-strategy-badge" id="ensemble-strategy"></span></h4>
+            <h4 class="sub-heading">Model Breakdown <span class="ensemble-strategy-badge" id="ensemble-strategy"></span> <span class="clickable-hint">(click any model to explain)</span></h4>
             <div class="model-breakdown" id="model-breakdown"></div>
 
             <!-- Entry/Exit levels -->
@@ -262,6 +271,20 @@
         <p class="section-subtitle-sm">Key factors from ML models that influence the prediction</p>
         <div class="feature-list" id="feature-list">
             <div class="loading-spinner"><div class="spinner"></div><p>Analyzing key factors...</p></div>
+        </div>
+    </div>
+
+    <!-- Stock Assistant -->
+    <div class="strategy-section" id="stock-chat-section">
+        <h3 class="section-heading">💬 Stock Assistant</h3>
+        <div class="strategy-card">
+            <div class="strategy-body">
+                <textarea id="stock-chat-input" placeholder="Ask: what does current RSI + MACD indicate?" style="width:100%;min-height:72px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;padding:10px;"></textarea>
+                <div style="margin-top:8px;display:flex;gap:8px;">
+                    <button class="portfolio-add-btn" onclick="askStockAssistant()">Ask Groq</button>
+                </div>
+                <div id="stock-chat-output" class="muted-text" style="margin-top:10px;">Ask a question to get contextual interpretation.</div>
+            </div>
         </div>
     </div>
 

@@ -1498,10 +1498,11 @@ a:hover { text-decoration: underline; }
     display: flex;
     gap: 8px;
     justify-content: flex-end;
+    flex-wrap: wrap;
 }
 
 .portfolio-qty-input {
-    width: 92px;
+    width: 98px;
     background: var(--bg-secondary);
     border: 1px solid var(--border);
     color: var(--text-primary);
@@ -1523,6 +1524,14 @@ a:hover { text-decoration: underline; }
     margin-top: 6px;
     font-size: 12px;
     text-align: right;
+}
+
+.chart-controls label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
 }
 
 /* Progress bar */
