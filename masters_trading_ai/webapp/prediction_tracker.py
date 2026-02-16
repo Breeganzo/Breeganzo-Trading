@@ -98,8 +98,8 @@ class PredictionTracker:
             default=predicted_price,
         )
         ai_last_prediction = PredictionTracker._to_float(
-            prediction_data.get("ai_last_prediction", predicted_price),
-            default=predicted_price,
+            prediction_data.get("ai_last_prediction", 0),
+            default=0.0,
         )
         strategy_predicted_at_open = str(
             prediction_data.get("strategy_predicted_at_open", "")
@@ -119,10 +119,23 @@ class PredictionTracker:
         strategy_direction = PredictionTracker._direction(
             open_price, strategy_price_at_open
         )
-        ai_direction = PredictionTracker._direction(current_price, ai_last_prediction)
-        direction_comparison = bool(
-            prediction_data.get("direction_comparison", strategy_direction == ai_direction)
+        ai_direction = (
+            PredictionTracker._direction(current_price, ai_last_prediction)
+            if ai_last_prediction > 0 and current_price > 0
+            else "N/A"
         )
+        ai_source = str(prediction_data.get("ai_source", "none") or "none")
+        strategy_vs_ai_direction = prediction_data.get("strategy_vs_ai_direction")
+        if strategy_vs_ai_direction is None and ai_last_prediction > 0 and current_price > 0:
+            strategy_vs_ai_direction = strategy_direction == ai_direction
+        if strategy_vs_ai_direction not in (True, False):
+            strategy_vs_ai_direction = None
+
+        # direction_comparison is reserved for strategy-vs-actual and is populated
+        # when outcomes are checked after market data is available.
+        direction_comparison = prediction_data.get("direction_comparison")
+        if direction_comparison not in (True, False):
+            direction_comparison = None
 
         # Threshold: the predicted price level that needs to be hit
         # For BUY: stock needs to reach at or above predicted_price
@@ -136,12 +149,14 @@ class PredictionTracker:
             "open_price": round(open_price, 2),
             "strategy_price_at_open": round(strategy_price_at_open, 2),
             "ai_last_prediction": round(ai_last_prediction, 2),
+            "ai_source": ai_source if ai_last_prediction > 0 else "none",
             "strategy_predicted_at_open": strategy_predicted_at_open,
             "ai_predicted_at_open": ai_predicted_at_open,
             "ai_last_prediction_at": ai_last_prediction_at,
             "strategy_direction_at_open": strategy_direction,
             "ai_direction_last": ai_direction,
-            "direction_comparison": bool(direction_comparison),
+            "strategy_vs_ai_direction": strategy_vs_ai_direction,
+            "direction_comparison": direction_comparison,
             "signal": prediction_data.get("signal", "HOLD"),
             "confidence": round(prediction_data.get("confidence", 50), 1),
             "is_bullish": is_bullish,

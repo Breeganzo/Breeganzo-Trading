@@ -154,3 +154,30 @@ def test_api_price_tracker_includes_times_and_close_label(tmp_path, monkeypatch)
     ai_ts = datetime.fromisoformat(payload["ai_predicted_at_open"])
     assert strategy_ts.hour == 9 and 15 <= strategy_ts.minute <= 30
     assert ai_ts.hour == 9 and 15 <= ai_ts.minute <= 30
+
+
+def test_normalize_premarket_snapshot_legacy_fields():
+    legacy = {
+        "date": "2026-02-16",
+        "captured_at": "2026-02-16T16:22:14+05:30",
+        "items": [
+            {
+                "ticker": "INFY.NS",
+                "current_price": 1365.6,
+                "strategy_price_at_open": 1380.5,
+                "ai_predicted_price": None,
+                "strategy_direction": "UP",
+            }
+        ],
+    }
+
+    out = server._normalize_premarket_snapshot(legacy)
+    assert out["snapshot_type"] in {"market_open_live", "market_open_backfilled"}
+    assert out["capture_note"]
+    cap = datetime.fromisoformat(out["captured_at"])
+    assert cap.hour == 9 and 15 <= cap.minute <= 30
+
+    row = out["items"][0]
+    assert row["strategy_source"] == "ensemble_models"
+    assert row["ai_source"] == "none"
+    assert row["ai_direction"] == "N/A"

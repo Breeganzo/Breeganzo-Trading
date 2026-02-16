@@ -19,6 +19,7 @@ let currentPeriod = '1d';
 let currentInterval = '1m';
 let chartRefreshTimer = null;
 let metricExplainCache = {};
+let metricTooltipHideTimer = null;
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -52,6 +53,18 @@ document.addEventListener('DOMContentLoaded', () => {
         loadNews();
         loadGroqForecast();
     }, 15 * 60 * 1000);
+    document.addEventListener('keydown', (evt) => {
+        if (evt.key === 'Escape') hideMetricTooltip(true);
+    });
+    document.addEventListener('click', (evt) => {
+        const tip = document.getElementById('metric-tooltip');
+        if (!tip) return;
+        if (tip.contains(evt.target)) return;
+        if (evt.target.closest('.clickable-metric') || evt.target.closest('.strategy-evidence-explain')) {
+            return;
+        }
+        hideMetricTooltip(true);
+    });
 });
 
 // ── Status ────────────────────────────────────────
@@ -111,9 +124,36 @@ function formatOpenWindowTime(value, dateStr = '', minute = 20) {
 
 function moveMetricTooltip(evt) {
     const tip = document.getElementById('metric-tooltip');
-    if (!tip || !evt) return;
+    if (!tip || !evt || tip.classList.contains('hidden')) return;
     tip.style.left = `${evt.pageX + 14}px`;
     tip.style.top = `${evt.pageY + 14}px`;
+}
+
+function clearMetricTooltipHideTimer() {
+    if (metricTooltipHideTimer) {
+        clearTimeout(metricTooltipHideTimer);
+        metricTooltipHideTimer = null;
+    }
+}
+
+function scheduleMetricTooltipHide() {
+    clearMetricTooltipHideTimer();
+    metricTooltipHideTimer = setTimeout(() => {
+        const tip = document.getElementById('metric-tooltip');
+        if (!tip) return;
+        if (tip.matches(':hover') || tip.matches(':focus-within')) return;
+        tip.classList.add('hidden');
+    }, 180);
+}
+
+function bindMetricTooltipInteractions() {
+    const tip = document.getElementById('metric-tooltip');
+    if (!tip || tip.dataset.bound === '1') return;
+    tip.dataset.bound = '1';
+    tip.addEventListener('mouseenter', clearMetricTooltipHideTimer);
+    tip.addEventListener('mouseleave', scheduleMetricTooltipHide);
+    tip.addEventListener('focusin', clearMetricTooltipHideTimer);
+    tip.addEventListener('focusout', scheduleMetricTooltipHide);
 }
 
 async function showMetricTooltip(evt, term, context = '') {
@@ -122,9 +162,13 @@ async function showMetricTooltip(evt, term, context = '') {
     const bodyEl = document.getElementById('metric-tooltip-body');
     if (!tip || !titleEl || !bodyEl) return;
 
+    bindMetricTooltipInteractions();
+    clearMetricTooltipHideTimer();
     titleEl.textContent = term;
     bodyEl.textContent = 'Loading explanation...';
-    moveMetricTooltip(evt);
+    if (evt && Number.isFinite(evt.pageX) && Number.isFinite(evt.pageY)) {
+        moveMetricTooltip(evt);
+    }
     tip.classList.remove('hidden');
 
     const key = `${term}::${context}`;
@@ -144,9 +188,25 @@ async function showMetricTooltip(evt, term, context = '') {
     }
 }
 
-function hideMetricTooltip() {
+function hideMetricTooltip(force = false) {
     const tip = document.getElementById('metric-tooltip');
-    if (tip) tip.classList.add('hidden');
+    if (!tip) return;
+    if (force) {
+        clearMetricTooltipHideTimer();
+        tip.classList.add('hidden');
+        return;
+    }
+    scheduleMetricTooltipHide();
+}
+
+function handleMetricLabelKey(evt, term, context = '') {
+    if (!evt) return;
+    if (evt.key === 'Enter' || evt.key === ' ') {
+        evt.preventDefault();
+        showMetricTooltip(evt, term, context);
+    } else if (evt.key === 'Escape') {
+        hideMetricTooltip(true);
+    }
 }
 
 function bindPredictionMetricExplainers() {
@@ -166,10 +226,15 @@ function bindPredictionMetricExplainers() {
     for (const b of bindings) {
         const el = document.getElementById(b.id);
         if (!el) continue;
+        el.setAttribute('tabindex', '0');
+        el.setAttribute('role', 'button');
         el.addEventListener('mouseenter', (evt) => showMetricTooltip(evt, b.term, b.context));
         el.addEventListener('mousemove', moveMetricTooltip);
         el.addEventListener('mouseleave', hideMetricTooltip);
         el.addEventListener('click', (evt) => showMetricTooltip(evt, b.term, b.context));
+        el.addEventListener('focus', (evt) => showMetricTooltip(evt, b.term, b.context));
+        el.addEventListener('blur', hideMetricTooltip);
+        el.addEventListener('keydown', (evt) => handleMetricLabelKey(evt, b.term, b.context));
     }
 }
 
@@ -1025,8 +1090,13 @@ function renderStrategyEvidenceCard(title, rows) {
         <div class="strategy-evidence-title">${title}</div>
         ${rows.map((row) => {
             const tag = classifyStrategyScore(row.score);
+            const term = row.term || row.key;
             return `
-            <div class="strategy-evidence-row">
+            <div class="strategy-evidence-row clickable-metric strategy-evidence-explain"
+                data-strategy-term="${term}"
+                data-strategy-context="${title}"
+                tabindex="0"
+                role="button">
                 <span class="strategy-evidence-key">${row.key}</span>
                 <span class="strategy-evidence-value">${row.value}</span>
                 <span class="strategy-evidence-tag ${tag.cls}">${tag.label}</span>
@@ -1150,6 +1220,25 @@ function buildStrategyEvidence(predData) {
     </div>`;
 }
 
+function bindStrategyEvidenceExplainers() {
+    const container = document.getElementById('ml-strategy');
+    if (!container) return;
+    const nodes = container.querySelectorAll('.strategy-evidence-explain');
+    nodes.forEach((el) => {
+        if (el.dataset.explainBound === '1') return;
+        el.dataset.explainBound = '1';
+        const term = el.dataset.strategyTerm || 'Strategy Metric';
+        const context = `${el.dataset.strategyContext || 'Strategy evidence'} for ${TICKER}`;
+        el.addEventListener('mouseenter', (evt) => showMetricTooltip(evt, term, context));
+        el.addEventListener('mousemove', moveMetricTooltip);
+        el.addEventListener('mouseleave', hideMetricTooltip);
+        el.addEventListener('focus', (evt) => showMetricTooltip(evt, term, context));
+        el.addEventListener('blur', hideMetricTooltip);
+        el.addEventListener('click', (evt) => showMetricTooltip(evt, term, context));
+        el.addEventListener('keydown', (evt) => handleMetricLabelKey(evt, term, context));
+    });
+}
+
 // ── Strategy Loading ──────────────────────────────
 async function loadStrategies(predData) {
     // ML Strategy — immediate (from prediction data)
@@ -1169,6 +1258,7 @@ async function loadStrategies(predData) {
             <p class="muted-text">Strategy evidence below uses live model inputs (indicators, fundamentals, and option greeks) with rule tags.</p>
             ${strategyEvidence}
         `;
+        bindStrategyEvidenceExplainers();
     }
 
     // Groq Strategy — async API call

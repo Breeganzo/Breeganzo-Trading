@@ -14,6 +14,7 @@ let groupedTopPicks = { top_buy: [], top_sell: [], top_hold: [] };
 let metricExplainCache = {};
 let premarketOutlookData = [];
 let highlightedPremarketTicker = null;
+let metricTooltipHideTimer = null;
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -36,6 +37,16 @@ document.addEventListener('DOMContentLoaded', () => {
             loadDailyAnalysis();
         }
     }, 60000);
+    document.addEventListener('keydown', (evt) => {
+        if (evt.key === 'Escape') hideMetricTooltip(true);
+    });
+    document.addEventListener('click', (evt) => {
+        const tip = document.getElementById('metric-tooltip');
+        if (!tip) return;
+        if (tip.contains(evt.target)) return;
+        if (evt.target.closest('.clickable-metric')) return;
+        hideMetricTooltip(true);
+    });
 });
 
 // ── Real-time IST Clock ───────────────────────────
@@ -109,9 +120,36 @@ async function checkStatus() {
 // ── Metric Tooltip (Groq Explain) ─────────────────
 function moveMetricTooltip(evt) {
     const tip = document.getElementById('metric-tooltip');
-    if (!tip || !evt) return;
+    if (!tip || !evt || tip.classList.contains('hidden')) return;
     tip.style.left = `${evt.pageX + 14}px`;
     tip.style.top = `${evt.pageY + 14}px`;
+}
+
+function clearMetricTooltipHideTimer() {
+    if (metricTooltipHideTimer) {
+        clearTimeout(metricTooltipHideTimer);
+        metricTooltipHideTimer = null;
+    }
+}
+
+function scheduleMetricTooltipHide() {
+    clearMetricTooltipHideTimer();
+    metricTooltipHideTimer = setTimeout(() => {
+        const tip = document.getElementById('metric-tooltip');
+        if (!tip) return;
+        if (tip.matches(':hover') || tip.matches(':focus-within')) return;
+        tip.classList.add('hidden');
+    }, 180);
+}
+
+function bindMetricTooltipInteractions() {
+    const tip = document.getElementById('metric-tooltip');
+    if (!tip || tip.dataset.bound === '1') return;
+    tip.dataset.bound = '1';
+    tip.addEventListener('mouseenter', clearMetricTooltipHideTimer);
+    tip.addEventListener('mouseleave', scheduleMetricTooltipHide);
+    tip.addEventListener('focusin', clearMetricTooltipHideTimer);
+    tip.addEventListener('focusout', scheduleMetricTooltipHide);
 }
 
 async function showMetricTooltip(evt, term, context = '') {
@@ -120,9 +158,13 @@ async function showMetricTooltip(evt, term, context = '') {
     const bodyEl = document.getElementById('metric-tooltip-body');
     if (!tip || !titleEl || !bodyEl) return;
 
+    bindMetricTooltipInteractions();
+    clearMetricTooltipHideTimer();
     titleEl.textContent = term;
     bodyEl.textContent = 'Loading explanation...';
-    moveMetricTooltip(evt);
+    if (evt && Number.isFinite(evt.pageX) && Number.isFinite(evt.pageY)) {
+        moveMetricTooltip(evt);
+    }
     tip.classList.remove('hidden');
 
     const key = `${term}::${context}`;
@@ -141,9 +183,25 @@ async function showMetricTooltip(evt, term, context = '') {
     }
 }
 
-function hideMetricTooltip() {
+function hideMetricTooltip(force = false) {
     const tip = document.getElementById('metric-tooltip');
-    if (tip) tip.classList.add('hidden');
+    if (!tip) return;
+    if (force) {
+        clearMetricTooltipHideTimer();
+        tip.classList.add('hidden');
+        return;
+    }
+    scheduleMetricTooltipHide();
+}
+
+function handleMetricLabelKey(evt, term, context = '') {
+    if (!evt) return;
+    if (evt.key === 'Enter' || evt.key === ' ') {
+        evt.preventDefault();
+        showMetricTooltip(evt, term, context);
+    } else if (evt.key === 'Escape') {
+        hideMetricTooltip(true);
+    }
 }
 
 // ── Index Prices ──────────────────────────────────
@@ -536,18 +594,24 @@ async function showTopAnalysis() {
 
                 <div class="top10-metrics">
                     <div class="top10-metric">
-                        <span class="label clickable-metric"
+                        <span class="label clickable-metric" tabindex="0" role="button"
                               onmouseenter="showMetricTooltip(event, 'Confidence', 'Top 10 model confidence')"
                               onmousemove="moveMetricTooltip(event)"
-                              onmouseleave="hideMetricTooltip()">Confidence</span>
+                              onmouseleave="hideMetricTooltip()"
+                              onfocus="showMetricTooltip(event, 'Confidence', 'Top 10 model confidence')"
+                              onblur="hideMetricTooltip()"
+                              onkeydown="handleMetricLabelKey(event, 'Confidence', 'Top 10 model confidence')">Confidence</span>
                         <div class="metric-bar"><div class="metric-fill" style="width:${s.confidence}%"></div></div>
                         <span class="value">${s.confidence}%</span>
                     </div>
                     <div class="top10-metric">
-                        <span class="label clickable-metric"
+                        <span class="label clickable-metric" tabindex="0" role="button"
                               onmouseenter="showMetricTooltip(event, 'Model Agreement', 'Top 10 model agreement')"
                               onmousemove="moveMetricTooltip(event)"
-                              onmouseleave="hideMetricTooltip()">Agreement</span>
+                              onmouseleave="hideMetricTooltip()"
+                              onfocus="showMetricTooltip(event, 'Model Agreement', 'Top 10 model agreement')"
+                              onblur="hideMetricTooltip()"
+                              onkeydown="handleMetricLabelKey(event, 'Model Agreement', 'Top 10 model agreement')">Agreement</span>
                         <div class="metric-bar"><div class="metric-fill agreement" style="width:${s.model_agreement}%"></div></div>
                         <span class="value">${s.model_agreement}%</span>
                     </div>
@@ -555,10 +619,13 @@ async function showTopAnalysis() {
                         <span class="label">Score</span>
                         <span class="value score-badge">${s.composite_score}</span>
                     </div>
-                    ${s.risk_reward ? `<div class="top10-metric"><span class="label clickable-metric"
+                    ${s.risk_reward ? `<div class="top10-metric"><span class="label clickable-metric" tabindex="0" role="button"
                         onmouseenter="showMetricTooltip(event, 'Risk Reward Ratio', 'Top 10 trade quality')"
                         onmousemove="moveMetricTooltip(event)"
-                        onmouseleave="hideMetricTooltip()">R:R</span><span class="value">${s.risk_reward}</span></div>` : ''}
+                        onmouseleave="hideMetricTooltip()"
+                        onfocus="showMetricTooltip(event, 'Risk Reward Ratio', 'Top 10 trade quality')"
+                        onblur="hideMetricTooltip()"
+                        onkeydown="handleMetricLabelKey(event, 'Risk Reward Ratio', 'Top 10 trade quality')">R:R</span><span class="value">${s.risk_reward}</span></div>` : ''}
                 </div>
             </div>`;
         }
@@ -674,17 +741,23 @@ function renderTopPicks() {
                     <span class="value">${Number(pick.ai_predicted_price || 0) > 0 ? formatPrice(pick.ai_predicted_price) : '—'}</span>
                 </div>
                 <div class="pick-detail">
-                    <span class="label clickable-metric"
+                    <span class="label clickable-metric" tabindex="0" role="button"
                           onmouseenter="showMetricTooltip(event, 'Confidence', 'Top picks confidence metric')"
                           onmousemove="moveMetricTooltip(event)"
-                          onmouseleave="hideMetricTooltip()">Confidence</span>
+                          onmouseleave="hideMetricTooltip()"
+                          onfocus="showMetricTooltip(event, 'Confidence', 'Top picks confidence metric')"
+                          onblur="hideMetricTooltip()"
+                          onkeydown="handleMetricLabelKey(event, 'Confidence', 'Top picks confidence metric')">Confidence</span>
                     <span class="value">${Number(pick.confidence || 0).toFixed(0)}%</span>
                 </div>
                 <div class="pick-detail">
-                    <span class="label clickable-metric"
+                    <span class="label clickable-metric" tabindex="0" role="button"
                           onmouseenter="showMetricTooltip(event, 'Model Agreement', 'Top picks model agreement')"
                           onmousemove="moveMetricTooltip(event)"
-                          onmouseleave="hideMetricTooltip()">Agreement</span>
+                          onmouseleave="hideMetricTooltip()"
+                          onfocus="showMetricTooltip(event, 'Model Agreement', 'Top picks model agreement')"
+                          onblur="hideMetricTooltip()"
+                          onkeydown="handleMetricLabelKey(event, 'Model Agreement', 'Top picks model agreement')">Agreement</span>
                     <span class="value">${Number(pick.model_agreement || 0).toFixed(0)}%</span>
                 </div>
             </div>
@@ -713,9 +786,14 @@ async function loadPremarketOutlook() {
             highlightedPremarketTicker = premarketOutlookData[0].ticker;
         }
         if (header) {
-            const capturedAt = data.captured_at ? new Date(data.captured_at).toLocaleString('en-IN') : '—';
-            const bufferLabel = data.captured_within_buffer === false ? ' (captured after buffer cutoff)' : '';
-            header.textContent = `Captured: ${capturedAt}${bufferLabel}`;
+            const openWindowTime = formatIstTimestamp(data.captured_at);
+            const actualCapture = formatIstTimestamp(data.captured_at_actual);
+            const snapshotType = String(data.snapshot_type || '');
+            if (snapshotType === 'market_open_backfilled' && actualCapture && actualCapture !== openWindowTime) {
+                header.textContent = `Market-open snapshot: ${openWindowTime} (backfilled, generated at ${actualCapture})`;
+            } else {
+                header.textContent = `Market-open snapshot: ${openWindowTime}`;
+            }
         }
         renderPremarketOutlookTable();
         loadCurrentSecondSnapshot();
@@ -739,15 +817,18 @@ function renderPremarketOutlookTable() {
 
     table.innerHTML = viewRows.map(row => {
         const selected = row.ticker === highlightedPremarketTicker ? 'selected' : '';
-        const aligned = row.strategy_direction === row.ai_direction;
+        const aiAvailable = Number(row.ai_predicted_price || 0) > 0;
+        const aligned = aiAvailable ? row.strategy_direction === row.ai_direction : null;
+        const badgeClass = aligned === null ? '' : (aligned ? 'correct' : 'wrong');
+        const badgeText = aligned === null ? 'AI N/A' : (aligned ? 'Aligned' : 'Divergent');
         return `
             <tr class="premarket-row ${selected}" onclick="selectPremarketTicker('${row.ticker}')">
                 <td><strong>${row.name || row.ticker.replace('.NS', '')}</strong><br><span class="muted-text">${row.ticker}</span></td>
                 <td>${formatPrice(row.current_price)}</td>
                 <td>${Number(row.strategy_price_at_open || 0) > 0 ? formatPrice(row.strategy_price_at_open) : '—'}</td>
                 <td>${Number(row.ai_predicted_price || 0) > 0 ? formatPrice(row.ai_predicted_price) : '—'}</td>
-                <td>${row.strategy_direction || 'FLAT'} / ${row.ai_direction || 'FLAT'}</td>
-                <td><span class="direction-badge ${aligned ? 'correct' : 'wrong'}">${aligned ? 'Aligned' : 'Divergent'}</span></td>
+                <td>${row.strategy_direction || 'FLAT'} / ${row.ai_direction || 'N/A'}</td>
+                <td><span class="direction-badge ${badgeClass}">${badgeText}</span></td>
             </tr>
         `;
     }).join('');
@@ -797,15 +878,18 @@ async function loadCurrentSecondSnapshot() {
         );
         const current = Number(data.current_price || 0);
         const strategyDir = strategyNow > current ? 'UP' : strategyNow < current ? 'DOWN' : 'FLAT';
-        const aiDir = aiNow > current ? 'UP' : aiNow < current ? 'DOWN' : 'FLAT';
-        const aligned = strategyDir === aiDir;
+        const aiAvailable = aiNow > 0;
+        const aiDir = aiAvailable ? (aiNow > current ? 'UP' : aiNow < current ? 'DOWN' : 'FLAT') : 'N/A';
+        const aligned = aiAvailable ? strategyDir === aiDir : null;
+        const badgeClass = aligned === null ? '' : (aligned ? 'correct' : 'wrong');
+        const badgeText = aligned === null ? `${strategyDir}/N/A` : `${strategyDir}/${aiDir}`;
 
         body.innerHTML = `
             <tr>
                 <td>${formatPrice(current)}</td>
                 <td>${strategyNow > 0 ? formatPrice(strategyNow) : '—'}</td>
                 <td>${aiNow > 0 ? formatPrice(aiNow) : '—'}</td>
-                <td><span class="direction-badge ${aligned ? 'correct' : 'wrong'}">${strategyDir}/${aiDir}</span></td>
+                <td><span class="direction-badge ${badgeClass}">${badgeText}</span></td>
             </tr>
         `;
     } catch (e) {
@@ -890,7 +974,7 @@ async function loadExpectedVsActual() {
         let rows = '';
         for (const r of data.results) {
             const dirClass = r.direction_comparison ? 'correct' : 'wrong';
-            const dirText = r.direction_comparison ? '✓ Aligned' : '✗ Divergent';
+            const dirText = r.direction_comparison ? '✓ Strategy Correct' : '✗ Strategy Wrong';
             const predColor = r.predicted_return_pct >= 0 ? 'up-color' : 'down-color';
             const actColor = r.actual_return_pct >= 0 ? 'up-color' : 'down-color';
             const alpColor = r.alpha_pct >= 0 ? 'up-color' : 'down-color';
@@ -922,7 +1006,7 @@ async function loadExpectedVsActual() {
                     <th>AI Last</th>
                     <th>Actual Price</th>
                     <th>Actual Return</th>
-                    <th>Open vs AI</th>
+                    <th>Strategy vs Actual</th>
                     <th>Alpha</th>
                 </tr>
             </thead>
