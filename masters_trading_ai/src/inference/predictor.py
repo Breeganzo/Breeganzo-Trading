@@ -980,6 +980,8 @@ class LivePredictor:
             # Flatten multi-level columns if present
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
+            if df.columns.duplicated().any():
+                df = df.loc[:, ~df.columns.duplicated()]
 
             # Ensure required columns
             required = ["Open", "High", "Low", "Close", "Volume"]
@@ -988,6 +990,12 @@ class LivePredictor:
                     return None
 
             df = df[required].copy()
+            # Defensive: yfinance may still return duplicated/2D column blocks.
+            for col in required:
+                if isinstance(df[col], pd.DataFrame):
+                    df[col] = pd.to_numeric(
+                        df[col].iloc[:, 0], errors="coerce"
+                    )
             df = df.dropna()
 
             # Add Returns column (needed by pipeline)
