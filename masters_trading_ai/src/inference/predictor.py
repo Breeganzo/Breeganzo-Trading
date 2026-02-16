@@ -246,6 +246,37 @@ class LivePredictor:
         self._load_started_at: str | None = None
         self._load_completed_at: str | None = None
         self._load_steps: list[dict] = []
+        self._recent_model_outputs: dict[str, list[float]] = {}
+        self._stale_models: set[str] = set()
+
+    def _record_model_output(self, model_name: str, value: float) -> None:
+        """Track recent model outputs and flag near-constant models as stale."""
+        hist = self._recent_model_outputs.setdefault(model_name, [])
+        hist.append(float(value))
+        if len(hist) > 80:
+            del hist[:-80]
+
+        if len(hist) < 20:
+            return
+
+        arr = np.array(hist[-40:], dtype=float)
+        if arr.size < 20:
+            return
+
+        rounded = np.round(arr, 6)
+        mode_count = max(np.unique(rounded, return_counts=True)[1])
+        mode_ratio = mode_count / len(rounded)
+        std_val = float(np.std(arr))
+
+        if mode_ratio >= 0.85 or std_val < 1e-5:
+            if model_name not in self._stale_models:
+                self._stale_models.add(model_name)
+                log.warning(
+                    "Detected near-constant output for model=%s (std=%.8f mode_ratio=%.2f); excluding it from live ensemble inputs",
+                    model_name,
+                    std_val,
+                    mode_ratio,
+                )
 
     def _set_step(self, name: str, status: str, error: str | None = None) -> None:
         for step in self._load_steps:
@@ -519,9 +550,22 @@ class LivePredictor:
 
                 cached_return_pct = float(cached.get("predicted_return", 0) or 0)
                 cached_return_decimal = _sanitize_predicted_return(cached_return_pct / 100.0, {})
+                atr_pct = float(cached.get("atr_pct", 2.0) or 2.0) / 100.0
+                volume_ratio = float(cached.get("volume_ratio", 1.0) or 1.0)
+                rvol = float(cached.get("rvol", 1.0) or 1.0)
+                model_agreement = float(cached.get("model_agreement", 50.0) or 50.0) / 100.0
+                signal, confidence = self._generate_signal(
+                    cached_return_decimal,
+                    atr_pct=atr_pct,
+                    volume_ratio=volume_ratio,
+                    rvol=rvol,
+                    model_agreement=model_agreement,
+                )
                 cached["predicted_return"] = round(cached_return_decimal * 100, 4)
                 cached["predicted_price"] = round(current_price * (1 + cached_return_decimal), 2)
                 cached["target_price"] = cached["predicted_price"]
+                cached["signal"] = signal
+                cached["confidence"] = round(confidence, 1)
                 return cached
 
         # Ensure models are loaded
@@ -583,7 +627,10 @@ class LivePredictor:
                     pred_df[m] = 0.0
                 pred_df = pred_df[xgb_model.feature_names]
                 preds = xgb_model.predict(pred_df)
-                base_preds["xgboost"] = float(preds[-1])
+                xgb_pred = float(preds[-1])
+                self._record_model_output("xgboost", xgb_pred)
+                if "xgboost" not in self._stale_models:
+                    base_preds["xgboost"] = xgb_pred
             except Exception as e:
                 print(f"XGBoost prediction failed: {e}")
 
@@ -598,7 +645,10 @@ class LivePredictor:
                     pred_df[m] = 0.0
                 pred_df = pred_df[lgb_model.feature_names]
                 preds = lgb_model.predict(pred_df)
-                base_preds["lightgbm"] = float(preds[-1])
+                lgb_pred = float(preds[-1])
+                self._record_model_output("lightgbm", lgb_pred)
+                if "lightgbm" not in self._stale_models:
+                    base_preds["lightgbm"] = lgb_pred
             except Exception as e:
                 print(f"LightGBM prediction failed: {e}")
 
@@ -616,7 +666,10 @@ class LivePredictor:
                 if len(pred_df) >= lstm_model.seq_len:
                     preds = lstm_model.predict(pred_df)
                     if len(preds) > 0:
-                        base_preds["lstm"] = float(preds[-1])
+                        lstm_pred = float(preds[-1])
+                        self._record_model_output("lstm", lstm_pred)
+                        if "lstm" not in self._stale_models:
+                            base_preds["lstm"] = lstm_pred
             except Exception as e:
                 print(f"LSTM prediction failed: {e}")
 
@@ -633,7 +686,10 @@ class LivePredictor:
                 if len(pred_df) >= tf_model.seq_len:
                     preds = tf_model.predict(pred_df)
                     if len(preds) > 0:
-                        base_preds["transformer"] = float(np.ravel(preds[-1])[0])
+                        tf_pred = float(np.ravel(preds[-1])[0])
+                        self._record_model_output("transformer", tf_pred)
+                        if "transformer" not in self._stale_models:
+                            base_preds["transformer"] = tf_pred
             except Exception as e:
                 print(f"Transformer prediction failed: {e}")
 
@@ -745,6 +801,7 @@ class LivePredictor:
             "model_predictions": {k: round(v * 100, 4) for k, v in base_preds.items()},
             "ensemble_weights": {k: round(v, 4) for k, v in ensemble_weights.items()},
             "ensemble_strategy": getattr(self.ensemble, "best_strategy", "simple_average") if self.ensemble else "fallback_average",
+            "excluded_models": sorted(self._stale_models) if self._stale_models else [],
             "signal": signal,
             "confidence": round(confidence, 1),
             "direction_probability": round(dir_prob * 100, 1) if dir_prob is not None else None,
@@ -871,12 +928,12 @@ class LivePredictor:
         if volume_ratio > 1.5:
             confidence += 5  # High volume confirms move
         elif volume_ratio < 0.5:
-            confidence -= 5  # Low volume = weak conviction
+            confidence -= 2  # Low volume = weak conviction, but not an automatic HOLD
 
         if rvol > 2.0:
             confidence += 3  # Very high relative volume
         elif rvol < 0.5:
-            confidence -= 3
+            confidence -= 1.5
 
         # Model agreement bonus/penalty
         if model_agreement >= 0.8:
@@ -887,19 +944,20 @@ class LivePredictor:
             confidence -= 5   # Models disagree — lower conviction
 
         confidence = max(0, min(100, confidence))
+        move_pct = abs(predicted_return) * 100.0
 
         # Map to signal
         if direction > 0:
-            if confidence >= 75:
+            if confidence >= 68 and move_pct >= 0.45:
                 signal = "STRONG_BUY"
-            elif confidence >= 60:
+            elif confidence >= 54 and move_pct >= 0.18:
                 signal = "BUY"
             else:
                 signal = "HOLD"
         else:
-            if confidence >= 75:
+            if confidence >= 68 and move_pct >= 0.45:
                 signal = "STRONG_SELL"
-            elif confidence >= 60:
+            elif confidence >= 54 and move_pct >= 0.18:
                 signal = "SELL"
             else:
                 signal = "HOLD"
@@ -959,18 +1017,21 @@ class LivePredictor:
             except Exception:
                 continue
 
+        buy_signals = {"BUY", "STRONG_BUY"}
+        sell_signals = {"SELL", "STRONG_SELL"}
+
         buys = sorted(
-            [r for r in results if r.get("predicted_return", 0) > 0],
+            [r for r in results if str(r.get("signal", "")).upper() in buy_signals],
             key=lambda x: x["_score"],
             reverse=True,
         )[:top_n]
         sells = sorted(
-            [r for r in results if r.get("predicted_return", 0) < 0],
+            [r for r in results if str(r.get("signal", "")).upper() in sell_signals],
             key=lambda x: x["_score"],
             reverse=True,
         )[:top_n]
         holds = sorted(
-            [r for r in results if r.get("signal") == "HOLD"],
+            [r for r in results if str(r.get("signal", "")).upper() == "HOLD"],
             key=lambda x: (x.get("confidence", 0), -abs(x.get("predicted_return", 0))),
             reverse=True,
         )[:top_n]
