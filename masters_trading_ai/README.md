@@ -60,16 +60,20 @@ It returns:
   - if `abs(raw) > 2.0`, converts mistaken percent-to-decimal by `/100`
   - caps to `[-0.5, 0.5]` decimal (±50%)
 
-## 5) Premarket behavior
+## 5) Market-open snapshot behavior
 Config (`config/settings.yaml`):
 ```yaml
 webapp:
   premarket_max_buffer_minutes: 30
   premarket_default_tickers: 10
+  after_hours_ui_hour: 16
+  after_hours_ui_minute: 0
 ```
 
-Snapshot is captured once/day and intended to be taken by:
-- `market_open - premarket_max_buffer_minutes`
+Snapshot contract:
+- snapshot source is pinned to market-open flow (`09:15-09:30 IST`) with `snapshot_type: "market_open"`.
+- if app starts late, fallback uses `snapshot_type: "near_open_fallback"` (same trading day only).
+- before open, API may return `snapshot_type: "pending_market_open"` and empty items.
 
 Endpoint:
 ```bash
@@ -84,6 +88,8 @@ Response includes per ticker:
 - `strategy_direction`
 - `ai_direction`
 - `captured_at`
+- `snapshot_type`
+- `schema_version`
 
 ## 6) API contracts
 
@@ -108,6 +114,8 @@ Includes:
 - `ai_last_prediction`
 - `actual_close`
 - `direction_comparison`
+- `after_hours_mode`
+- `snapshot_type`
 - `schema_version`
 
 ### `/api/training-feedback`
@@ -122,13 +130,21 @@ Export schema is retraining-friendly and includes direction comparison fields.
 - New table: **Premarket vs Current**.
 - New table: **Current Second Snapshot** for highlighted ticker.
 - `0/null` prices render as `—` (not fake `₹0`).
+- After-hours mode (>= 16:00 IST or market closed) auto-locks premarket widgets and switches to EoD comparison context.
 
-## 8) Risk analytics behavior
+## 8) Groq explanation UX
+- Metric explainers use persistent scrollable popovers.
+- Popovers are keyboard accessible (`Enter`/`Space` to open, `Esc` to close).
+- Long responses are clipped and normalized backend-side for UI readability.
+
+## 9) Risk analytics behavior
 - `/api/risk-analytics` now uses **only user portfolio tickers**.
 - Non-portfolio requested tickers are ignored and reported in `ignored_tickers`.
 - No fallback to demo/model-pick portfolios.
+- Monte Carlo simulation is driven by the portfolio equity curve (`simulation_source: "equity_curve"`).
+- Monte Carlo enforces minimum history (`>= 30` daily points in API flow).
 
-## 9) Delisted ticker registry
+## 10) Delisted ticker registry
 Unavailable symbols are tracked in:
 - `cache/delisted_tickers.csv`
 
@@ -140,17 +156,34 @@ curl -L 'http://localhost:5001/api/delisted-tickers/export.csv' -o delisted_tick
 
 Before retraining, replace repeated failures in `config/tickers.yaml`.
 
-## 10) Tests, lint, type-check
+## 11) Tests, lint, type-check
 ```bash
 cd /Users/anto/Trading_Project/masters_trading_ai
 source .venv/bin/activate
 pytest -q
-black --check src webapp tests
-flake8 src webapp tests --max-line-length=120 --extend-ignore=E203,W503
-mypy src/inference/predictor.py webapp/prediction_tracker.py webapp/server.py --ignore-missing-imports --follow-imports=silent
+black --check \
+  src/backtest/metrics.py \
+  webapp/server.py \
+  webapp/prediction_tracker.py \
+  webapp/groq_explainer.py \
+  tests/test_premarket_outlook.py \
+  tests/test_expected_vs_actual.py \
+  tests/test_premarket_snapshot.py \
+  tests/test_risk_monte_carlo.py \
+  tests/test_tooltip_popover.py \
+  tests/test_artifact_cleanup.py
+flake8 \
+  tests/test_premarket_outlook.py \
+  tests/test_expected_vs_actual.py \
+  tests/test_premarket_snapshot.py \
+  tests/test_risk_monte_carlo.py \
+  tests/test_tooltip_popover.py \
+  tests/test_artifact_cleanup.py \
+  --max-line-length=120 --extend-ignore=E203,W503
+mypy src/backtest/metrics.py tests/test_premarket_snapshot.py tests/test_risk_monte_carlo.py --ignore-missing-imports --follow-imports=silent
 ```
 
-## 11) CI
+## 12) CI
 GitHub Actions workflow:
 - `.github/workflows/ci.yml`
 
@@ -161,21 +194,21 @@ Runs on `masters_trading_ai/**` changes:
 - `flake8`
 - `mypy`
 
-## 12) Branch workflow (feature -> main)
+## 13) Branch workflow (feature -> main)
 From project root (`/Users/anto/Trading_Project`):
 
 ```bash
-git checkout -b feature/predictor-productionize
+git checkout -b feature/ui-risk-premarket-fixes
 # make changes
 git add .
-git commit -m "productionize: sanitize predictions, premarket/outlook, expected-vs-actual persistence, tests, cleanup, docs"
-git push -u origin feature/predictor-productionize
+git commit -m "ui+backend: market-open snapshots, scrollable Groq popovers, risk/montecarlo fixes, cleanup, tests, docs"
+git push -u origin feature/ui-risk-premarket-fixes
 ```
 
 Create PR to `main`.
 After approval + green CI, merge PR.
 
-## 13) Architecture (data flow)
+## 14) Architecture (data flow)
 ```mermaid
 flowchart LR
     YF[yfinance Live + Daily] --> FP[FeaturePipeline]
@@ -196,14 +229,25 @@ flowchart LR
     TRACK --> FB[/api/training-feedback]
 ```
 
-## 14) Retraining cadence
+## 15) Verification Runbook
+```bash
+cd /Users/anto/Trading_Project/masters_trading_ai
+source .venv/bin/activate
+pytest -q
+python webapp/server.py
+curl -s 'http://localhost:5001/api/premarket-outlook' | jq
+curl -s \"http://localhost:5001/api/expected-vs-actual?date=$(date +%F)\" | jq
+curl -s 'http://localhost:5001/api/risk-analytics' | jq
+```
+
+## 16) Retraining cadence
 - Daily: run app + monitor tracking.
 - Weekly: data/feature refresh.
 - Bi-weekly: retrain sequence/tree models.
 - Monthly: walk-forward + ensemble + backtest review.
 - Quarterly: full pipeline refresh.
 
-See `docs/DAILY_OPERATIONS.md` for detailed runbook.
+See `DAILY_OPERATIONS.md` for detailed runbook.
 
-## 15) Trading disclaimer
+## 17) Trading disclaimer
 This system supports decision quality, not guaranteed profit. Use risk limits, monitor regime shifts, and keep ongoing retraining/backtesting in loop.

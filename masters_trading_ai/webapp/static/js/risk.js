@@ -7,6 +7,12 @@ document.addEventListener('DOMContentLoaded', () => {
     bindRiskTermHover();
 });
 
+const riskPopoverState = {
+    hideTimer: null,
+    activeTrigger: null,
+    cache: {},
+};
+
 async function loadRiskAnalytics() {
     const loading = document.getElementById('risk-loading');
     const content = document.getElementById('risk-content');
@@ -62,7 +68,7 @@ function renderRiskMetrics(metrics) {
     let html = '';
     for (const c of cards) {
         html += `
-        <div class="risk-metric-card risk-term" data-risk-term="${c.label}">
+        <div class="risk-metric-card risk-term" data-risk-term="${c.label}" role="button" tabindex="0" aria-haspopup="dialog" aria-controls="risk-tooltip">
             <div class="rmc-icon">${c.icon}</div>
             <div class="rmc-value" style="color:${c.color}">${c.value}</div>
             <div class="rmc-label">${c.label}</div>
@@ -205,11 +211,11 @@ function renderMonteCarlo(mc) {
             <h4>Probability Analysis</h4>
             <div class="mc-distributions">
                 <div class="mc-row highlight">
-                    <span class="mc-label risk-term" data-risk-term="Probability of Profit">Prob(Profit)</span>
+                    <span class="mc-label risk-term" data-risk-term="Probability of Profit" role="button" tabindex="0" aria-haspopup="dialog" aria-controls="risk-tooltip">Prob(Profit)</span>
                     <span class="mc-val ${mc.probability_of_profit > 0.5 ? 'up-color' : 'down-color'}">${(mc.probability_of_profit * 100).toFixed(1)}%</span>
                 </div>
                 <div class="mc-row">
-                    <span class="mc-label risk-term" data-risk-term="Probability of Loss greater than 10%">Prob(Loss > 10%)</span>
+                    <span class="mc-label risk-term" data-risk-term="Probability of Loss greater than 10%" role="button" tabindex="0" aria-haspopup="dialog" aria-controls="risk-tooltip">Prob(Loss > 10%)</span>
                     <span class="mc-val down-color">${(mc.probability_of_loss_gt_10pct * 100).toFixed(1)}%</span>
                 </div>
                 <div class="mc-row">
@@ -327,37 +333,166 @@ function renderHoldings(tickers, holdings = []) {
 }
 
 function bindRiskTermHover() {
-    document.addEventListener('mouseover', async (event) => {
-        const el = event.target.closest('.risk-term');
-        if (!el) return;
-        const term = el.dataset.riskTerm || el.textContent?.trim();
-        if (!term) return;
+    function getEls() {
         const tooltip = document.getElementById('risk-tooltip');
         const titleEl = document.getElementById('risk-tooltip-title');
         const bodyEl = document.getElementById('risk-tooltip-body');
-        if (!tooltip || !titleEl || !bodyEl) return;
+        return { tooltip, titleEl, bodyEl };
+    }
 
-        const rect = el.getBoundingClientRect();
+    function cancelHide() {
+        if (riskPopoverState.hideTimer) {
+            clearTimeout(riskPopoverState.hideTimer);
+            riskPopoverState.hideTimer = null;
+        }
+    }
+
+    function scheduleHide() {
+        cancelHide();
+        riskPopoverState.hideTimer = setTimeout(() => {
+            const { tooltip } = getEls();
+            const trigger = riskPopoverState.activeTrigger;
+            const triggerHovered = !!(trigger && trigger.matches(':hover'));
+            const tipHovered = !!(tooltip && tooltip.matches(':hover'));
+            const tipFocused = !!(
+                tooltip
+                && (document.activeElement === tooltip || tooltip.contains(document.activeElement))
+            );
+            if (triggerHovered || tipHovered || tipFocused) return;
+            hide();
+        }, 160);
+    }
+
+    function hide() {
+        const { tooltip } = getEls();
+        cancelHide();
+        if (!tooltip) return;
+        tooltip.classList.add('hidden');
+        tooltip.setAttribute('aria-hidden', 'true');
+    }
+
+    function position(triggerEl) {
+        const { tooltip } = getEls();
+        if (!tooltip || !triggerEl) return;
+        const rect = triggerEl.getBoundingClientRect();
         tooltip.style.top = `${window.scrollY + rect.bottom + 10}px`;
-        tooltip.style.left = `${Math.min(window.scrollX + rect.left, window.scrollX + window.innerWidth - 380)}px`;
+        tooltip.style.left = `${Math.min(window.scrollX + rect.left, window.scrollX + window.innerWidth - tooltip.offsetWidth - 12)}px`;
+    }
+
+    async function show(triggerEl, term) {
+        const { tooltip, titleEl, bodyEl } = getEls();
+        if (!tooltip || !titleEl || !bodyEl || !term || !triggerEl) return;
+        riskPopoverState.activeTrigger = triggerEl;
+        cancelHide();
+        position(triggerEl);
         tooltip.classList.remove('hidden');
+        tooltip.setAttribute('aria-hidden', 'false');
         titleEl.textContent = term;
         bodyEl.textContent = 'Loading explanation...';
-
+        const cacheKey = term.toLowerCase();
+        if (riskPopoverState.cache[cacheKey]) {
+            bodyEl.textContent = riskPopoverState.cache[cacheKey];
+            return;
+        }
         try {
             const res = await fetch(`/api/explain-risk-term?term=${encodeURIComponent(term)}&context=${encodeURIComponent('portfolio risk analytics')}`);
             const data = await res.json();
-            bodyEl.textContent = data.explanation || data.error || 'No explanation available';
+            const text = data.explanation || data.error || 'No explanation available';
+            riskPopoverState.cache[cacheKey] = text;
+            bodyEl.textContent = text;
         } catch (e) {
             bodyEl.textContent = `Explanation unavailable: ${e.message}`;
         }
+    }
+
+    function normalizeTrigger(el) {
+        if (!el) return;
+        el.setAttribute('tabindex', el.getAttribute('tabindex') || '0');
+        el.setAttribute('role', 'button');
+        el.setAttribute('aria-haspopup', 'dialog');
+        el.setAttribute('aria-controls', 'risk-tooltip');
+    }
+
+    document.addEventListener('mouseover', (event) => {
+        const el = event.target.closest('.risk-term');
+        if (!el) return;
+        normalizeTrigger(el);
+        const term = el.dataset.riskTerm || el.textContent?.trim();
+        if (!term) return;
+        show(el, term);
+    });
+
+    document.addEventListener('focusin', (event) => {
+        const el = event.target.closest('.risk-term');
+        if (!el) return;
+        normalizeTrigger(el);
+        const term = el.dataset.riskTerm || el.textContent?.trim();
+        if (!term) return;
+        show(el, term);
     });
 
     document.addEventListener('mouseout', (event) => {
         if (!event.target.closest('.risk-term')) return;
-        const tooltip = document.getElementById('risk-tooltip');
-        if (tooltip) tooltip.classList.add('hidden');
+        scheduleHide();
     });
+
+    document.addEventListener('focusout', (event) => {
+        if (!event.target.closest('.risk-term')) return;
+        scheduleHide();
+    });
+
+    document.addEventListener('click', (event) => {
+        const trigger = event.target.closest('.risk-term');
+        const { tooltip } = getEls();
+        if (trigger) {
+            normalizeTrigger(trigger);
+            const term = trigger.dataset.riskTerm || trigger.textContent?.trim();
+            if (!term) return;
+            show(trigger, term);
+            return;
+        }
+        if (tooltip && !tooltip.contains(event.target)) {
+            hide();
+        }
+    });
+
+    document.addEventListener('keydown', (event) => {
+        const trigger = event.target.closest('.risk-term');
+        if (!trigger) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            const term = trigger.dataset.riskTerm || trigger.textContent?.trim();
+            if (term) show(trigger, term);
+        }
+        if (event.key === 'Escape') {
+            hide();
+        }
+    });
+
+    const { tooltip } = getEls();
+    if (!tooltip) return;
+    tooltip.setAttribute('tabindex', '0');
+    tooltip.addEventListener('mouseenter', cancelHide);
+    tooltip.addEventListener('mouseleave', scheduleHide);
+    tooltip.addEventListener('focusin', cancelHide);
+    tooltip.addEventListener('focusout', scheduleHide);
+    tooltip.addEventListener('keydown', (evt) => {
+        if (evt.key === 'Escape') hide();
+    });
+    tooltip.addEventListener(
+        'wheel',
+        (evt) => {
+            evt.stopPropagation();
+        },
+        { passive: true }
+    );
+    tooltip.addEventListener(
+        'touchstart',
+        () => {
+            cancelHide();
+        },
+        { passive: true }
+    );
 }
 
 // ── Utility ───────────────────────────────────────

@@ -27,7 +27,9 @@ from scipy import stats as sp_stats
 from ..utils.constants import TRADING_DAYS_PER_YEAR, RISK_FREE_RATE
 
 
-def annualized_return(returns: pd.Series, periods_per_year: int = TRADING_DAYS_PER_YEAR) -> float:
+def annualized_return(
+    returns: pd.Series, periods_per_year: int = TRADING_DAYS_PER_YEAR
+) -> float:
     """
     Annualised return from a series of periodic returns.
 
@@ -51,7 +53,9 @@ def annualized_return(returns: pd.Series, periods_per_year: int = TRADING_DAYS_P
     return (1 + total_return) ** (periods_per_year / n_periods) - 1
 
 
-def annualized_volatility(returns: pd.Series, periods_per_year: int = TRADING_DAYS_PER_YEAR) -> float:
+def annualized_volatility(
+    returns: pd.Series, periods_per_year: int = TRADING_DAYS_PER_YEAR
+) -> float:
     """
     Annualised volatility (standard deviation of returns).
 
@@ -125,7 +129,7 @@ def sortino_ratio(
     downside_returns = returns[returns < 0]
     if len(downside_returns) == 0:
         return float("inf")  # No negative returns
-    downside_dev = np.sqrt(np.mean(downside_returns ** 2)) * np.sqrt(periods_per_year)
+    downside_dev = np.sqrt(np.mean(downside_returns**2)) * np.sqrt(periods_per_year)
     if downside_dev == 0:
         return 0.0
     return (ann_ret - risk_free_rate) / downside_dev
@@ -374,6 +378,7 @@ def conditional_var(returns: pd.Series, confidence: float = 0.95) -> float:
 # Additional Quant Metrics — Interview-Grade
 # ---------------------------------------------------------------------------
 
+
 def information_ratio(
     portfolio_returns: pd.Series,
     benchmark_returns: pd.Series,
@@ -401,8 +406,9 @@ def information_ratio(
     tracking_error = active_return.std() * np.sqrt(periods_per_year)
     if tracking_error == 0:
         return 0.0
-    ann_active = annualized_return(aligned["portfolio"], periods_per_year) - \
-                 annualized_return(aligned["benchmark"], periods_per_year)
+    ann_active = annualized_return(
+        aligned["portfolio"], periods_per_year
+    ) - annualized_return(aligned["benchmark"], periods_per_year)
     return ann_active / tracking_error
 
 
@@ -569,8 +575,8 @@ def ulcer_index(equity_curve: pd.Series) -> float:
         Ulcer Index as a decimal (lower is better)
     """
     peak = equity_curve.cummax()
-    dd_pct = ((equity_curve - peak) / peak * 100)
-    return np.sqrt(np.mean(dd_pct ** 2))
+    dd_pct = (equity_curve - peak) / peak * 100
+    return np.sqrt(np.mean(dd_pct**2))
 
 
 def parametric_var(
@@ -612,10 +618,12 @@ def parametric_var(
     # Cornish-Fisher expansion
     s = return_skewness(returns)
     k = return_kurtosis(returns)
-    z_cf = (z +
-            (z**2 - 1) * s / 6 +
-            (z**3 - 3 * z) * k / 24 -
-            (2 * z**3 - 5 * z) * s**2 / 36)
+    z_cf = (
+        z
+        + (z**2 - 1) * s / 6
+        + (z**3 - 3 * z) * k / 24
+        - (2 * z**3 - 5 * z) * s**2 / 36
+    )
 
     return -(returns.mean() + z_cf * returns.std())
 
@@ -646,7 +654,9 @@ def portfolio_turnover(
     """
     if len(trade_signals) < 2:
         return 0.0
-    changes = (trade_signals != trade_signals.shift(1)).sum() - 1  # -1 for initial position
+    changes = (
+        trade_signals != trade_signals.shift(1)
+    ).sum() - 1  # -1 for initial position
     daily_turnover = changes / len(trade_signals)
     return daily_turnover * periods_per_year
 
@@ -654,6 +664,7 @@ def portfolio_turnover(
 # ---------------------------------------------------------------------------
 # Statistical Tests — Institutional-Grade Validation
 # ---------------------------------------------------------------------------
+
 
 def jarque_bera_test(returns: pd.Series) -> dict:
     """
@@ -735,7 +746,9 @@ def ljung_box_test(returns: pd.Series, lags: int = 10) -> dict:
     return {
         "has_autocorrelation": bool(min_p < 0.05),
         "min_p_value": round(min_p, 6),
-        "lag_p_values": {int(k): round(float(v), 6) for k, v in result["lb_pvalue"].items()},
+        "lag_p_values": {
+            int(k): round(float(v), 6) for k, v in result["lb_pvalue"].items()
+        },
     }
 
 
@@ -743,11 +756,14 @@ def ljung_box_test(returns: pd.Series, lags: int = 10) -> dict:
 # Monte Carlo Simulation — Backtest Confidence Intervals
 # ---------------------------------------------------------------------------
 
+
 def monte_carlo_backtest(
-    returns: pd.Series,
+    returns: Optional[pd.Series],
     n_simulations: int = 1000,
     n_days: Optional[int] = None,
     initial_capital: float = 100000.0,
+    equity_curve: Optional[pd.Series] = None,
+    min_history: int = 20,
 ) -> dict:
     """
     Monte Carlo simulation for backtest robustness.
@@ -763,13 +779,19 @@ def monte_carlo_backtest(
     Parameters
     ----------
     returns : pd.Series
-        Historical daily returns
+        Historical daily returns. Optional when `equity_curve` is provided.
     n_simulations : int
         Number of bootstrap paths (1000 is standard)
     n_days : int, optional
         Simulation horizon (default: same as returns length)
     initial_capital : float
         Starting portfolio value
+    equity_curve : pd.Series, optional
+        True historical portfolio equity values. When provided, Monte Carlo
+        samples are derived from this equity path so simulation reflects
+        realized portfolio dynamics.
+    min_history : int
+        Minimum required history length.
 
     Returns
     -------
@@ -777,8 +799,29 @@ def monte_carlo_backtest(
         terminal_wealth_percentiles, max_drawdown_percentiles,
         sharpe_percentiles, probability_of_profit
     """
-    clean = returns.dropna().values
-    if len(clean) < 20:
+    simulation_source = "returns"
+    base_initial_capital = float(initial_capital)
+
+    if equity_curve is not None:
+        eq = pd.Series(equity_curve).dropna()
+        eq = eq[eq > 0]
+        if len(eq) < min_history:
+            return {
+                "error": (
+                    f"Insufficient equity history for Monte Carlo "
+                    f"(need >= {min_history}, got {len(eq)})"
+                )
+            }
+        derived_returns = eq.pct_change().dropna()
+        clean = derived_returns.values
+        simulation_source = "equity_curve"
+        base_initial_capital = float(eq.iloc[0])
+    else:
+        if returns is None:
+            return {"error": "Returns or equity_curve is required for Monte Carlo"}
+        clean = pd.Series(returns).dropna().values
+
+    if len(clean) < min_history:
         return {"error": "Insufficient return history for Monte Carlo"}
 
     if n_days is None:
@@ -793,7 +836,7 @@ def monte_carlo_backtest(
     for _ in range(n_simulations):
         # Bootstrap resample (with replacement)
         sim_returns = rng.choice(clean, size=n_days, replace=True)
-        sim_equity = initial_capital * np.cumprod(1 + sim_returns)
+        sim_equity = base_initial_capital * np.cumprod(1 + sim_returns)
 
         terminal_wealths.append(sim_equity[-1])
 
@@ -803,7 +846,7 @@ def monte_carlo_backtest(
         max_drawdowns.append(dd.min())
 
         # Sharpe of this path
-        ann_ret = (sim_equity[-1] / initial_capital) ** (252 / n_days) - 1
+        ann_ret = (sim_equity[-1] / base_initial_capital) ** (252 / n_days) - 1
         ann_vol = np.std(sim_returns) * np.sqrt(252)
         sr = (ann_ret - RISK_FREE_RATE) / ann_vol if ann_vol > 0 else 0
         sharpe_ratios_mc.append(sr)
@@ -815,7 +858,8 @@ def monte_carlo_backtest(
     return {
         "n_simulations": n_simulations,
         "n_days": n_days,
-        "initial_capital": initial_capital,
+        "initial_capital": round(float(base_initial_capital), 2),
+        "simulation_source": simulation_source,
         "terminal_wealth": {
             "mean": round(float(tw.mean()), 2),
             "median": round(float(np.median(tw)), 2),
@@ -834,8 +878,10 @@ def monte_carlo_backtest(
             "p5": round(float(np.percentile(sr_arr, 5)), 4),
             "p95": round(float(np.percentile(sr_arr, 95)), 4),
         },
-        "probability_of_profit": round(float((tw > initial_capital).mean()), 4),
-        "probability_of_loss_gt_10pct": round(float((tw < initial_capital * 0.9).mean()), 4),
+        "probability_of_profit": round(float((tw > base_initial_capital).mean()), 4),
+        "probability_of_loss_gt_10pct": round(
+            float((tw < base_initial_capital * 0.9).mean()), 4
+        ),
     }
 
 
@@ -872,41 +918,41 @@ def compute_all_metrics(
         "Annual Return": annualized_return(portfolio_returns),
         "Annual Volatility": annualized_volatility(portfolio_returns),
         "Total Return": (1 + portfolio_returns).prod() - 1,
-
         # ── Risk-Adjusted Returns ──
         "Sharpe Ratio": sharpe_ratio(portfolio_returns, risk_free_rate),
         "Sortino Ratio": sortino_ratio(portfolio_returns, risk_free_rate),
         "Omega Ratio": omega_ratio(portfolio_returns),
         "Calmar Ratio": calmar_ratio(portfolio_returns, equity_curve),
         "Gain-to-Pain Ratio": gain_to_pain_ratio(portfolio_returns),
-
         # ── Drawdown Metrics ──
         "Max Drawdown": max_drawdown(equity_curve),
         "Max Drawdown Duration (days)": max_drawdown_duration(equity_curve),
         "Ulcer Index": ulcer_index(equity_curve),
-
         # ── Risk Metrics ──
         "Daily VaR (95%)": value_at_risk(portfolio_returns, 0.95),
         "Daily CVaR (95%)": conditional_var(portfolio_returns, 0.95),
-        "Parametric VaR (Cornish-Fisher 95%)": parametric_var(portfolio_returns, 0.95, "cornish_fisher"),
-        "Parametric VaR (Gaussian 95%)": parametric_var(portfolio_returns, 0.95, "gaussian"),
-
+        "Parametric VaR (Cornish-Fisher 95%)": parametric_var(
+            portfolio_returns, 0.95, "cornish_fisher"
+        ),
+        "Parametric VaR (Gaussian 95%)": parametric_var(
+            portfolio_returns, 0.95, "gaussian"
+        ),
         # ── Distribution Metrics ──
         "Skewness": return_skewness(portfolio_returns),
         "Excess Kurtosis": return_kurtosis(portfolio_returns),
         "Tail Ratio": tail_ratio(portfolio_returns),
-
         # ── Trade Metrics ──
         "Win Rate": win_rate(portfolio_returns),
         "Profit Factor": profit_factor(portfolio_returns),
-        "Downside Deviation": portfolio_returns[portfolio_returns < 0].std() * np.sqrt(252)
-                              if len(portfolio_returns[portfolio_returns < 0]) > 0 else 0.0,
-
+        "Downside Deviation": (
+            portfolio_returns[portfolio_returns < 0].std() * np.sqrt(252)
+            if len(portfolio_returns[portfolio_returns < 0]) > 0
+            else 0.0
+        ),
         # ── Counts ──
         "Total Trading Days": len(portfolio_returns),
         "Positive Days": int((portfolio_returns > 0).sum()),
         "Negative Days": int((portfolio_returns < 0).sum()),
-
         # ── Statistical Validation ──
         "Jarque-Bera Test": jarque_bera_test(portfolio_returns),
     }
@@ -917,10 +963,16 @@ def compute_all_metrics(
 
     # Benchmark-relative metrics
     if benchmark_returns is not None:
-        metrics["Alpha"] = compute_alpha(portfolio_returns, benchmark_returns, risk_free_rate)
+        metrics["Alpha"] = compute_alpha(
+            portfolio_returns, benchmark_returns, risk_free_rate
+        )
         metrics["Beta"] = compute_beta(portfolio_returns, benchmark_returns)
-        metrics["Information Ratio"] = information_ratio(portfolio_returns, benchmark_returns)
-        metrics["Treynor Ratio"] = treynor_ratio(portfolio_returns, benchmark_returns, risk_free_rate)
+        metrics["Information Ratio"] = information_ratio(
+            portfolio_returns, benchmark_returns
+        )
+        metrics["Treynor Ratio"] = treynor_ratio(
+            portfolio_returns, benchmark_returns, risk_free_rate
+        )
 
         # Benchmark comparison
         metrics["Benchmark Return"] = annualized_return(benchmark_returns)

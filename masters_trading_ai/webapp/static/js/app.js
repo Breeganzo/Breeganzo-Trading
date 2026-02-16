@@ -14,10 +14,12 @@ let groupedTopPicks = { top_buy: [], top_sell: [], top_hold: [] };
 let metricExplainCache = {};
 let premarketOutlookData = [];
 let highlightedPremarketTicker = null;
+let dashboardAfterHoursMode = false;
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     checkStatus();
+    bindMetricPopoverTriggers();
     loadSectors();
     loadIndexPrices();
     loadPricesForSector('all');
@@ -107,23 +109,72 @@ async function checkStatus() {
 }
 
 // ── Metric Tooltip (Groq Explain) ─────────────────
-function moveMetricTooltip(evt) {
-    const tip = document.getElementById('metric-tooltip');
-    if (!tip || !evt) return;
-    tip.style.left = `${evt.pageX + 14}px`;
-    tip.style.top = `${evt.pageY + 14}px`;
-}
+const metricPopoverState = {
+    hideTimer: null,
+    activeTrigger: null,
+};
 
-async function showMetricTooltip(evt, term, context = '') {
+function getMetricPopoverEls() {
     const tip = document.getElementById('metric-tooltip');
     const titleEl = document.getElementById('metric-tooltip-title');
     const bodyEl = document.getElementById('metric-tooltip-body');
-    if (!tip || !titleEl || !bodyEl) return;
+    return { tip, titleEl, bodyEl };
+}
 
+function positionMetricPopover(triggerEl) {
+    const { tip } = getMetricPopoverEls();
+    if (!tip || !triggerEl) return;
+    const rect = triggerEl.getBoundingClientRect();
+    const left = Math.min(
+        window.scrollX + rect.left,
+        window.scrollX + window.innerWidth - tip.offsetWidth - 12
+    );
+    const top = window.scrollY + rect.bottom + 10;
+    tip.style.left = `${Math.max(window.scrollX + 8, left)}px`;
+    tip.style.top = `${top}px`;
+}
+
+function cancelMetricPopoverHide() {
+    if (metricPopoverState.hideTimer) {
+        clearTimeout(metricPopoverState.hideTimer);
+        metricPopoverState.hideTimer = null;
+    }
+}
+
+function scheduleMetricPopoverHide() {
+    cancelMetricPopoverHide();
+    metricPopoverState.hideTimer = setTimeout(() => {
+        const { tip } = getMetricPopoverEls();
+        const trigger = metricPopoverState.activeTrigger;
+        const triggerHovered = !!(trigger && trigger.matches(':hover'));
+        const tipHovered = !!(tip && tip.matches(':hover'));
+        const tipFocused = !!(
+            tip
+            && (document.activeElement === tip || tip.contains(document.activeElement))
+        );
+        if (triggerHovered || tipHovered || tipFocused) return;
+        hideMetricTooltip();
+    }, 160);
+}
+
+function hideMetricTooltip() {
+    const { tip } = getMetricPopoverEls();
+    cancelMetricPopoverHide();
+    if (!tip) return;
+    tip.classList.add('hidden');
+    tip.setAttribute('aria-hidden', 'true');
+}
+
+async function showMetricTooltip(triggerEl, term, context = '') {
+    const { tip, titleEl, bodyEl } = getMetricPopoverEls();
+    if (!tip || !titleEl || !bodyEl || !triggerEl) return;
+    metricPopoverState.activeTrigger = triggerEl;
+    cancelMetricPopoverHide();
     titleEl.textContent = term;
     bodyEl.textContent = 'Loading explanation...';
-    moveMetricTooltip(evt);
+    positionMetricPopover(triggerEl);
     tip.classList.remove('hidden');
+    tip.setAttribute('aria-hidden', 'false');
 
     const key = `${term}::${context}`;
     if (metricExplainCache[key]) {
@@ -141,9 +192,76 @@ async function showMetricTooltip(evt, term, context = '') {
     }
 }
 
-function hideMetricTooltip() {
-    const tip = document.getElementById('metric-tooltip');
-    if (tip) tip.classList.add('hidden');
+function bindMetricPopoverTriggers(root = document) {
+    const triggers = root.querySelectorAll('.explain-trigger');
+    for (const el of triggers) {
+        if (el.dataset.boundPopover === '1') continue;
+        el.dataset.boundPopover = '1';
+        el.setAttribute('tabindex', el.getAttribute('tabindex') || '0');
+        el.setAttribute('role', 'button');
+        el.setAttribute('aria-haspopup', 'dialog');
+        el.setAttribute('aria-controls', 'metric-tooltip');
+        const term = el.dataset.explainTerm || el.textContent?.trim() || 'Metric';
+        const context = el.dataset.explainContext || '';
+
+        el.addEventListener('mouseenter', () => showMetricTooltip(el, term, context));
+        el.addEventListener('focus', () => showMetricTooltip(el, term, context));
+        el.addEventListener('mouseleave', scheduleMetricPopoverHide);
+        el.addEventListener('blur', scheduleMetricPopoverHide);
+        el.addEventListener('click', (evt) => {
+            evt.preventDefault();
+            showMetricTooltip(el, term, context);
+        });
+        el.addEventListener('keydown', (evt) => {
+            if (evt.key === 'Enter' || evt.key === ' ') {
+                evt.preventDefault();
+                showMetricTooltip(el, term, context);
+            }
+            if (evt.key === 'Escape') {
+                hideMetricTooltip();
+            }
+        });
+    }
+
+    const { tip } = getMetricPopoverEls();
+    if (tip && tip.dataset.boundPopover !== '1') {
+        tip.dataset.boundPopover = '1';
+        tip.setAttribute('tabindex', '0');
+        tip.addEventListener('mouseenter', cancelMetricPopoverHide);
+        tip.addEventListener('mouseleave', scheduleMetricPopoverHide);
+        tip.addEventListener('focusin', cancelMetricPopoverHide);
+        tip.addEventListener('focusout', scheduleMetricPopoverHide);
+        tip.addEventListener('keydown', (evt) => {
+            if (evt.key === 'Escape') hideMetricTooltip();
+        });
+        tip.addEventListener(
+            'wheel',
+            (evt) => {
+                evt.stopPropagation();
+            },
+            { passive: true }
+        );
+        tip.addEventListener(
+            'touchstart',
+            () => {
+                cancelMetricPopoverHide();
+            },
+            { passive: true }
+        );
+    }
+
+    if (document.body.dataset.metricPopoverGlobal !== '1') {
+        document.body.dataset.metricPopoverGlobal = '1';
+        document.addEventListener('click', (evt) => {
+            const { tip } = getMetricPopoverEls();
+            if (!tip) return;
+            const inPopover = tip.contains(evt.target);
+            const inTrigger = evt.target.closest('.explain-trigger');
+            if (!inPopover && !inTrigger) {
+                hideMetricTooltip();
+            }
+        });
+    }
 }
 
 // ── Index Prices ──────────────────────────────────
@@ -183,6 +301,8 @@ async function loadDailyAnalysis() {
         }
         if (!res.ok) return;
         dailyAnalysisData = await res.json();
+        dashboardAfterHoursMode = Boolean(dailyAnalysisData?.after_hours_mode);
+        updateAfterHoursModeBanner();
 
         // Update market mood banner
         const mood = document.getElementById('market-mood');
@@ -202,6 +322,18 @@ async function loadDailyAnalysis() {
         }
     } catch (e) {
         console.error('Daily analysis failed:', e);
+    }
+}
+
+function updateAfterHoursModeBanner() {
+    const banner = document.getElementById('after-hours-summary');
+    if (!banner) return;
+    if (dashboardAfterHoursMode) {
+        banner.classList.remove('hidden');
+        banner.textContent = 'After-hours mode active: premarket widgets are locked until next market open, and Expected vs Actual uses end-of-day close.';
+    } else {
+        banner.classList.add('hidden');
+        banner.textContent = '';
     }
 }
 
@@ -536,18 +668,16 @@ async function showTopAnalysis() {
 
                 <div class="top10-metrics">
                     <div class="top10-metric">
-                        <span class="label clickable-metric"
-                              onmouseenter="showMetricTooltip(event, 'Confidence', 'Top 10 model confidence')"
-                              onmousemove="moveMetricTooltip(event)"
-                              onmouseleave="hideMetricTooltip()">Confidence</span>
+                        <span class="label clickable-metric explain-trigger"
+                              data-explain-term="Confidence"
+                              data-explain-context="Top 10 model confidence">Confidence</span>
                         <div class="metric-bar"><div class="metric-fill" style="width:${s.confidence}%"></div></div>
                         <span class="value">${s.confidence}%</span>
                     </div>
                     <div class="top10-metric">
-                        <span class="label clickable-metric"
-                              onmouseenter="showMetricTooltip(event, 'Model Agreement', 'Top 10 model agreement')"
-                              onmousemove="moveMetricTooltip(event)"
-                              onmouseleave="hideMetricTooltip()">Agreement</span>
+                        <span class="label clickable-metric explain-trigger"
+                              data-explain-term="Model Agreement"
+                              data-explain-context="Top 10 model agreement">Agreement</span>
                         <div class="metric-bar"><div class="metric-fill agreement" style="width:${s.model_agreement}%"></div></div>
                         <span class="value">${s.model_agreement}%</span>
                     </div>
@@ -555,16 +685,16 @@ async function showTopAnalysis() {
                         <span class="label">Score</span>
                         <span class="value score-badge">${s.composite_score}</span>
                     </div>
-                    ${s.risk_reward ? `<div class="top10-metric"><span class="label clickable-metric"
-                        onmouseenter="showMetricTooltip(event, 'Risk Reward Ratio', 'Top 10 trade quality')"
-                        onmousemove="moveMetricTooltip(event)"
-                        onmouseleave="hideMetricTooltip()">R:R</span><span class="value">${s.risk_reward}</span></div>` : ''}
+                    ${s.risk_reward ? `<div class="top10-metric"><span class="label clickable-metric explain-trigger"
+                        data-explain-term="Risk Reward Ratio"
+                        data-explain-context="Top 10 trade quality">R:R</span><span class="value">${s.risk_reward}</span></div>` : ''}
                 </div>
             </div>`;
         }
         html += '</div>';
 
         grid.innerHTML = html;
+        bindMetricPopoverTriggers(grid);
     } catch (e) {
         grid.innerHTML = `<div class="loading-spinner"><p>Error: ${e.message}</p></div>`;
     }
@@ -584,6 +714,8 @@ async function showTopPicks() {
     const section = document.getElementById('top-picks-section');
     section.classList.remove('hidden');
     updateTopPickFilterButtons();
+    dashboardAfterHoursMode = Boolean(dailyAnalysisData?.after_hours_mode || dashboardAfterHoursMode);
+    updateAfterHoursModeBanner();
 
     const grid = document.getElementById('picks-grid');
     grid.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>Running ML predictions across all sectors... This may take 2-5 minutes.</p></div>';
@@ -674,23 +806,22 @@ function renderTopPicks() {
                     <span class="value">${Number(pick.ai_predicted_price || 0) > 0 ? formatPrice(pick.ai_predicted_price) : '—'}</span>
                 </div>
                 <div class="pick-detail">
-                    <span class="label clickable-metric"
-                          onmouseenter="showMetricTooltip(event, 'Confidence', 'Top picks confidence metric')"
-                          onmousemove="moveMetricTooltip(event)"
-                          onmouseleave="hideMetricTooltip()">Confidence</span>
+                    <span class="label clickable-metric explain-trigger"
+                          data-explain-term="Confidence"
+                          data-explain-context="Top picks confidence metric">Confidence</span>
                     <span class="value">${Number(pick.confidence || 0).toFixed(0)}%</span>
                 </div>
                 <div class="pick-detail">
-                    <span class="label clickable-metric"
-                          onmouseenter="showMetricTooltip(event, 'Model Agreement', 'Top picks model agreement')"
-                          onmousemove="moveMetricTooltip(event)"
-                          onmouseleave="hideMetricTooltip()">Agreement</span>
+                    <span class="label clickable-metric explain-trigger"
+                          data-explain-term="Model Agreement"
+                          data-explain-context="Top picks model agreement">Agreement</span>
                     <span class="value">${Number(pick.model_agreement || 0).toFixed(0)}%</span>
                 </div>
             </div>
         </div>`;
     }
     grid.innerHTML = html;
+    bindMetricPopoverTriggers(grid);
 }
 
 async function loadPremarketOutlook() {
@@ -714,8 +845,9 @@ async function loadPremarketOutlook() {
         }
         if (header) {
             const capturedAt = data.captured_at ? new Date(data.captured_at).toLocaleString('en-IN') : '—';
-            const bufferLabel = data.captured_within_buffer === false ? ' (captured after buffer cutoff)' : '';
-            header.textContent = `Captured: ${capturedAt}${bufferLabel}`;
+            const snapshotType = data.snapshot_type ? ` • ${data.snapshot_type}` : '';
+            const bufferLabel = data.captured_within_buffer === false ? ' (captured after open-window buffer)' : '';
+            header.textContent = `Captured: ${capturedAt}${snapshotType}${bufferLabel}`;
         }
         renderPremarketOutlookTable();
         loadCurrentSecondSnapshot();
@@ -740,8 +872,9 @@ function renderPremarketOutlookTable() {
     table.innerHTML = viewRows.map(row => {
         const selected = row.ticker === highlightedPremarketTicker ? 'selected' : '';
         const aligned = row.strategy_direction === row.ai_direction;
+        const clickAction = dashboardAfterHoursMode ? '' : `onclick="selectPremarketTicker('${row.ticker}')"`;
         return `
-            <tr class="premarket-row ${selected}" onclick="selectPremarketTicker('${row.ticker}')">
+            <tr class="premarket-row ${selected} ${dashboardAfterHoursMode ? 'locked' : ''}" ${clickAction}>
                 <td><strong>${row.name || row.ticker.replace('.NS', '')}</strong><br><span class="muted-text">${row.ticker}</span></td>
                 <td>${formatPrice(row.current_price)}</td>
                 <td>${Number(row.strategy_price_at_open || 0) > 0 ? formatPrice(row.strategy_price_at_open) : '—'}</td>
@@ -754,6 +887,7 @@ function renderPremarketOutlookTable() {
 }
 
 function selectPremarketTicker(ticker) {
+    if (dashboardAfterHoursMode) return;
     highlightedPremarketTicker = ticker;
     renderPremarketOutlookTable();
     loadCurrentSecondSnapshot();
@@ -769,6 +903,25 @@ async function loadCurrentSecondSnapshot() {
     if (!ticker) {
         body.innerHTML = '<tr><td colspan="4" class="muted-text">Select a ticker from the premarket table.</td></tr>';
         if (label) label.textContent = '—';
+        return;
+    }
+
+    if (dashboardAfterHoursMode) {
+        const row = premarketOutlookData.find((r) => r.ticker === ticker) || {};
+        const strategyNow = Number(row.strategy_price_at_open || 0);
+        const aiNow = Number(row.ai_predicted_price || 0);
+        const current = Number(row.current_price || 0);
+        const strategyDir = strategyNow > current ? 'UP' : strategyNow < current ? 'DOWN' : 'FLAT';
+        const aiDir = aiNow > current ? 'UP' : aiNow < current ? 'DOWN' : 'FLAT';
+        const aligned = strategyDir === aiDir;
+        body.innerHTML = `
+            <tr>
+                <td>${formatPrice(current)}</td>
+                <td>${strategyNow > 0 ? formatPrice(strategyNow) : '—'}</td>
+                <td>${aiNow > 0 ? formatPrice(aiNow) : '—'}</td>
+                <td><span class="direction-badge ${aligned ? 'correct' : 'wrong'}">Frozen (${strategyDir}/${aiDir})</span></td>
+            </tr>
+        `;
         return;
     }
 
@@ -890,7 +1043,7 @@ async function loadExpectedVsActual() {
         let rows = '';
         for (const r of data.results) {
             const dirClass = r.direction_comparison ? 'correct' : 'wrong';
-            const dirText = r.direction_comparison ? '✓ Aligned' : '✗ Divergent';
+            const dirText = r.direction_comparison ? '✓ Strategy Correct' : '✗ Strategy Wrong';
             const predColor = r.predicted_return_pct >= 0 ? 'up-color' : 'down-color';
             const actColor = r.actual_return_pct >= 0 ? 'up-color' : 'down-color';
             const alpColor = r.alpha_pct >= 0 ? 'up-color' : 'down-color';
@@ -922,7 +1075,7 @@ async function loadExpectedVsActual() {
                     <th>AI Last</th>
                     <th>Actual Price</th>
                     <th>Actual Return</th>
-                    <th>Open vs AI</th>
+                    <th>Strategy vs Actual</th>
                     <th>Alpha</th>
                 </tr>
             </thead>

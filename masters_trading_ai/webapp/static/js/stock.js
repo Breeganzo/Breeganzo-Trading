@@ -19,6 +19,10 @@ let currentPeriod = '1d';
 let currentInterval = '1m';
 let chartRefreshTimer = null;
 let metricExplainCache = {};
+const metricPopoverState = {
+    hideTimer: null,
+    activeTrigger: null,
+};
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -109,23 +113,67 @@ function formatOpenWindowTime(value, dateStr = '', minute = 20) {
     return formatTimestamp(value || openWindowFallbackIso(dateStr, minute));
 }
 
-function moveMetricTooltip(evt) {
-    const tip = document.getElementById('metric-tooltip');
-    if (!tip || !evt) return;
-    tip.style.left = `${evt.pageX + 14}px`;
-    tip.style.top = `${evt.pageY + 14}px`;
-}
-
-async function showMetricTooltip(evt, term, context = '') {
+function getMetricPopoverEls() {
     const tip = document.getElementById('metric-tooltip');
     const titleEl = document.getElementById('metric-tooltip-title');
     const bodyEl = document.getElementById('metric-tooltip-body');
-    if (!tip || !titleEl || !bodyEl) return;
+    return { tip, titleEl, bodyEl };
+}
 
+function positionMetricPopover(triggerEl) {
+    const { tip } = getMetricPopoverEls();
+    if (!tip || !triggerEl) return;
+    const rect = triggerEl.getBoundingClientRect();
+    const left = Math.min(
+        window.scrollX + rect.left,
+        window.scrollX + window.innerWidth - tip.offsetWidth - 12
+    );
+    const top = window.scrollY + rect.bottom + 10;
+    tip.style.left = `${Math.max(window.scrollX + 8, left)}px`;
+    tip.style.top = `${top}px`;
+}
+
+function cancelMetricPopoverHide() {
+    if (metricPopoverState.hideTimer) {
+        clearTimeout(metricPopoverState.hideTimer);
+        metricPopoverState.hideTimer = null;
+    }
+}
+
+function scheduleMetricPopoverHide() {
+    cancelMetricPopoverHide();
+    metricPopoverState.hideTimer = setTimeout(() => {
+        const { tip } = getMetricPopoverEls();
+        const trigger = metricPopoverState.activeTrigger;
+        const triggerHovered = !!(trigger && trigger.matches(':hover'));
+        const tipHovered = !!(tip && tip.matches(':hover'));
+        const tipFocused = !!(
+            tip
+            && (document.activeElement === tip || tip.contains(document.activeElement))
+        );
+        if (triggerHovered || tipHovered || tipFocused) return;
+        hideMetricTooltip();
+    }, 160);
+}
+
+function hideMetricTooltip() {
+    const { tip } = getMetricPopoverEls();
+    cancelMetricPopoverHide();
+    if (!tip) return;
+    tip.classList.add('hidden');
+    tip.setAttribute('aria-hidden', 'true');
+}
+
+async function showMetricTooltip(triggerEl, term, context = '') {
+    const { tip, titleEl, bodyEl } = getMetricPopoverEls();
+    if (!tip || !titleEl || !bodyEl || !triggerEl) return;
+    metricPopoverState.activeTrigger = triggerEl;
+    cancelMetricPopoverHide();
     titleEl.textContent = term;
     bodyEl.textContent = 'Loading explanation...';
-    moveMetricTooltip(evt);
+    positionMetricPopover(triggerEl);
     tip.classList.remove('hidden');
+    tip.setAttribute('aria-hidden', 'false');
 
     const key = `${term}::${context}`;
     if (metricExplainCache[key]) {
@@ -142,11 +190,6 @@ async function showMetricTooltip(evt, term, context = '') {
     } catch (e) {
         bodyEl.textContent = `Explanation unavailable: ${e.message}`;
     }
-}
-
-function hideMetricTooltip() {
-    const tip = document.getElementById('metric-tooltip');
-    if (tip) tip.classList.add('hidden');
 }
 
 function bindPredictionMetricExplainers() {
@@ -166,10 +209,63 @@ function bindPredictionMetricExplainers() {
     for (const b of bindings) {
         const el = document.getElementById(b.id);
         if (!el) continue;
-        el.addEventListener('mouseenter', (evt) => showMetricTooltip(evt, b.term, b.context));
-        el.addEventListener('mousemove', moveMetricTooltip);
-        el.addEventListener('mouseleave', hideMetricTooltip);
-        el.addEventListener('click', (evt) => showMetricTooltip(evt, b.term, b.context));
+        el.setAttribute('tabindex', '0');
+        el.setAttribute('role', 'button');
+        el.setAttribute('aria-haspopup', 'dialog');
+        el.setAttribute('aria-controls', 'metric-tooltip');
+        el.dataset.explainTerm = b.term;
+        el.dataset.explainContext = b.context;
+        el.addEventListener('mouseenter', () => showMetricTooltip(el, b.term, b.context));
+        el.addEventListener('focus', () => showMetricTooltip(el, b.term, b.context));
+        el.addEventListener('mouseleave', scheduleMetricPopoverHide);
+        el.addEventListener('blur', scheduleMetricPopoverHide);
+        el.addEventListener('click', (evt) => {
+            evt.preventDefault();
+            showMetricTooltip(el, b.term, b.context);
+        });
+        el.addEventListener('keydown', (evt) => {
+            if (evt.key === 'Enter' || evt.key === ' ') {
+                evt.preventDefault();
+                showMetricTooltip(el, b.term, b.context);
+            }
+            if (evt.key === 'Escape') {
+                hideMetricTooltip();
+            }
+        });
+    }
+
+    const { tip } = getMetricPopoverEls();
+    if (tip && tip.dataset.boundPopover !== '1') {
+        tip.dataset.boundPopover = '1';
+        tip.setAttribute('tabindex', '0');
+        tip.addEventListener('mouseenter', cancelMetricPopoverHide);
+        tip.addEventListener('mouseleave', scheduleMetricPopoverHide);
+        tip.addEventListener('focusin', cancelMetricPopoverHide);
+        tip.addEventListener('focusout', scheduleMetricPopoverHide);
+        tip.addEventListener('keydown', (evt) => {
+            if (evt.key === 'Escape') hideMetricTooltip();
+        });
+        tip.addEventListener(
+            'wheel',
+            (evt) => {
+                evt.stopPropagation();
+            },
+            { passive: true }
+        );
+        tip.addEventListener(
+            'touchstart',
+            () => {
+                cancelMetricPopoverHide();
+            },
+            { passive: true }
+        );
+        document.addEventListener('click', (evt) => {
+            const inPopover = tip.contains(evt.target);
+            const inTrigger = evt.target.closest('.explainable-label');
+            if (!inPopover && !inTrigger) {
+                hideMetricTooltip();
+            }
+        });
     }
 }
 

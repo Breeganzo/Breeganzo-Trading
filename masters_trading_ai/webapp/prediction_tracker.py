@@ -34,7 +34,7 @@ for d in [TRACKING_DIR, DAILY_DIR, MONTHLY_DIR]:
 class PredictionTracker:
     """Track whether each predicted price threshold was hit during the day."""
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     @staticmethod
     def _to_float(value, default: float = 0.0) -> float:
@@ -58,7 +58,11 @@ class PredictionTracker:
         return "FLAT"
 
     @staticmethod
-    def record_prediction(ticker: str, prediction_data: dict):
+    def record_prediction(
+        ticker: str,
+        prediction_data: dict,
+        snapshot_type: Optional[str] = None,
+    ):
         """
         Record a new prediction for today.
 
@@ -116,12 +120,27 @@ class PredictionTracker:
             or prediction_data.get("timestamp", "")
             or datetime.now(IST).isoformat()
         )
+        snapshot_type_value = (
+            str(snapshot_type or prediction_data.get("snapshot_type") or "intraday")
+            .strip()
+            .lower()
+        )
+        if snapshot_type_value not in {
+            "market_open",
+            "near_open_fallback",
+            "premarket_preview",
+            "intraday",
+        }:
+            snapshot_type_value = "intraday"
+
         strategy_direction = PredictionTracker._direction(
             open_price, strategy_price_at_open
         )
         ai_direction = PredictionTracker._direction(current_price, ai_last_prediction)
         direction_comparison = bool(
-            prediction_data.get("direction_comparison", strategy_direction == ai_direction)
+            prediction_data.get(
+                "direction_comparison", strategy_direction == ai_direction
+            )
         )
 
         # Threshold: the predicted price level that needs to be hit
@@ -142,6 +161,7 @@ class PredictionTracker:
             "strategy_direction_at_open": strategy_direction,
             "ai_direction_last": ai_direction,
             "direction_comparison": bool(direction_comparison),
+            "snapshot_type": snapshot_type_value,
             "signal": prediction_data.get("signal", "HOLD"),
             "confidence": round(prediction_data.get("confidence", 50), 1),
             "is_bullish": is_bullish,
@@ -272,7 +292,8 @@ class PredictionTracker:
                         or pred.get("timestamp", "")
                     )
                     ai_last_prediction_at = str(
-                        pred.get("ai_last_prediction_at", "") or pred.get("timestamp", "")
+                        pred.get("ai_last_prediction_at", "")
+                        or pred.get("timestamp", "")
                     )
                     strategy_direction = pred.get(
                         "strategy_direction_at_open"
@@ -309,6 +330,9 @@ class PredictionTracker:
                     pred["direction_comparison"] = bool(direction_comparison)
                     pred["direction_correct"] = bool(direction_comparison)
                     pred["ai_direction_vs_actual"] = bool(direction_vs_actual)
+                    pred["snapshot_type"] = str(
+                        pred.get("snapshot_type", "intraday")
+                    ).lower()
                     pred["schema_version"] = PredictionTracker.SCHEMA_VERSION
                     pred["checked_at"] = datetime.now(IST).isoformat()
                     updated = True
@@ -334,6 +358,7 @@ class PredictionTracker:
                         "direction_comparison": bool(direction_comparison),
                         "direction_correct": bool(direction_comparison),
                         "ai_direction_vs_actual": bool(direction_vs_actual),
+                        "snapshot_type": pred.get("snapshot_type", "intraday"),
                         "signal": pred["signal"],
                         "confidence": pred["confidence"],
                         "is_bullish": bool(pred.get("is_bullish", False)),
@@ -543,7 +568,8 @@ class PredictionTracker:
                             "signal": pred.get("signal", "HOLD"),
                             "confidence": pred.get("confidence", 50),
                             "open_price": round(
-                                PredictionTracker._to_float(pred.get("open_price", 0)), 2
+                                PredictionTracker._to_float(pred.get("open_price", 0)),
+                                2,
                             ),
                             "strategy_price_at_open": round(strategy_price_at_open, 2),
                             "ai_last_prediction": round(ai_last_prediction, 2),
@@ -560,6 +586,7 @@ class PredictionTracker:
                             ),
                             "ai_direction_last": pred.get("ai_direction_last", "FLAT"),
                             "actual_direction": pred.get("actual_direction", "FLAT"),
+                            "snapshot_type": pred.get("snapshot_type", "intraday"),
                             "checked_at": pred.get("checked_at"),
                         }
                     )
@@ -656,7 +683,9 @@ class PredictionTracker:
                     "open_price": pred.get("open_price"),
                     "strategy_price_at_open": pred.get("strategy_price_at_open"),
                     "ai_last_prediction": pred.get("ai_last_prediction"),
-                    "strategy_predicted_at_open": pred.get("strategy_predicted_at_open"),
+                    "strategy_predicted_at_open": pred.get(
+                        "strategy_predicted_at_open"
+                    ),
                     "ai_predicted_at_open": pred.get("ai_predicted_at_open"),
                     "ai_last_prediction_at": pred.get("ai_last_prediction_at"),
                     "strategy_direction_at_open": pred.get(
@@ -664,6 +693,7 @@ class PredictionTracker:
                     ),
                     "ai_direction_last": pred.get("ai_direction_last"),
                     "direction_comparison": pred.get("direction_comparison"),
+                    "snapshot_type": pred.get("snapshot_type", "intraday"),
                     "signal": pred.get("signal", "HOLD"),
                     "confidence": pred.get("confidence", 50),
                     "outcome": pred.get("outcome"),  # None, "HIT", "MISS"

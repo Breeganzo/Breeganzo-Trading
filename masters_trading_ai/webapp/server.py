@@ -184,6 +184,20 @@ NEXT_DAY_PREDICTION_MINUTE = int(
 )
 NEXT_DAY_PREDICTION_HOUR = int(np.clip(NEXT_DAY_PREDICTION_HOUR, 0, 23))
 NEXT_DAY_PREDICTION_MINUTE = int(np.clip(NEXT_DAY_PREDICTION_MINUTE, 0, 59))
+AFTER_HOURS_UI_HOUR = int(
+    os.environ.get(
+        "AFTER_HOURS_UI_HOUR",
+        _webapp_settings.get("after_hours_ui_hour", 16),
+    )
+)
+AFTER_HOURS_UI_MINUTE = int(
+    os.environ.get(
+        "AFTER_HOURS_UI_MINUTE",
+        _webapp_settings.get("after_hours_ui_minute", 0),
+    )
+)
+AFTER_HOURS_UI_HOUR = int(np.clip(AFTER_HOURS_UI_HOUR, 0, 23))
+AFTER_HOURS_UI_MINUTE = int(np.clip(AFTER_HOURS_UI_MINUTE, 0, 59))
 
 # Thread-safe lock for file I/O
 _log_lock = threading.Lock()
@@ -305,7 +319,11 @@ def _log_prediction(ticker: str, pred: dict):
         if ai_last_prediction > current_price
         else "DOWN" if ai_last_prediction < current_price else "FLAT"
     )
-    premarket_row = _get_premarket_row_for_ticker(ticker, today_str)
+    premarket_row = _get_premarket_row_for_ticker(
+        ticker,
+        today_str,
+        allowed_snapshot_types={"market_open", "near_open_fallback"},
+    )
     strategy_predicted_at_open = _normalize_open_window_timestamp(
         premarket_row.get("strategy_predicted_at_open")
         or premarket_row.get("captured_at"),
@@ -361,7 +379,12 @@ def _log_prediction(ticker: str, pred: dict):
         tracked["strategy_direction_at_open"] = strategy_direction
         tracked["ai_direction_last"] = ai_direction
         tracked["direction_comparison"] = strategy_direction == ai_direction
-        PredictionTracker.record_prediction(ticker, tracked)
+        tracked["snapshot_type"] = premarket_row.get("snapshot_type", "intraday")
+        PredictionTracker.record_prediction(
+            ticker,
+            tracked,
+            snapshot_type=premarket_row.get("snapshot_type", "intraday"),
+        )
     except Exception as e:
         log.warning(f"Prediction tracking failed for {ticker}: {e}")
 
@@ -976,6 +999,7 @@ def api_status():
             {
                 "date": _premarket_snapshot.get("date"),
                 "captured_at": _premarket_snapshot.get("captured_at"),
+                "snapshot_type": _premarket_snapshot.get("snapshot_type"),
                 "captured_within_buffer": _premarket_snapshot.get(
                     "captured_within_buffer"
                 ),
@@ -1002,6 +1026,8 @@ def api_status():
             "premarket_config": {
                 "max_buffer_minutes": PREMARKET_MAX_BUFFER_MINUTES,
                 "default_tickers": PREMARKET_DEFAULT_TICKERS,
+                "after_hours_ui_hour": AFTER_HOURS_UI_HOUR,
+                "after_hours_ui_minute": AFTER_HOURS_UI_MINUTE,
             },
             "premarket_snapshot": premarket_meta,
         }
@@ -1120,11 +1146,15 @@ def api_premarket_outlook():
             {
                 "date": snapshot.get("date"),
                 "captured_at": snapshot.get("captured_at"),
+                "snapshot_type": snapshot.get("snapshot_type"),
+                "schema_version": snapshot.get("schema_version", 2),
                 "capture_cutoff": snapshot.get("capture_cutoff"),
                 "captured_within_buffer": snapshot.get("captured_within_buffer", True),
                 "buffer_minutes": snapshot.get(
                     "buffer_minutes", PREMARKET_MAX_BUFFER_MINUTES
                 ),
+                "market_open_time": snapshot.get("market_open_time"),
+                "open_window_end": snapshot.get("open_window_end"),
                 "items": items,
             }
         )
@@ -1222,7 +1252,9 @@ def api_expected_vs_actual():
     # Fetch actual prices
     tickers_to_check = list(predictions.keys())
     today_str = datetime.now(IST).strftime("%Y-%m-%d")
-    if date_str == today_str:
+    market_status = get_market_status().get("status", "")
+    after_hours_mode = _is_after_hours_ui_mode(datetime.now(IST), market_status)
+    if date_str == today_str and not after_hours_mode:
         actuals = _get_live_prices_batch(tickers_to_check)
         actual_prices = {k: v.get("price", 0) for k, v in actuals.items()}
     else:
@@ -1235,8 +1267,6 @@ def api_expected_vs_actual():
         bd = benchmark_data["^NSEI"]
         if bd["prev_close"] > 0:
             benchmark_return = (bd["price"] - bd["prev_close"]) / bd["prev_close"]
-    market_status = get_market_status().get("status", "")
-
     results = []
     for ticker, pred in predictions.items():
         if ticker not in actual_prices:
@@ -1246,6 +1276,11 @@ def api_expected_vs_actual():
             tracker_by_ticker.get(ticker, {})
             if isinstance(tracker_by_ticker, dict)
             else {}
+        )
+        market_open_row = _get_premarket_row_for_ticker(
+            ticker,
+            date_str,
+            allowed_snapshot_types={"market_open", "near_open_fallback"},
         )
 
         pred_price_at_prediction = float(pred.get("current_price", 0) or 0)
@@ -1270,7 +1305,9 @@ def api_expected_vs_actual():
         if actual_price > 0 and pred_price_at_prediction > actual_price * 5:
             pred_price_at_prediction = actual_price
 
-        actual_return = (actual_price - pred_price_at_prediction) / pred_price_at_prediction
+        actual_return = (
+            actual_price - pred_price_at_prediction
+        ) / pred_price_at_prediction
         actual_return_pct = actual_return * 100
 
         # Direction check uses market-open baseline vs strategy-open prediction.
@@ -1280,20 +1317,30 @@ def api_expected_vs_actual():
         strategy_price_at_open = float(
             tracker_row.get(
                 "strategy_price_at_open",
-                pred.get("strategy_price_at_open", pred.get("predicted_price", 0)),
+                market_open_row.get(
+                    "strategy_price_at_open",
+                    pred.get("strategy_price_at_open", pred.get("predicted_price", 0)),
+                ),
             )
             or 0
         )
         ai_last_prediction = float(
             tracker_row.get(
                 "ai_last_prediction",
-                pred.get("ai_last_prediction", pred.get("predicted_price", 0)),
+                market_open_row.get(
+                    "ai_predicted_price",
+                    pred.get("ai_last_prediction", pred.get("predicted_price", 0)),
+                ),
             )
             or 0
         )
         open_price = float(
             tracker_row.get(
-                "open_price", pred.get("open_price", pred_price_at_prediction)
+                "open_price",
+                market_open_row.get(
+                    "open_price",
+                    pred.get("open_price", pred_price_at_prediction),
+                ),
             )
             or pred_price_at_prediction
         )
@@ -1323,6 +1370,8 @@ def api_expected_vs_actual():
             )
         strategy_predicted_at_open = _normalize_open_window_timestamp(
             tracker_row.get("strategy_predicted_at_open")
+            or market_open_row.get("strategy_predicted_at_open")
+            or market_open_row.get("captured_at")
             or pred.get("strategy_predicted_at_open")
             or pred.get("timestamp"),
             date_hint=date_str,
@@ -1330,6 +1379,8 @@ def api_expected_vs_actual():
         )
         ai_predicted_at_open = _normalize_open_window_timestamp(
             tracker_row.get("ai_predicted_at_open")
+            or market_open_row.get("ai_predicted_at_open")
+            or market_open_row.get("captured_at")
             or pred.get("ai_predicted_at_open")
             or pred.get("timestamp"),
             date_hint=date_str,
@@ -1348,9 +1399,8 @@ def api_expected_vs_actual():
         )
         actual_dir = _direction_from_prices(open_price, actual_price)
         strategy_vs_actual = strategy_direction == actual_dir
-        direction_comparison = bool(
-            tracker_row.get("direction_comparison", strategy_vs_actual)
-        )
+        direction_comparison = bool(strategy_vs_actual)
+        open_vs_ai_direction_match = strategy_direction == ai_direction
         predicted_price = float(pred.get("predicted_price", 0) or 0)
         if predicted_price <= 0 or predicted_price > pred_price_at_prediction * 5:
             predicted_price = round(
@@ -1360,10 +1410,14 @@ def api_expected_vs_actual():
             actual_price - strategy_price_at_open if strategy_price_at_open > 0 else 0.0
         )
         strategy_vs_actual_pct = (
-            (strategy_vs_actual_price_diff / open_price * 100) if open_price > 0 else 0.0
+            (strategy_vs_actual_price_diff / open_price * 100)
+            if open_price > 0
+            else 0.0
         )
-        market_open_price = round(open_price, 2) if open_price > 0 else round(
-            pred_price_at_prediction, 2
+        market_open_price = (
+            round(open_price, 2)
+            if open_price > 0
+            else round(pred_price_at_prediction, 2)
         )
         strategy_price_display = (
             round(strategy_price_at_open, 2)
@@ -1394,12 +1448,15 @@ def api_expected_vs_actual():
                 "actual_return_pct": round(actual_return_pct, 3),
                 "market_open_price": market_open_price,
                 "open_price": market_open_price,
-                "strategy_vs_actual_price_diff": round(strategy_vs_actual_price_diff, 2),
+                "strategy_vs_actual_price_diff": round(
+                    strategy_vs_actual_price_diff, 2
+                ),
                 "strategy_vs_actual_pct": round(strategy_vs_actual_pct, 3),
                 "direction_predicted": pred_dir,
                 "direction_actual": actual_dir,
                 "strategy_direction_at_open": strategy_direction,
                 "ai_direction_last": ai_direction,
+                "open_vs_ai_direction_match": open_vs_ai_direction_match,
                 "direction_comparison": direction_comparison,
                 "direction_correct": direction_comparison,
                 "last_prediction_basis": "strategy_vs_actual",
@@ -1423,6 +1480,8 @@ def api_expected_vs_actual():
                 "confidence": pred.get("confidence", 50),
                 "checked_at": tracker_row.get("checked_at"),
                 "market_status": market_status,
+                "after_hours_mode": after_hours_mode,
+                "snapshot_type": market_open_row.get("snapshot_type", "market_open"),
             }
         )
 
@@ -1449,6 +1508,7 @@ def api_expected_vs_actual():
             "avg_confidence": round(avg_confidence, 1),
             "schema_version": PredictionTracker.SCHEMA_VERSION,
             "market_status": market_status,
+            "after_hours_mode": after_hours_mode,
             "results": sorted(results, key=lambda x: abs(x["alpha_pct"]), reverse=True),
         }
     )
@@ -1733,6 +1793,19 @@ def _is_next_day_prediction_window(now: datetime) -> bool:
     return now >= _next_day_prediction_switch_dt(now)
 
 
+def _after_hours_ui_dt(now: datetime) -> datetime:
+    return now.replace(
+        hour=AFTER_HOURS_UI_HOUR,
+        minute=AFTER_HOURS_UI_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+
+
+def _is_after_hours_ui_mode(now: datetime, market_status: str = "") -> bool:
+    return market_status in ("after_hours", "weekend") or now >= _after_hours_ui_dt(now)
+
+
 def _next_trading_day(d: date) -> date:
     out = d + timedelta(days=1)
     while out.weekday() >= 5:
@@ -1801,7 +1874,11 @@ def _normalize_open_window_timestamp(
     return parsed.isoformat()
 
 
-def _get_premarket_row_for_ticker(ticker: str, date_str: str | None = None) -> dict:
+def _get_premarket_row_for_ticker(
+    ticker: str,
+    date_str: str | None = None,
+    allowed_snapshot_types: set[str] | None = None,
+) -> dict:
     """
     Best-effort read of cached premarket row for a ticker (no live fetch).
     """
@@ -1826,9 +1903,20 @@ def _get_premarket_row_for_ticker(ticker: str, date_str: str | None = None) -> d
 
     snapshot = _normalize_premarket_snapshot(snapshot)
 
+    allowed = (
+        {str(v).strip().lower() for v in allowed_snapshot_types}
+        if allowed_snapshot_types
+        else None
+    )
     for row in snapshot.get("items", []):
-        if row.get("ticker") == ticker:
-            return row
+        if row.get("ticker") != ticker:
+            continue
+        row_type = str(
+            row.get("snapshot_type") or snapshot.get("snapshot_type") or ""
+        ).lower()
+        if allowed is not None and row_type not in allowed:
+            continue
+        return row
     return {}
 
 
@@ -1855,39 +1943,59 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
     out = dict(snapshot)
     snap_captured = out.get("captured_at")
     snap_date = out.get("date")
+    snapshot_type = str(out.get("snapshot_type") or "market_open").strip().lower()
+    out["snapshot_type"] = snapshot_type
+    out["schema_version"] = int(out.get("schema_version") or 2)
     rows = []
     for raw in out.get("items", []):
         if not isinstance(raw, dict):
             continue
         row = dict(raw)
+        row_type = str(row.get("snapshot_type") or snapshot_type).strip().lower()
+        row["snapshot_type"] = row_type
         row_captured = row.get("captured_at") or snap_captured
         row["captured_at"] = row_captured
-        row["strategy_predicted_at_open"] = (
-            _normalize_open_window_timestamp(
+        if row_type in {"market_open", "near_open_fallback"}:
+            row["strategy_predicted_at_open"] = _normalize_open_window_timestamp(
                 row.get("strategy_predicted_at_open") or row_captured,
                 date_hint=snap_date,
                 default_offset_minutes=5,
             )
-        )
-        row["ai_predicted_at_open"] = _normalize_open_window_timestamp(
-            row.get("ai_predicted_at_open") or row_captured,
-            date_hint=snap_date,
-            default_offset_minutes=7,
-        )
+            row["ai_predicted_at_open"] = _normalize_open_window_timestamp(
+                row.get("ai_predicted_at_open") or row_captured,
+                date_hint=snap_date,
+                default_offset_minutes=7,
+            )
+        else:
+            row["strategy_predicted_at_open"] = (
+                row.get("strategy_predicted_at_open") or row_captured
+            )
+            row["ai_predicted_at_open"] = (
+                row.get("ai_predicted_at_open") or row_captured
+            )
         rows.append(row)
     out["items"] = rows
     return out
 
 
-def _build_premarket_snapshot(tickers: list[str] | None = None) -> dict:
+def _build_premarket_snapshot(
+    tickers: list[str] | None = None,
+    *,
+    snapshot_type: str = "market_open",
+    captured_at: str | None = None,
+) -> dict:
     """
     Build a premarket snapshot payload with strategy-open and AI-now predictions.
     Internal prices are numeric INR, returns are %.
     """
+    snapshot_type = str(snapshot_type or "market_open").strip().lower()
+    captured_iso = captured_at or datetime.now(IST).isoformat()
     if predictor is None:
         return {
             "date": datetime.now(IST).strftime("%Y-%m-%d"),
-            "captured_at": datetime.now(IST).isoformat(),
+            "captured_at": captured_iso,
+            "snapshot_type": snapshot_type,
+            "schema_version": 2,
             "items": [],
         }
 
@@ -1896,7 +2004,7 @@ def _build_premarket_snapshot(tickers: list[str] | None = None) -> dict:
         tickers or tickers_by_sector.get("large_cap", [])[:PREMARKET_DEFAULT_TICKERS]
     )
     prices = _get_live_prices_batch(scan_tickers)
-    captured_at = datetime.now(IST).isoformat()
+    captured_at = captured_iso
     rows: list[dict] = []
 
     for ticker in scan_tickers:
@@ -1945,6 +2053,7 @@ def _build_premarket_snapshot(tickers: list[str] | None = None) -> dict:
             "captured_at": captured_at,
             "strategy_predicted_at_open": captured_at,
             "ai_predicted_at_open": captured_at,
+            "snapshot_type": snapshot_type,
         }
         rows.append(row)
 
@@ -1967,55 +2076,106 @@ def _build_premarket_snapshot(tickers: list[str] | None = None) -> dict:
                     "direction_comparison": strategy_direction == ai_direction,
                 }
             )
-            PredictionTracker.record_prediction(ticker, tracked)
+            PredictionTracker.record_prediction(
+                ticker,
+                tracked,
+                snapshot_type=snapshot_type,
+            )
         except Exception as e:
             log.warning("Premarket tracking record failed for %s: %s", ticker, e)
 
     return _normalize_premarket_snapshot(
-        {"date": today, "captured_at": captured_at, "items": rows}
+        {
+            "date": today,
+            "captured_at": captured_at,
+            "snapshot_type": snapshot_type,
+            "schema_version": 2,
+            "items": rows,
+        }
     )
 
 
 def _capture_premarket_snapshot_if_due(force: bool = False) -> dict:
     """
-    Capture premarket snapshot once per day, preferably before open-buffer cutoff.
+    Capture today's strategy snapshot around market open.
+
+    Priority:
+      1) market_open snapshot inside 09:15–09:30 IST
+      2) near_open_fallback shortly after open if the app starts late
+      3) premarket_preview only when explicitly forced before open
     """
     global _premarket_snapshot
     now = datetime.now(IST)
     today = now.strftime("%Y-%m-%d")
-    cutoff = _premarket_cutoff_dt(now)
+    open_start, open_end = _open_window_bounds(now.date())
+    fallback_deadline = open_end + timedelta(minutes=PREMARKET_MAX_BUFFER_MINUTES)
 
     with _premarket_snapshot_lock:
         if (
-            not force
-            and _premarket_snapshot
+            _premarket_snapshot
             and _premarket_snapshot.get("date") == today
             and _premarket_snapshot.get("items")
         ):
-            return _normalize_premarket_snapshot(dict(_premarket_snapshot))
+            cached = _normalize_premarket_snapshot(dict(_premarket_snapshot))
+            cached_type = str(cached.get("snapshot_type") or "").lower()
+            has_open_snapshot = cached_type in {"market_open", "near_open_fallback"}
+            if not force and (has_open_snapshot or now < open_start):
+                return cached
 
         disk_snapshot = _load_premarket_snapshot_from_disk()
         if (
-            not force
-            and disk_snapshot
+            disk_snapshot
             and disk_snapshot.get("date") == today
             and disk_snapshot.get("items")
         ):
-            _premarket_snapshot = _normalize_premarket_snapshot(dict(disk_snapshot))
-            return dict(_premarket_snapshot)
+            normalized = _normalize_premarket_snapshot(dict(disk_snapshot))
+            disk_type = str(normalized.get("snapshot_type") or "").lower()
+            has_open_snapshot = disk_type in {"market_open", "near_open_fallback"}
+            if not force and (has_open_snapshot or now < open_start):
+                _premarket_snapshot = normalized
+                return dict(_premarket_snapshot)
+
+    if now < open_start and not force:
+        return _normalize_premarket_snapshot(
+            {
+                "date": today,
+                "captured_at": None,
+                "snapshot_type": "pending_market_open",
+                "schema_version": 2,
+                "capture_cutoff": open_start.isoformat(),
+                "buffer_minutes": PREMARKET_MAX_BUFFER_MINUTES,
+                "captured_within_buffer": None,
+                "items": [],
+            }
+        )
+
+    if now < open_start and force:
+        snapshot_type = "premarket_preview"
+    elif now <= open_end:
+        snapshot_type = "market_open"
+    elif now <= fallback_deadline:
+        snapshot_type = "near_open_fallback"
+    else:
+        snapshot_type = "near_open_fallback"
+        log.warning(
+            "Market-open snapshot captured late. now=%s open_end=%s fallback_deadline=%s",
+            now.isoformat(),
+            open_end.isoformat(),
+            fallback_deadline.isoformat(),
+        )
 
     # Build outside lock (may call network/model inference).
-    snapshot = _normalize_premarket_snapshot(_build_premarket_snapshot())
-    snapshot["capture_cutoff"] = cutoff.isoformat()
-    snapshot["buffer_minutes"] = PREMARKET_MAX_BUFFER_MINUTES
-    snapshot["captured_within_buffer"] = now <= cutoff
-    if not snapshot["captured_within_buffer"]:
-        log.warning(
-            "Premarket snapshot captured after cutoff. now=%s cutoff=%s buffer=%sm",
-            now.isoformat(),
-            cutoff.isoformat(),
-            PREMARKET_MAX_BUFFER_MINUTES,
+    snapshot = _normalize_premarket_snapshot(
+        _build_premarket_snapshot(
+            snapshot_type=snapshot_type,
+            captured_at=now.isoformat(),
         )
+    )
+    snapshot["capture_cutoff"] = open_start.isoformat()
+    snapshot["buffer_minutes"] = PREMARKET_MAX_BUFFER_MINUTES
+    snapshot["captured_within_buffer"] = now <= fallback_deadline
+    snapshot["open_window_end"] = open_end.isoformat()
+    snapshot["market_open_time"] = open_start.isoformat()
 
     with _premarket_snapshot_lock:
         _premarket_snapshot = snapshot
@@ -2110,7 +2270,8 @@ def _build_daily_analysis() -> dict:
     now_ist = datetime.now(IST)
     market = get_market_status()
     market_status = market.get("status", "")
-    next_day_mode = _is_next_day_prediction_window(now_ist) or market_status == "weekend"
+    after_hours_mode = _is_after_hours_ui_mode(now_ist, market_status)
+    next_day_mode = _is_next_day_prediction_window(now_ist) or after_hours_mode
     prediction_mode = "next_day_after_close" if next_day_mode else "market_open_window"
     predicted_for_date = (
         _next_trading_day(now_ist.date()).strftime("%Y-%m-%d")
@@ -2118,7 +2279,7 @@ def _build_daily_analysis() -> dict:
         else now_ist.strftime("%Y-%m-%d")
     )
     prediction_generated_at = now_ist.isoformat()
-    price_label = "Close Price" if market_status in ("after_hours", "weekend") else "Current Price"
+    price_label = "Close Price" if after_hours_mode else "Current Price"
 
     # Get all predictions (from cache)
     today_str = now_ist.strftime("%Y-%m-%d")
@@ -2159,7 +2320,11 @@ def _build_daily_analysis() -> dict:
         )
         signal = pred.get("signal", "HOLD")
         confidence = float(pred.get("confidence", 50) or 50)
-        premarket_row = _get_premarket_row_for_ticker(ticker, today_str)
+        premarket_row = _get_premarket_row_for_ticker(
+            ticker,
+            today_str,
+            allowed_snapshot_types={"market_open", "near_open_fallback"},
+        )
         strategy_price_at_open = float(
             premarket_row.get(
                 "strategy_price_at_open",
@@ -2168,7 +2333,9 @@ def _build_daily_analysis() -> dict:
             or 0
         )
         if strategy_price_at_open <= 0 and open_price > 0:
-            strategy_price_at_open = round(open_price * (1 + predicted_return / 100.0), 2)
+            strategy_price_at_open = round(
+                open_price * (1 + predicted_return / 100.0), 2
+            )
         if strategy_price_at_open <= 0:
             strategy_price_at_open = float(current_price or 0)
 
@@ -2301,6 +2468,8 @@ def _build_daily_analysis() -> dict:
                 "prediction_mode": prediction_mode,
                 "prediction_context": prediction_context,
                 "predicted_for_date": predicted_for_date,
+                "after_hours_mode": after_hours_mode,
+                "snapshot_type": premarket_row.get("snapshot_type", "market_open"),
                 "strategy_predicted_at": strategy_predicted_at,
                 "ai_predicted_at": ai_predicted_at,
                 "strategy_predicted_at_open": strategy_predicted_at_open,
@@ -2330,6 +2499,7 @@ def _build_daily_analysis() -> dict:
     return {
         "date": today_str,
         "market_status": market_status,
+        "after_hours_mode": after_hours_mode,
         "prediction_mode": prediction_mode,
         "predicted_for_date": predicted_for_date,
         "prediction_generated_at": prediction_generated_at,
@@ -2442,7 +2612,11 @@ def api_price_tracker(ticker: str):
         if open_price > 0
         else pred.get("predicted_price", 0)
     )
-    premarket_row = _get_premarket_row_for_ticker(ticker, today_str)
+    premarket_row = _get_premarket_row_for_ticker(
+        ticker,
+        today_str,
+        allowed_snapshot_types={"market_open", "near_open_fallback"},
+    )
     strategy_price_at_open = float(
         premarket_row.get(
             "strategy_price_at_open",
@@ -2470,14 +2644,15 @@ def api_price_tracker(ticker: str):
     market = get_market_status()
     market_status = market.get("status", "")
     now_ist = datetime.now(IST)
-    next_day_mode = _is_next_day_prediction_window(now_ist) or market_status == "weekend"
+    after_hours_mode = _is_after_hours_ui_mode(now_ist, market_status)
+    next_day_mode = _is_next_day_prediction_window(now_ist) or after_hours_mode
     prediction_mode = "next_day_after_close" if next_day_mode else "market_open_window"
     predicted_for_date = (
         _next_trading_day(now_ist.date()).strftime("%Y-%m-%d")
         if next_day_mode
         else now_ist.strftime("%Y-%m-%d")
     )
-    is_market_closed = market_status in ("after_hours", "weekend")
+    is_market_closed = after_hours_mode
     display_price_label = "Close Price" if is_market_closed else "Current Price"
     strategy_predicted_at_open = _normalize_open_window_timestamp(
         premarket_row.get("strategy_predicted_at_open")
@@ -2572,7 +2747,9 @@ def api_price_tracker(ticker: str):
             ),
             "predicted_price": round(strategy_price_at_open, 2),
             "strategy_predicted_price": round(strategy_price_at_open, 2),
-            "ai_predicted_price": round(ai_open_price, 2) if ai_open_price > 0 else None,
+            "ai_predicted_price": (
+                round(ai_open_price, 2) if ai_open_price > 0 else None
+            ),
             "current_strategy_predicted_price": round(next_day_strategy_price, 2),
             "current_ai_predicted_price": (
                 round(next_day_ai_price, 2) if next_day_ai_price > 0 else None
@@ -2582,24 +2759,30 @@ def api_price_tracker(ticker: str):
             "display_price_label": display_price_label,
             "market_status": market_status,
             "prediction_mode": prediction_mode,
+            "after_hours_mode": after_hours_mode,
+            "snapshot_type": premarket_row.get("snapshot_type", "market_open"),
             "predicted_for_date": predicted_for_date,
-            "prediction_reference_price": round(reference_price, 2) if reference_price > 0 else None,
+            "prediction_reference_price": (
+                round(reference_price, 2) if reference_price > 0 else None
+            ),
             "next_day_strategy_predicted_price": (
-                round(next_day_strategy_price, 2) if next_day_strategy_price > 0 else None
+                round(next_day_strategy_price, 2)
+                if next_day_strategy_price > 0
+                else None
             ),
             "next_day_ai_predicted_price": (
                 round(next_day_ai_price, 2) if next_day_ai_price > 0 else None
             ),
             "next_day_predicted_at": next_day_predicted_at,
-            "next_day_predicted_at_display": _format_ist_timestamp(next_day_predicted_at),
+            "next_day_predicted_at_display": _format_ist_timestamp(
+                next_day_predicted_at
+            ),
             "strategy_predicted_at_open": strategy_predicted_at_open,
             "strategy_predicted_at_open_display": _format_ist_timestamp(
                 strategy_predicted_at_open
             ),
             "ai_predicted_at_open": ai_predicted_at_open,
-            "ai_predicted_at_open_display": _format_ist_timestamp(
-                ai_predicted_at_open
-            ),
+            "ai_predicted_at_open_display": _format_ist_timestamp(ai_predicted_at_open),
             "current_strategy_predicted_at": current_strategy_predicted_at,
             "current_strategy_predicted_at_display": _format_ist_timestamp(
                 current_strategy_predicted_at
@@ -2629,7 +2812,9 @@ def api_price_tracker(ticker: str):
             "predicted_return": round(predicted_return, 3),
             "signal": signal,
             "confidence": round(confidence, 1),
-            "ai_forecast_available": ai_available or ai_open_price > 0 or next_day_ai_price > 0,
+            "ai_forecast_available": ai_available
+            or ai_open_price > 0
+            or next_day_ai_price > 0,
             "ai_forecast_source": cached_forecast.get("ai_source", "none"),
             "volume": curr.get("volume", 0),
             "high": curr.get("high", 0),
@@ -3649,6 +3834,19 @@ def api_risk_analytics():
         else:
             port_returns = returns[portfolio_cols].mean(axis=1)
         port_equity = (1 + port_returns).cumprod() * 100000
+        if len(port_equity) < 30:
+            return (
+                jsonify(
+                    {
+                        "error": (
+                            "Insufficient portfolio equity history for Monte Carlo "
+                            "(need >= 30 daily points)."
+                        ),
+                        "portfolio_tickers": surviving_tickers,
+                    }
+                ),
+                400,
+            )
 
         benchmark_returns = returns["^NSEI"] if "^NSEI" in returns.columns else None
 
@@ -3692,7 +3890,9 @@ def api_risk_analytics():
         mc_result = monte_carlo_backtest(
             port_returns,
             n_simulations=500,
-            initial_capital=100000,
+            initial_capital=float(port_equity.iloc[0]),
+            equity_curve=port_equity,
+            min_history=30,
         )
 
         # --- Equity Curve (for chart) ---
