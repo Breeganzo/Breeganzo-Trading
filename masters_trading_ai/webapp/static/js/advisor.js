@@ -98,8 +98,11 @@ async function simulateAdvisorBuy(ticker) {
                 price: Number(row.strategy_price_at_open || row.current_price || 0),
                 strategy_entry_price: Number(row.strategy_price_at_open || 0),
                 stop_loss_price: Number(row.stop_loss_price || 0),
-                target_price: Number(row.current_price || row.strategy_price_at_open || 0),
+                target_price: Number(row.target_price || row.current_price || row.strategy_price_at_open || 0),
                 risk_reward: Number(row.risk_reward || 1.2),
+                confidence: Number(row.confidence || 0),
+                atr_pct: Number(row.volatility_atr_pct || 0),
+                uses_sentiment: Number(row.sentiment_weighted_score || 0) !== 0,
                 trade_type: 'equity_delivery',
             }),
         });
@@ -114,16 +117,18 @@ async function simulateAdvisorBuy(ticker) {
 
 async function runAdvisorAutoCheck() {
     const status = document.getElementById('advisor-status');
-    if (status) status.textContent = 'Running auto-check for stop-loss/target triggers...';
+    if (status) status.textContent = 'Running auto-check (trailing stop, auto-sell, auto-buy entry)...';
     try {
         const res = await fetch('/api/simulate/trade', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'AUTO_CHECK' }),
+            body: JSON.stringify({ action: 'AUTO_CHECK', auto_buy: true }),
         });
         const data = await res.json();
         if (!res.ok || data.error) throw new Error(data.error || 'Auto-check failed');
-        if (status) status.textContent = `Auto-check completed. Triggered ${Number(data.triggered_count || 0)} auto-sell event(s).`;
+        const sells = Number((data.events || []).length || 0);
+        const buys = Number((data.auto_buy_events || []).length || 0);
+        if (status) status.textContent = `Auto-check completed. Auto-sell: ${sells}, auto-buy: ${buys}.`;
         await refreshAdvisorSummary();
     } catch (e) {
         if (status) status.textContent = `Auto-check error: ${e.message}`;

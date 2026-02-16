@@ -149,6 +149,26 @@ PREDICTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
 SIMULATION_DEFAULT_CASH = float(os.environ.get("SIMULATION_DEFAULT_CASH", "40000"))
 SIMULATION_DEFAULT_CASH = max(1000.0, SIMULATION_DEFAULT_CASH)
 
+# Trading-desk risk management defaults (simulation only).
+RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE", "0.01"))
+MAX_DAILY_LOSS = float(os.environ.get("MAX_DAILY_LOSS", "0.05"))
+MAX_POSITION_SIZE = float(os.environ.get("MAX_POSITION_SIZE", "0.40"))
+ATR_PERIOD = int(os.environ.get("ATR_PERIOD", "14"))
+STOP_LOSS_HIGH_CONF = float(os.environ.get("STOP_LOSS_HIGH_CONF", "0.02"))
+STOP_LOSS_MED_CONF = float(os.environ.get("STOP_LOSS_MED_CONF", "0.025"))
+STOP_LOSS_LOW_CONF = float(os.environ.get("STOP_LOSS_LOW_CONF", "0.03"))
+STOP_LOSS_HIGH_CONF_SENT = float(os.environ.get("STOP_LOSS_HIGH_CONF_SENT", "0.025"))
+STOP_LOSS_MED_CONF_SENT = float(os.environ.get("STOP_LOSS_MED_CONF_SENT", "0.03"))
+STOP_LOSS_LOW_CONF_SENT = float(os.environ.get("STOP_LOSS_LOW_CONF_SENT", "0.035"))
+ATR_MULT_HIGH_CONF = float(os.environ.get("ATR_MULT_HIGH_CONF", "1.5"))
+ATR_MULT_MED_CONF = float(os.environ.get("ATR_MULT_MED_CONF", "2.0"))
+ATR_MULT_LOW_CONF = float(os.environ.get("ATR_MULT_LOW_CONF", "2.5"))
+INDIAN_MARKET_BUFFER = float(os.environ.get("INDIAN_MARKET_BUFFER", "0.005"))
+HIGH_CONFIDENCE_THRESHOLD = float(os.environ.get("HIGH_CONFIDENCE_THRESHOLD", "0.80"))
+MEDIUM_CONFIDENCE_THRESHOLD = float(os.environ.get("MEDIUM_CONFIDENCE_THRESHOLD", "0.60"))
+AI_STRATEGY_GAP_WARN = float(os.environ.get("AI_STRATEGY_GAP_WARN", "0.10"))
+AI_STRATEGY_GAP_BLOCK = float(os.environ.get("AI_STRATEGY_GAP_BLOCK", "0.50"))
+
 
 def _load_settings() -> dict:
     """Load config/settings.yaml if available."""
@@ -702,6 +722,11 @@ def _validate_trade_sequence(trades: list[dict]) -> tuple[bool, str]:
 
 def _simulation_state_template(cash: float = SIMULATION_DEFAULT_CASH) -> dict:
     start_cash = max(1000.0, float(cash or SIMULATION_DEFAULT_CASH))
+    now_iso = datetime.now(IST).isoformat()
+    tracker = _daily_tracker_for_state(
+        {"initial_cash": start_cash},
+        now_ts=now_iso,
+    )
     return {
         "schema_version": 1,
         "initial_cash": round(start_cash, 2),
@@ -709,7 +734,8 @@ def _simulation_state_template(cash: float = SIMULATION_DEFAULT_CASH) -> dict:
         "open_positions": {},
         "closed_trades": [],
         "trade_history": [],
-        "updated_at": datetime.now(IST).isoformat(),
+        "daily_loss_tracker": tracker,
+        "updated_at": now_iso,
     }
 
 
@@ -729,6 +755,7 @@ def _read_portfolio_sim_state() -> dict:
                 state.setdefault("open_positions", {})
                 state.setdefault("closed_trades", [])
                 state.setdefault("trade_history", [])
+                state["daily_loss_tracker"] = _daily_tracker_for_state(state)
                 return state
         except Exception:
             pass
@@ -738,6 +765,7 @@ def _read_portfolio_sim_state() -> dict:
 def _write_portfolio_sim_state(state: dict) -> None:
     with _portfolio_sim_lock:
         payload = dict(state or {})
+        payload["daily_loss_tracker"] = _daily_tracker_for_state(payload)
         payload["updated_at"] = datetime.now(IST).isoformat()
         PORTFOLIO_SIM_FILE.parent.mkdir(parents=True, exist_ok=True)
         PORTFOLIO_SIM_FILE.write_text(json.dumps(payload, indent=2, default=str))
@@ -793,6 +821,92 @@ def _estimate_exit_fee(sell_value: float, trade_type: str = "equity_delivery") -
         return round(value * 0.0008, 2)
 
 
+def _round_to_tick(price: float, tick: float = 0.05) -> float:
+    p = float(price or 0)
+    if p <= 0:
+        return 0.0
+    return round(round(p / tick) * tick, 2)
+
+
+def _compute_dynamic_stop_loss_pct(
+    *,
+    confidence_pct: float,
+    atr_pct: float,
+    uses_sentiment: bool,
+) -> tuple[float, bool]:
+    """
+    Returns (stop_loss_pct, skip_trade) where stop_loss_pct is decimal (e.g., 0.03).
+    """
+    conf = float(np.clip((confidence_pct or 0) / 100.0, 0.0, 1.0))
+    atr_dec = max(0.0, float(atr_pct or 0) / 100.0)
+
+    if uses_sentiment:
+        if conf >= HIGH_CONFIDENCE_THRESHOLD:
+            base = STOP_LOSS_HIGH_CONF_SENT
+            atr_mult = ATR_MULT_HIGH_CONF
+        elif conf >= MEDIUM_CONFIDENCE_THRESHOLD:
+            base = STOP_LOSS_MED_CONF_SENT
+            atr_mult = ATR_MULT_MED_CONF
+        else:
+            base = STOP_LOSS_LOW_CONF_SENT
+            atr_mult = ATR_MULT_LOW_CONF
+    else:
+        if conf >= HIGH_CONFIDENCE_THRESHOLD:
+            base = STOP_LOSS_HIGH_CONF
+            atr_mult = ATR_MULT_HIGH_CONF
+        elif conf >= MEDIUM_CONFIDENCE_THRESHOLD:
+            base = STOP_LOSS_MED_CONF
+            atr_mult = ATR_MULT_MED_CONF
+        else:
+            base = STOP_LOSS_LOW_CONF
+            atr_mult = ATR_MULT_LOW_CONF
+
+    sl = max(base, atr_mult * atr_dec) + INDIAN_MARKET_BUFFER
+    sl = float(np.clip(sl, 0.005, 0.25))
+    skip_trade = conf < 0.45
+    return sl, skip_trade
+
+
+def _position_size_for_risk(
+    *,
+    account_balance: float,
+    entry_price: float,
+    stop_loss_pct: float,
+) -> int:
+    bal = max(0.0, float(account_balance or 0))
+    ep = max(0.0, float(entry_price or 0))
+    sl = max(0.0001, float(stop_loss_pct or 0))
+    if bal <= 0 or ep <= 0:
+        return 0
+
+    risk_amount = bal * max(0.0, min(0.2, RISK_PER_TRADE))
+    qty_by_risk = int(risk_amount // (ep * sl))
+    max_notional = bal * max(0.05, min(1.0, MAX_POSITION_SIZE))
+    qty_by_position = int(max_notional // ep)
+    return max(0, min(qty_by_risk, qty_by_position))
+
+
+def _daily_tracker_for_state(state: dict, now_ts: str | None = None) -> dict:
+    tracker = dict(state.get("daily_loss_tracker", {}))
+    now_dt = datetime.fromisoformat(now_ts) if now_ts else datetime.now(IST)
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=IST)
+    today = now_dt.astimezone(IST).strftime("%Y-%m-%d")
+    if str(tracker.get("date", "")) != today:
+        tracker = {
+            "date": today,
+            "realized_loss": 0.0,
+            "trading_paused": False,
+            "paused_reason": "",
+            "max_daily_loss_amount": round(
+                float(state.get("initial_cash", SIMULATION_DEFAULT_CASH) or 0)
+                * MAX_DAILY_LOSS,
+                2,
+            ),
+        }
+    return tracker
+
+
 def _next_recommended_sell_time(
     current_price: float, stop_loss_price: float, target_price: float
 ) -> str:
@@ -840,6 +954,29 @@ def _execute_sim_sell(
     sell_fee = _estimate_exit_fee(sell_value, trade_type=trade_type)
     realized_pnl = (px - entry_price) * qty - allocated_entry_fees - sell_fee
 
+    tracker = _daily_tracker_for_state(state, now_ts=ts)
+    if realized_pnl < 0:
+        tracker["realized_loss"] = round(
+            float(tracker.get("realized_loss", 0) or 0) + abs(realized_pnl),
+            2,
+        )
+    max_loss_amount = float(
+        tracker.get(
+            "max_daily_loss_amount",
+            float(state.get("initial_cash", SIMULATION_DEFAULT_CASH) or 0) * MAX_DAILY_LOSS,
+        )
+        or 0
+    )
+    if tracker.get("realized_loss", 0) >= max_loss_amount > 0:
+        tracker["trading_paused"] = True
+        tracker["paused_reason"] = "Daily loss limit reached"
+        log.warning(
+            "Daily loss limit reached in simulation. realized_loss=%s limit=%s",
+            tracker.get("realized_loss"),
+            round(max_loss_amount, 2),
+        )
+    state["daily_loss_tracker"] = tracker
+
     cash = float(state.get("cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH)) or 0)
     state["cash"] = round(cash + sell_value - sell_fee, 2)
 
@@ -884,6 +1021,103 @@ def _execute_sim_sell(
         "fee": round(sell_fee, 2),
         "realized_pnl": round(realized_pnl, 2),
         "cash_after": round(state["cash"], 2),
+    }
+    state.setdefault("trade_history", []).append(event)
+    return state, event, None
+
+
+def _execute_sim_buy(
+    state: dict,
+    *,
+    ticker: str,
+    quantity: float,
+    price: float,
+    strategy_entry_price: float,
+    stop_loss_price: float,
+    target_price: float,
+    risk_reward: float,
+    trade_type: str,
+    timestamp: str,
+    reason: str = "manual_buy",
+) -> tuple[dict, dict | None, str | None]:
+    t = str(ticker or "").strip().upper()
+    qty = float(quantity or 0)
+    px = float(price or 0)
+    ts = str(timestamp or datetime.now(IST).isoformat())
+    if qty <= 0 or px <= 0:
+        return state, None, "quantity and price must be > 0"
+
+    tracker = _daily_tracker_for_state(state, now_ts=ts)
+    if tracker.get("trading_paused"):
+        return state, None, str(tracker.get("paused_reason") or "Trading paused for the day")
+
+    notional = round(px * qty, 2)
+    entry_fee = _estimate_entry_fee(notional, trade_type=trade_type)
+    total_debit = round(notional + entry_fee, 2)
+    cash = float(state.get("cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH)) or 0)
+    if total_debit > cash + 1e-9:
+        return (
+            state,
+            None,
+            f"Insufficient simulated cash. Need ₹{total_debit:.2f}, available ₹{cash:.2f}",
+        )
+
+    rr_ratio = float(risk_reward or 0)
+    if rr_ratio <= 0:
+        rr_ratio = 1.5
+    sl_price = float(stop_loss_price or 0)
+    if sl_price <= 0:
+        sl_price = max(0.01, px * (1 - STOP_LOSS_MED_CONF))
+    sl_price = _round_to_tick(sl_price)
+    tgt_price = float(target_price or 0)
+    if tgt_price <= 0:
+        tgt_price = px + max(abs(px - sl_price) * max(rr_ratio, 1.0), px * 0.01)
+    tgt_price = _round_to_tick(tgt_price)
+
+    open_positions = dict(state.get("open_positions", {}))
+    pos = dict(open_positions.get(t, {}))
+    prev_qty = _safe_float(pos.get("quantity"))
+    prev_avg = _safe_float(pos.get("avg_entry_price"))
+    prev_fees = _safe_float(pos.get("total_entry_fees"))
+    new_qty = prev_qty + qty
+    avg_entry = ((prev_avg * prev_qty) + (px * qty)) / new_qty if new_qty > 0 else px
+    highest_seen = max(_safe_float(pos.get("highest_price", 0)), px, avg_entry)
+    trail_stop = _safe_float(pos.get("trail_stop_price", 0))
+    pos.update(
+        {
+            "ticker": t,
+            "name": ticker_names.get(t, _clean_name(t)),
+            "quantity": round(new_qty, 4),
+            "avg_entry_price": round(avg_entry, 2),
+            "total_entry_fees": round(prev_fees + entry_fee, 2),
+            "strategy_entry_price": round(float(strategy_entry_price or px), 2),
+            "stop_loss_price": round(sl_price, 2),
+            "target_price": round(tgt_price, 2),
+            "trade_type_hint": trade_type,
+            "opened_at": pos.get("opened_at") or ts,
+            "last_buy_at": ts,
+            "highest_price": round(highest_seen, 2),
+            "trail_stop_price": round(max(trail_stop, sl_price), 2),
+            "source": "strategy",
+        }
+    )
+    open_positions[t] = pos
+    state["open_positions"] = open_positions
+    state["cash"] = round(cash - total_debit, 2)
+    state["daily_loss_tracker"] = tracker
+    event = {
+        "id": uuid4().hex[:12],
+        "timestamp": ts,
+        "action": "BUY",
+        "reason": reason,
+        "ticker": t,
+        "quantity": round(qty, 4),
+        "price": round(px, 2),
+        "trade_type": trade_type,
+        "notional": round(notional, 2),
+        "fee": round(entry_fee, 2),
+        "cash_after": round(state["cash"], 2),
+        "source": "strategy_simulation",
     }
     state.setdefault("trade_history", []).append(event)
     return state, event, None
@@ -1702,6 +1936,12 @@ def api_advisor_open_buy_list():
             atr_pct = abs(_safe_float(row.get("atr_pct")))
             liq_raw = _safe_float(row.get("liquidity_factor"))
             liq = max(0.5, min(1.5, liq_raw if liq_raw > 0 else 1.0))
+            sent_raw = _safe_float(row.get("weighted_sentiment_raw"))
+            sent_penalty = 1.0
+            if sent_raw < -0.35:
+                sent_penalty = 0.6
+            elif sent_raw < -0.15:
+                sent_penalty = 0.8
             if atr_pct >= 8:
                 volatility_factor = 0.65
             elif atr_pct >= 5:
@@ -1710,12 +1950,13 @@ def api_advisor_open_buy_list():
                 volatility_factor = 0.9
             else:
                 volatility_factor = 1.05
-            edge_score = pred_ret_dec * conf * agree * liq * volatility_factor
+            edge_score = pred_ret_dec * conf * agree * liq * volatility_factor * sent_penalty
             ranked.append(
                 {
                     **row,
                     "_edge_score": edge_score,
                     "_volatility_factor": volatility_factor,
+                    "_sentiment_penalty": sent_penalty,
                 }
             )
         ranked.sort(
@@ -1736,23 +1977,69 @@ def api_advisor_open_buy_list():
                 break
             ticker = str(row.get("ticker", "")).upper()
             current_price = _safe_float(row.get("current_price"))
+            if current_price <= 0:
+                continue
+            pred_ret_pct = _safe_float(row.get("predicted_return"))
+            # Keep expected alpha in a realistic band for conservative advisor picks.
+            if abs(pred_ret_pct) > 4.0:
+                warnings.append(
+                    f"{ticker} skipped: projected alpha/return {pred_ret_pct:.2f}% is above conservative cap."
+                )
+                continue
             strategy_price = _safe_float(row.get("target_price") or row.get("predicted_price"))
             if strategy_price <= 0:
                 strategy_price = current_price
             if strategy_price <= 0:
                 continue
+            ai_price = _safe_float(row.get("ai_predicted_price"))
+            if ai_price > 0 and strategy_price > 0:
+                ai_gap = abs(ai_price - strategy_price) / max(strategy_price, 1e-9)
+                if ai_gap > AI_STRATEGY_GAP_WARN:
+                    warnings.append(
+                        f"{ticker} AI/strategy gap {ai_gap*100:.1f}% (ai={ai_price:.2f}, strategy={strategy_price:.2f})."
+                    )
+                if ai_gap > AI_STRATEGY_GAP_BLOCK:
+                    warnings.append(
+                        f"{ticker} skipped: AI/strategy gap exceeded block threshold ({AI_STRATEGY_GAP_BLOCK*100:.0f}%)."
+                    )
+                    continue
             rr_raw = _safe_float(row.get("risk_reward"))
             rr = max(0.1, rr_raw if rr_raw > 0 else 1.2)
-            if strategy_price >= current_price:
-                risk_amount = abs(strategy_price - current_price) / rr
-                stop_loss = max(0.01, current_price - risk_amount)
-            else:
-                risk_amount = abs(current_price - strategy_price) / rr
-                stop_loss = current_price + risk_amount
+            confidence_pct = _safe_float(row.get("confidence"))
+            atr_pct = abs(_safe_float(row.get("atr_pct")))
+            uses_sentiment = (
+                int(_safe_float(row.get("sentiment_articles"))) > 0
+                and _safe_float(row.get("sentiment_weight_used")) > 0
+            )
+            stop_loss_pct, skip_trade = _compute_dynamic_stop_loss_pct(
+                confidence_pct=confidence_pct,
+                atr_pct=atr_pct,
+                uses_sentiment=uses_sentiment,
+            )
+            if skip_trade:
+                warnings.append(
+                    f"{ticker} skipped: low confidence {confidence_pct:.1f}% under stop-loss policy."
+                )
+                continue
+            stop_loss = _round_to_tick(strategy_price * (1 - stop_loss_pct))
+            if stop_loss <= 0 or stop_loss >= strategy_price:
+                stop_loss = _round_to_tick(strategy_price * (1 - STOP_LOSS_MED_CONF))
+            target_delta = max(
+                abs(strategy_price - stop_loss) * max(rr, 1.0),
+                strategy_price * max(pred_ret_pct / 100.0, 0.01),
+            )
+            target_price = _round_to_tick(strategy_price + target_delta)
 
             slots_left = max(1, n - len(picks))
             per_pick_budget = min(remaining_budget, remaining_budget / slots_left)
-            qty = int(per_pick_budget // strategy_price)
+            budget_qty = int(per_pick_budget // strategy_price)
+            risk_qty = _position_size_for_risk(
+                account_balance=budget,
+                entry_price=strategy_price,
+                stop_loss_pct=stop_loss_pct,
+            )
+            qty = risk_qty if risk_qty > 0 else budget_qty
+            qty = min(qty, budget_qty)
             while qty > 0:
                 notional = qty * strategy_price
                 fee = _estimate_entry_fee(notional, trade_type=trade_type)
@@ -1792,16 +2079,22 @@ def api_advisor_open_buy_list():
                     "estimated_fee": round(fee, 2),
                     "est_trade_cost": est_trade_cost,
                     "stop_loss_price": round(stop_loss, 2),
+                    "stop_loss_pct": round(stop_loss_pct * 100.0, 3),
+                    "target_price": round(target_price, 2),
                     "risk_reward": round(rr, 2),
-                    "predicted_return_pct": round(_safe_float(row.get("predicted_return")), 3),
+                    "predicted_return_pct": round(pred_ret_pct, 3),
                     "confidence": round(_safe_float(row.get("confidence")), 1),
                     "model_agreement": round(_safe_float(row.get("model_agreement")), 1),
                     "liquidity_factor": round(liq_factor, 3),
                     "avg_volume_30d": round(avg_volume_30d, 2) if avg_volume_30d > 0 else None,
                     "volatility_atr_pct": round(abs(_safe_float(row.get("atr_pct"))), 2),
                     "edge_score": round(_safe_float(row.get("_edge_score")), 6),
+                    "sentiment_weighted_score": round(
+                        _safe_float(row.get("weighted_sentiment_raw")),
+                        4,
+                    ),
                     "next_recommended_sell_time": _next_recommended_sell_time(
-                        current_price, stop_loss, strategy_price
+                        current_price, stop_loss, target_price
                     ),
                     "strategy_generated_at": row.get("timestamp") or datetime.now(IST).isoformat(),
                 }
@@ -1884,6 +2177,7 @@ def api_simulate_portfolio():
             "closed_trades_count": len(state.get("closed_trades", [])),
             "holdings": holdings,
             "trade_history": state.get("trade_history", [])[-50:],
+            "daily_loss_tracker": state.get("daily_loss_tracker", {}),
             "updated_at": state.get("updated_at"),
         }
     )
@@ -1902,6 +2196,7 @@ def api_simulate_trade():
 
     state = _read_portfolio_sim_state()
     now_iso = datetime.now(IST).isoformat()
+    state["daily_loss_tracker"] = _daily_tracker_for_state(state, now_ts=now_iso)
 
     if action == "RESET":
         budget = _safe_float(payload.get("budget"))
@@ -1929,9 +2224,11 @@ def api_simulate_trade():
 
     if action == "AUTO_CHECK":
         open_positions = dict(state.get("open_positions", {}))
+        state["open_positions"] = dict(open_positions)
         tickers = sorted(open_positions.keys())
         live = _get_live_prices_batch(tickers) if tickers else {}
         events = []
+        trailing_updates = []
         for ticker in tickers:
             pos = dict(open_positions.get(ticker, {}))
             qty = _safe_float(pos.get("quantity"))
@@ -1942,6 +2239,29 @@ def api_simulate_trade():
                 continue
             stop_loss = _safe_float(pos.get("stop_loss_price"))
             target = _safe_float(pos.get("target_price"))
+            entry = _safe_float(pos.get("avg_entry_price"))
+            if entry > 0:
+                highest = max(_safe_float(pos.get("highest_price")), cp, entry)
+                pos["highest_price"] = round(highest, 2)
+                initial_dist = max(entry - stop_loss, entry * 0.01)
+                # Optional trailing stop: activate once move >= 1.5x initial stop distance.
+                if initial_dist > 0 and cp >= entry + 1.5 * initial_dist:
+                    proposed_trail = _round_to_tick(highest * 0.985)
+                    prev_trail = _safe_float(pos.get("trail_stop_price"))
+                    new_trail = max(proposed_trail, prev_trail, stop_loss)
+                    if new_trail > stop_loss:
+                        pos["trail_stop_price"] = round(new_trail, 2)
+                        pos["stop_loss_price"] = round(new_trail, 2)
+                        stop_loss = float(new_trail)
+                        trailing_updates.append(
+                            {
+                                "ticker": ticker,
+                                "new_stop_loss": round(new_trail, 2),
+                                "price": round(cp, 2),
+                            }
+                        )
+                open_positions[ticker] = pos
+                state.setdefault("open_positions", {})[ticker] = pos
             reason = None
             if stop_loss > 0 and cp <= stop_loss:
                 reason = "auto_stop_loss"
@@ -1969,13 +2289,123 @@ def api_simulate_trade():
                         "auto": True,
                     }
                 )
+        auto_buy_events = []
+        auto_buy_enabled = bool(payload.get("auto_buy", False))
+        tracker = _daily_tracker_for_state(state, now_ts=now_iso)
+        if (
+            auto_buy_enabled
+            and not tracker.get("trading_paused")
+            and models_loaded
+            and predictor is not None
+        ):
+            try:
+                snapshot = _get_prediction_snapshot(use_latest_stored=True)
+                snap_rows = snapshot.get("items", []) if isinstance(snapshot, dict) else []
+                candidates = []
+                for row in snap_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    ticker = str(row.get("ticker", "")).upper()
+                    strategy_price = _safe_float(
+                        row.get("strategy_price_at_open") or row.get("predicted_price")
+                    )
+                    pred_ret_dec = _safe_float(row.get("predicted_return_decimal"))
+                    if not ticker or strategy_price <= 0:
+                        continue
+                    if pred_ret_dec <= 0:
+                        continue
+                    candidates.append(
+                        {
+                            "ticker": ticker,
+                            "target_price": strategy_price,
+                            "predicted_price": strategy_price,
+                            "predicted_return": pred_ret_dec * 100.0,
+                            "confidence": _safe_float(row.get("confidence")),
+                            "atr_pct": abs(_safe_float(row.get("atr_pct"))),
+                            "risk_reward": _safe_float(row.get("risk_reward")),
+                            "sentiment_articles": 0,
+                            "sentiment_weight_used": 0,
+                        }
+                    )
+                candidates.sort(
+                    key=lambda r: (
+                        _safe_float(r.get("confidence")),
+                        _safe_float(r.get("predicted_return")),
+                    ),
+                    reverse=True,
+                )
+                candidates = candidates[:10]
+                cand_tickers = [
+                    str(r.get("ticker", "")).upper()
+                    for r in candidates
+                    if str(r.get("ticker", "")).strip()
+                ]
+                cand_live = _get_live_prices_batch(cand_tickers) if cand_tickers else {}
+                for row in candidates:
+                    ticker = str(row.get("ticker", "")).upper()
+                    if not ticker or ticker in state.get("open_positions", {}):
+                        continue
+                    cp = _safe_float(cand_live.get(ticker, {}).get("price"))
+                    strategy_entry = _safe_float(
+                        row.get("target_price") or row.get("predicted_price")
+                    )
+                    if cp <= 0 or strategy_entry <= 0:
+                        continue
+                    trigger = cp <= strategy_entry * 1.002
+                    if not trigger:
+                        continue
+                    conf = _safe_float(row.get("confidence"))
+                    atr_pct = abs(_safe_float(row.get("atr_pct")))
+                    uses_sentiment = (
+                        int(_safe_float(row.get("sentiment_articles"))) > 0
+                        and _safe_float(row.get("sentiment_weight_used")) > 0
+                    )
+                    sl_pct, skip = _compute_dynamic_stop_loss_pct(
+                        confidence_pct=conf,
+                        atr_pct=atr_pct,
+                        uses_sentiment=uses_sentiment,
+                    )
+                    if skip:
+                        continue
+                    qty_risk = _position_size_for_risk(
+                        account_balance=_safe_float(state.get("cash")),
+                        entry_price=cp,
+                        stop_loss_pct=sl_pct,
+                    )
+                    if qty_risk <= 0:
+                        continue
+                    rr = max(1.0, _safe_float(row.get("risk_reward")) or 1.5)
+                    stop_loss = _round_to_tick(cp * (1 - sl_pct))
+                    target = _round_to_tick(cp + max((cp - stop_loss) * rr, cp * 0.01))
+                    state, buy_event, buy_err = _execute_sim_buy(
+                        state,
+                        ticker=ticker,
+                        quantity=qty_risk,
+                        price=cp,
+                        strategy_entry_price=strategy_entry,
+                        stop_loss_price=stop_loss,
+                        target_price=target,
+                        risk_reward=rr,
+                        trade_type="equity_delivery",
+                        timestamp=now_iso,
+                        reason="auto_strategy_entry",
+                    )
+                    if buy_err or not buy_event:
+                        continue
+                    auto_buy_events.append(buy_event)
+                    _log_simulated_trade({**buy_event, "auto": True})
+            except Exception as exc:
+                log.warning("AUTO_CHECK auto-buy stage failed: %s", exc)
+
         _write_portfolio_sim_state(state)
         return jsonify(
             {
                 "ok": True,
                 "action": "AUTO_CHECK",
-                "triggered_count": len(events),
+                "triggered_count": len(events) + len(auto_buy_events),
                 "events": events,
+                "auto_buy_events": auto_buy_events,
+                "trailing_updates": trailing_updates,
                 "state": state,
                 "source": "strategy_simulation",
             }
@@ -2004,80 +2434,48 @@ def api_simulate_trade():
         trade_type = "equity_delivery"
 
     if action == "BUY":
-        notional = round(price * quantity, 2)
-        entry_fee = _estimate_entry_fee(notional, trade_type=trade_type)
-        total_debit = round(notional + entry_fee, 2)
-        cash = float(state.get("cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH)) or 0)
-        if total_debit > cash + 1e-9:
-            return (
-                jsonify(
-                    {
-                        "error": f"Insufficient simulated cash. Need ₹{total_debit:.2f}, available ₹{cash:.2f}",
-                        "required": round(total_debit, 2),
-                        "available_cash": round(cash, 2),
-                    }
-                ),
-                400,
-            )
-
         strategy_entry = _safe_float(payload.get("strategy_entry_price"))
         if strategy_entry <= 0:
             strategy_entry = price
+        confidence_pct = _safe_float(payload.get("confidence"))
+        atr_pct = abs(_safe_float(payload.get("atr_pct")))
+        uses_sentiment = bool(payload.get("uses_sentiment", False))
         stop_loss = _safe_float(payload.get("stop_loss_price"))
         target_price = _safe_float(payload.get("target_price"))
         rr_ratio = _safe_float(payload.get("risk_reward"))
         if rr_ratio <= 0:
             rr_ratio = 1.5
         if stop_loss <= 0:
-            risk = abs(max(strategy_entry, price) - min(strategy_entry, price)) / max(rr_ratio, 1.0)
-            stop_loss = max(0.01, price - max(risk, price * 0.012))
+            sl_pct, skip = _compute_dynamic_stop_loss_pct(
+                confidence_pct=confidence_pct,
+                atr_pct=atr_pct,
+                uses_sentiment=uses_sentiment,
+            )
+            if skip:
+                return jsonify({"error": "Trade blocked: low confidence under risk policy"}), 400
+            stop_loss = _round_to_tick(price * (1 - sl_pct))
         if target_price <= 0:
-            target_price = price + max(abs(price - stop_loss) * max(rr_ratio, 1.0), price * 0.01)
+            target_price = _round_to_tick(
+                price + max(abs(price - stop_loss) * max(rr_ratio, 1.0), price * 0.01)
+            )
 
-        open_positions = dict(state.get("open_positions", {}))
-        pos = dict(open_positions.get(ticker, {}))
-        prev_qty = _safe_float(pos.get("quantity"))
-        prev_avg = _safe_float(pos.get("avg_entry_price"))
-        prev_fees = _safe_float(pos.get("total_entry_fees"))
-        new_qty = prev_qty + quantity
-        avg_entry = (
-            ((prev_avg * prev_qty) + (price * quantity)) / new_qty
-            if new_qty > 0
-            else price
+        state, event, err = _execute_sim_buy(
+            state,
+            ticker=ticker,
+            quantity=quantity,
+            price=price,
+            strategy_entry_price=strategy_entry,
+            stop_loss_price=stop_loss,
+            target_price=target_price,
+            risk_reward=rr_ratio,
+            trade_type=trade_type,
+            timestamp=now_iso,
+            reason="manual_buy",
         )
-        pos.update(
-            {
-                "ticker": ticker,
-                "name": ticker_names.get(ticker, _clean_name(ticker)),
-                "quantity": round(new_qty, 4),
-                "avg_entry_price": round(avg_entry, 2),
-                "total_entry_fees": round(prev_fees + entry_fee, 2),
-                "strategy_entry_price": round(strategy_entry, 2),
-                "stop_loss_price": round(stop_loss, 2),
-                "target_price": round(target_price, 2),
-                "trade_type_hint": trade_type,
-                "opened_at": pos.get("opened_at") or now_iso,
-                "last_buy_at": now_iso,
-                "source": "strategy",
-            }
-        )
-        open_positions[ticker] = pos
-        state["open_positions"] = open_positions
-        state["cash"] = round(cash - total_debit, 2)
-        event = {
-            "id": uuid4().hex[:12],
-            "timestamp": now_iso,
-            "action": "BUY",
-            "ticker": ticker,
-            "quantity": round(quantity, 4),
-            "price": round(price, 2),
-            "trade_type": trade_type,
-            "notional": round(notional, 2),
-            "fee": round(entry_fee, 2),
-            "cash_after": round(state["cash"], 2),
-            "source": "strategy_simulation",
-        }
-        state.setdefault("trade_history", []).append(event)
+        if err:
+            return jsonify({"error": err}), 400
+        if not event:
+            return jsonify({"error": "Buy execution failed"}), 400
         _write_portfolio_sim_state(state)
         _log_simulated_trade(event)
         return jsonify({"ok": True, "event": event, "state": state})
@@ -3598,6 +3996,44 @@ def _safe_float(value) -> float:
     return 0.0
 
 
+def _get_recent_legit_news_context(ticker: str, max_items: int = 6) -> str:
+    """
+    Pull recent Yahoo Finance-linked headlines with publisher names.
+    Used to ground Groq prompts in identifiable sources.
+    """
+    try:
+        import yfinance as yf
+    except Exception:
+        return ""
+
+    try:
+        news_items = yf.Ticker(ticker).news or []
+    except Exception:
+        return ""
+
+    lines = []
+    for row in news_items:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title", "") or "").strip()
+        if not title:
+            continue
+        publisher = str(
+            row.get("publisher") or row.get("provider") or row.get("source") or "unknown"
+        ).strip()
+        published = row.get("providerPublishTime")
+        try:
+            pub_ts = datetime.fromtimestamp(float(published), tz=IST).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        except Exception:
+            pub_ts = ""
+        lines.append(f"- [{publisher}] {title}" + (f" ({pub_ts} IST)" if pub_ts else ""))
+        if len(lines) >= max_items:
+            break
+    return "\n".join(lines)
+
+
 def _get_cached_ai_forecast_meta(ticker: str) -> dict:
     now = time.time()
     cached = _groq_forecast_cache.get(ticker, {})
@@ -3659,6 +4095,9 @@ def _resolve_ai_forecast_price(
     stock_name = ticker_names.get(ticker, _clean_name(ticker))
     try:
         sentiment = get_news_sentiment(ticker, stock_name)
+        legit_news_ctx = _get_recent_legit_news_context(ticker)
+        if legit_news_ctx:
+            sentiment = (sentiment or "") + "\n\nRecent source headlines:\n" + legit_news_ctx
         forecast = get_groq_price_forecast(
             ticker=ticker,
             stock_name=stock_name,
@@ -3670,6 +4109,27 @@ def _resolve_ai_forecast_price(
         ai_price = _safe_float(forecast.get("ai_predicted_price"))
         if ai_price <= 0:
             return cached_meta
+        gap = abs(ai_price - strategy_px) / max(strategy_px, 1e-9)
+        if gap > AI_STRATEGY_GAP_WARN:
+            log.warning(
+                "AI/strategy price gap warning for %s: ai=%s strategy=%s gap=%.2f%%",
+                ticker,
+                round(ai_price, 2),
+                round(strategy_px, 2),
+                gap * 100.0,
+            )
+        if gap > AI_STRATEGY_GAP_BLOCK:
+            log.warning(
+                "Discarding AI forecast for %s due to excessive gap %.2f%%",
+                ticker,
+                gap * 100.0,
+            )
+            return {
+                "available": False,
+                "price": 0.0,
+                "source": "filtered_outlier",
+                "generated_at_iso": None,
+            }
 
         generated_at_iso = datetime.now(IST).isoformat()
         payload = {
@@ -3727,6 +4187,11 @@ def _get_prediction_for_ticker(
         not pred
         or pred.get("predicted_price", 0) <= 0
         or abs(pred.get("predicted_return", 0) or 0) > 50
+        or (
+            abs(_safe_float(pred.get("confidence")) - 50.0) < 1e-9
+            and abs(_safe_float(pred.get("model_agreement")) - 50.0) < 1e-9
+            and not pred.get("model_predictions")
+        )
     )
 
     if needs_refresh and allow_live_refresh and predictor is not None:
@@ -3790,7 +4255,10 @@ def _build_daily_analysis() -> dict:
 
     stocks = []
     prediction_count = 0
-    refresh_budget = 0
+    refresh_budget = max(
+        0,
+        int(os.environ.get("DAILY_ANALYSIS_REFRESH_BUDGET", "40")),
+    )
     for ticker in all_tickers:
         if ticker.startswith("^") or ticker in ("USDINR=X", "GC=F", "CL=F"):
             continue
@@ -3935,16 +4403,33 @@ def _build_daily_analysis() -> dict:
             ((current_price - prev_close) / prev_close * 100) if prev_close > 0 else 0
         )
 
-        # Composite score for ranking (higher = better opportunity)
-        # Factors: predicted return (40%), confidence (25%), model agreement (20%), R:R (15%)
+        # Composite score for ranking (strategy-only numerics; AI only explains).
         model_agreement = float(pred.get("model_agreement", 50) or 50)
         risk_reward = pred.get("risk_reward", 1.0) if pred.get("risk_reward") else 1.0
+        liq_factor = _safe_float(pred.get("liquidity_factor"))
+        liq_factor = liq_factor if liq_factor > 0 else 1.0
+        ens_weights = pred.get("ensemble_weights", {})
+        diversity = 0.3
+        if isinstance(ens_weights, dict) and ens_weights:
+            vals = np.array(
+                [abs(_safe_float(v)) for v in ens_weights.values()],
+                dtype=float,
+            )
+            if vals.size > 0 and np.isfinite(vals).all():
+                s = float(vals.sum())
+                if s > 0:
+                    vals = vals / s
+                    concentration = float(vals.max())
+                    diversity = max(0.05, 1.0 - concentration)
 
         score = (
-            abs(predicted_return) * 4.0
-            + confidence * 0.25
-            + model_agreement * 0.20
-            + min(risk_reward, 5) * 3.0
+            abs(predicted_return / 100.0)
+            * (max(0.0, min(100.0, confidence)) / 100.0)
+            * (max(0.0, min(100.0, model_agreement)) / 100.0)
+            * max(0.6, min(1.5, liq_factor))
+            * (1.0 + min(max(_safe_float(risk_reward), 0.0), 5.0) / 5.0)
+            * (0.7 + diversity)
+            * 10000.0
         )
 
         model_preds = pred.get("model_predictions", {})
@@ -3999,6 +4484,7 @@ def _build_daily_analysis() -> dict:
                 "confidence": round(confidence, 1),
                 "model_agreement": round(model_agreement, 1),
                 "risk_reward": round(risk_reward, 1) if risk_reward else None,
+                "liquidity_factor": round(liq_factor, 3),
                 "volume": curr.get("volume", 0),
                 "high": curr.get("high", 0),
                 "low": curr.get("low", 0),

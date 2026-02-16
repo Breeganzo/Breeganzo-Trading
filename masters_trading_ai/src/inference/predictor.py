@@ -18,10 +18,13 @@ The predicted value is the next-day return (%) from the regression models.
 import sys
 import os
 import json
+import re
+import time
 import hashlib
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta
+from collections import defaultdict
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -33,6 +36,11 @@ try:
     import yfinance as yf
 except ImportError:
     yf = None
+
+try:
+    from groq import Groq
+except ImportError:
+    Groq = None
 
 # Project imports
 from ..utils.constants import MODELS_DIR, PROJECT_ROOT
@@ -56,6 +64,21 @@ MARKET_CLOSE = 15  # 3:30 PM IST
 MARKET_CLOSE_MIN = 30
 CACHE_DIR = PROJECT_ROOT / "cache"
 log = logging.getLogger(__name__)
+
+SENTIMENT_WEIGHTS = {"day0": 0.35, "day1": 0.25, "day2": 0.15, "day3": 0.05}
+ENSEMBLE_WEIGHT = float(os.environ.get("ENSEMBLE_WEIGHT", "0.80"))
+SENTIMENT_WEIGHT = float(os.environ.get("SENTIMENT_WEIGHT", "0.20"))
+SENTIMENT_RETURN_SCALE = float(os.environ.get("SENTIMENT_RETURN_SCALE", "0.05"))
+SENTIMENT_LOOKBACK_DAYS = int(os.environ.get("SENTIMENT_LOOKBACK_DAYS", "3"))
+SENTIMENT_CACHE_TTL_SECONDS = int(os.environ.get("SENTIMENT_CACHE_TTL_SECONDS", "1800"))
+NEGATIVE_SENTIMENT_CUTOFF = float(os.environ.get("NEGATIVE_SENTIMENT_CUTOFF", "-0.45"))
+GROQ_SENTIMENT_MODEL = os.environ.get("GROQ_SENTIMENT_MODEL", "llama-3.3-70b-versatile")
+ENABLE_GROQ_NEWS_SENTIMENT = os.environ.get(
+    "ENABLE_GROQ_NEWS_SENTIMENT", "1"
+).strip().lower() not in {"0", "false", "no"}
+GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE = int(
+    os.environ.get("GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE", "8")
+)
 
 
 def _sanitize_predicted_return(value: float, base_preds: dict) -> float:
@@ -273,6 +296,417 @@ class LivePredictor:
         self._load_steps: list[dict] = []
         self._recent_model_outputs: dict[str, list[float]] = {}
         self._stale_models: set[str] = set()
+        self._groq_client = None
+        self._groq_last_call = 0.0
+        self._groq_sentiment_call_times: list[float] = []
+        self._sentiment_cache_file = CACHE_DIR / "news_sentiment_cache.json"
+        self._sentiment_cache: dict = self._load_sentiment_cache()
+
+    def _load_sentiment_cache(self) -> dict:
+        if not self._sentiment_cache_file.exists():
+            return {}
+        try:
+            data = json.loads(self._sentiment_cache_file.read_text())
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_sentiment_cache(self) -> None:
+        try:
+            self._sentiment_cache_file.parent.mkdir(parents=True, exist_ok=True)
+            self._sentiment_cache_file.write_text(
+                json.dumps(self._sentiment_cache, indent=2, default=str)
+            )
+        except Exception:
+            pass
+
+    def _get_groq_client(self):
+        if self._groq_client is not None:
+            return self._groq_client
+        api_key = os.environ.get("GROQ_API_KEY", "").strip()
+        if not api_key or Groq is None:
+            return None
+        try:
+            self._groq_client = Groq(api_key=api_key)
+        except Exception:
+            self._groq_client = None
+        return self._groq_client
+
+    def _groq_sentiment_quota_available(self) -> bool:
+        if GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE <= 0:
+            return False
+        now = time.time()
+        self._groq_sentiment_call_times = [
+            t for t in self._groq_sentiment_call_times if (now - t) < 60.0
+        ]
+        return len(self._groq_sentiment_call_times) < GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE
+
+    @staticmethod
+    def _sentiment_decay_weight(days_ago: int) -> float:
+        if days_ago <= 0:
+            return SENTIMENT_WEIGHTS["day0"]
+        if days_ago == 1:
+            return SENTIMENT_WEIGHTS["day1"]
+        if days_ago == 2:
+            return SENTIMENT_WEIGHTS["day2"]
+        return SENTIMENT_WEIGHTS["day3"]
+
+    @staticmethod
+    def _parse_news_datetime(raw_value) -> datetime | None:
+        if raw_value is None:
+            return None
+        if isinstance(raw_value, (int, float)):
+            try:
+                return datetime.fromtimestamp(float(raw_value), tz=IST)
+            except Exception:
+                return None
+        if isinstance(raw_value, str):
+            text = raw_value.strip()
+            if not text:
+                return None
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=IST)
+                return parsed.astimezone(IST)
+            except Exception:
+                return None
+        return None
+
+    def _fetch_recent_news_articles(
+        self,
+        ticker: str,
+        prediction_dt: datetime,
+        max_days: int = SENTIMENT_LOOKBACK_DAYS,
+        max_items: int = 12,
+    ) -> list[dict]:
+        if yf is None:
+            return []
+        try:
+            news_items = yf.Ticker(ticker).news or []
+        except Exception:
+            return []
+
+        articles: list[dict] = []
+        for row in news_items:
+            if not isinstance(row, dict):
+                continue
+            published_dt = self._parse_news_datetime(
+                row.get("providerPublishTime")
+                or row.get("published")
+                or row.get("published_at")
+            )
+            if published_dt is None:
+                continue
+            days_ago = (prediction_dt.date() - published_dt.astimezone(IST).date()).days
+            if days_ago < 0 or days_ago > max_days:
+                continue
+            title = str(row.get("title", "") or "").strip()
+            if not title:
+                continue
+            articles.append(
+                {
+                    "published_at": published_dt.isoformat(),
+                    "days_ago": int(days_ago),
+                    "title": title,
+                    "summary": str(row.get("summary", "") or "").strip(),
+                    "publisher": str(
+                        row.get("publisher")
+                        or row.get("provider")
+                        or row.get("source")
+                        or "unknown"
+                    ).strip(),
+                    "link": str(row.get("link", "") or "").strip(),
+                }
+            )
+            if len(articles) >= max_items:
+                break
+        return articles
+
+    @staticmethod
+    def _fallback_headline_sentiment(text: str) -> tuple[float, int]:
+        t = str(text or "").lower()
+        if not t:
+            return 0.0, 0
+        positive_tokens = [
+            "beat",
+            "growth",
+            "surge",
+            "upgrade",
+            "profit",
+            "expands",
+            "bullish",
+            "record",
+            "strong",
+            "wins",
+            "gain",
+        ]
+        negative_tokens = [
+            "miss",
+            "fall",
+            "loss",
+            "downgrade",
+            "lawsuit",
+            "probe",
+            "cuts",
+            "weak",
+            "drop",
+            "bearish",
+            "decline",
+        ]
+        pos_hits = sum(1 for tok in positive_tokens if tok in t)
+        neg_hits = sum(1 for tok in negative_tokens if tok in t)
+        net = pos_hits - neg_hits
+        if net == 0:
+            return 0.0, 0
+        polarity = 1 if net > 0 else -1
+        score = min(1.0, 0.2 + (abs(net) * 0.15))
+        return score, polarity
+
+    @staticmethod
+    def _extract_json_object(text: str) -> dict:
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            pass
+        m = re.search(r"\{[\s\S]*\}", text)
+        if not m:
+            return {}
+        try:
+            parsed = json.loads(m.group(0))
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+    def _score_news_articles_with_groq(
+        self, ticker: str, articles: list[dict]
+    ) -> list[dict]:
+        if not articles:
+            return []
+
+        # Stable cache key per ticker + article window.
+        key_basis = {
+            "ticker": ticker,
+            "articles": [
+                {
+                    "published_at": a.get("published_at"),
+                    "title": a.get("title"),
+                    "publisher": a.get("publisher"),
+                }
+                for a in articles
+            ],
+        }
+        cache_key = hashlib.sha1(
+            json.dumps(key_basis, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        cached = self._sentiment_cache.get(cache_key)
+        now_ts = time.time()
+        if isinstance(cached, dict):
+            ts = float(cached.get("ts", 0) or 0)
+            if (now_ts - ts) < SENTIMENT_CACHE_TTL_SECONDS:
+                items = cached.get("items", [])
+                if isinstance(items, list):
+                    return items
+
+        client = self._get_groq_client()
+        if (not ENABLE_GROQ_NEWS_SENTIMENT) or client is None or (not self._groq_sentiment_quota_available()):
+            scored = []
+            for idx, article in enumerate(articles):
+                score, polarity = self._fallback_headline_sentiment(
+                    f"{article.get('title', '')}. {article.get('summary', '')}"
+                )
+                scored.append(
+                    {
+                        "idx": idx,
+                        "sentiment_score": round(float(score), 4),
+                        "sentiment_polarity": int(polarity),
+                    }
+                )
+            return scored
+
+        prompt_rows = []
+        for idx, article in enumerate(articles):
+            prompt_rows.append(
+                {
+                    "idx": idx,
+                    "date": article.get("published_at"),
+                    "source": article.get("publisher"),
+                    "title": article.get("title"),
+                    "summary": article.get("summary", "")[:240],
+                }
+            )
+
+        prompt = (
+            "Score each article sentiment for Indian equity trading.\n"
+            "Return strict JSON only with schema: "
+            '{"items":[{"idx":0,"sentiment_score":0.0,"sentiment_polarity":0}]}.\n'
+            "Rules:\n"
+            "- sentiment_score is absolute sentiment intensity from 0 to 1.\n"
+            "- sentiment_polarity must be 1 for positive, -1 for negative, 0 for neutral.\n"
+            "- Use article headline/summary only, no extra commentary.\n"
+            f"Ticker: {ticker}\n"
+            f"Articles: {json.dumps(prompt_rows)}"
+        )
+
+        # Small safety delay to avoid 429s in fast loops.
+        elapsed = time.time() - self._groq_last_call
+        if elapsed < 0.5:
+            time.sleep(0.5 - elapsed)
+
+        scored: list[dict] = []
+        try:
+            self._groq_sentiment_call_times.append(time.time())
+            resp = client.chat.completions.create(
+                model=GROQ_SENTIMENT_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a strict JSON generator for financial sentiment scoring."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_tokens=800,
+            )
+            self._groq_last_call = time.time()
+            text = str(resp.choices[0].message.content or "").strip()
+            payload = self._extract_json_object(text)
+            items = payload.get("items", []) if isinstance(payload, dict) else []
+            for row in items if isinstance(items, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                idx = int(row.get("idx", -1))
+                score = float(row.get("sentiment_score", 0) or 0)
+                polarity = int(float(row.get("sentiment_polarity", 0) or 0))
+                if idx < 0 or idx >= len(articles):
+                    continue
+                score = float(np.clip(abs(score), 0.0, 1.0))
+                if polarity > 0:
+                    polarity = 1
+                elif polarity < 0:
+                    polarity = -1
+                else:
+                    polarity = 0
+                scored.append(
+                    {
+                        "idx": idx,
+                        "sentiment_score": round(score, 4),
+                        "sentiment_polarity": polarity,
+                    }
+                )
+        except Exception as exc:
+            log.debug("Groq sentiment scoring failed for %s: %s", ticker, exc)
+
+        # Fallback per missing rows.
+        by_idx = {int(s.get("idx", -1)): s for s in scored}
+        for idx, article in enumerate(articles):
+            if idx in by_idx:
+                continue
+            score, polarity = self._fallback_headline_sentiment(
+                f"{article.get('title', '')}. {article.get('summary', '')}"
+            )
+            by_idx[idx] = {
+                "idx": idx,
+                "sentiment_score": round(float(score), 4),
+                "sentiment_polarity": int(polarity),
+            }
+
+        final_rows = [by_idx[i] for i in sorted(by_idx)]
+        self._sentiment_cache[cache_key] = {"ts": now_ts, "items": final_rows}
+        self._save_sentiment_cache()
+        return final_rows
+
+    def _compute_weighted_sentiment_signal(
+        self,
+        ticker: str,
+        prediction_dt: datetime,
+    ) -> dict:
+        """
+        Compute time-decayed sentiment signal:
+          weighted_sentiment = sum(day_avg_sentiment * day_weight) / sum(day_weights)
+        where day_weight uses SENTIMENT_WEIGHTS and day_avg_sentiment is signed.
+        """
+        articles = self._fetch_recent_news_articles(
+            ticker=ticker,
+            prediction_dt=prediction_dt,
+            max_days=SENTIMENT_LOOKBACK_DAYS,
+        )
+        if not articles:
+            return {
+                "weighted_sentiment_raw": 0.0,
+                "weighted_sentiment_decimal": 0.0,
+                "article_count": 0,
+                "sources": [],
+                "weights_used": {},
+            }
+
+        scored = self._score_news_articles_with_groq(ticker, articles)
+        by_idx = {int(r.get("idx", -1)): r for r in scored}
+
+        # Edge case: multiple articles on same day are averaged before day-weighting.
+        day_scores: dict[int, list[float]] = defaultdict(list)
+        source_set = set()
+        for idx, article in enumerate(articles):
+            srow = by_idx.get(idx, {})
+            score = float(srow.get("sentiment_score", 0) or 0)
+            polarity = int(float(srow.get("sentiment_polarity", 0) or 0))
+            score = float(np.clip(abs(score), 0.0, 1.0))
+            if polarity > 0:
+                polarity = 1
+            elif polarity < 0:
+                polarity = -1
+            else:
+                polarity = 0
+            day = int(article.get("days_ago", 0) or 0)
+            if day < 0 or day > SENTIMENT_LOOKBACK_DAYS:
+                continue
+            day_scores[day].append(score * polarity)
+            src = str(article.get("publisher", "") or "").strip()
+            if src:
+                source_set.add(src)
+
+        if not day_scores:
+            return {
+                "weighted_sentiment_raw": 0.0,
+                "weighted_sentiment_decimal": 0.0,
+                "article_count": 0,
+                "sources": sorted(source_set),
+                "weights_used": {},
+            }
+
+        numerator = 0.0
+        denominator = 0.0
+        weights_used = {}
+        for day, values in day_scores.items():
+            if not values:
+                continue
+            day_avg = float(np.mean(values))
+            day_weight = self._sentiment_decay_weight(day)
+            numerator += day_avg * day_weight
+            denominator += day_weight
+            weights_used[f"day{day}"] = round(day_weight, 4)
+
+        if denominator <= 0:
+            weighted_raw = 0.0
+        else:
+            weighted_raw = numerator / denominator
+
+        weighted_raw = float(np.clip(weighted_raw, -1.0, 1.0))
+        weighted_decimal = float(
+            np.clip(weighted_raw * SENTIMENT_RETURN_SCALE, -0.5, 0.5)
+        )
+        return {
+            "weighted_sentiment_raw": round(weighted_raw, 6),
+            "weighted_sentiment_decimal": round(weighted_decimal, 6),
+            "article_count": sum(len(v) for v in day_scores.values()),
+            "sources": sorted(source_set),
+            "weights_used": weights_used,
+        }
 
     def _record_model_output(self, model_name: str, value: float) -> None:
         """Track recent model outputs and flag near-constant models as stale."""
@@ -874,6 +1308,35 @@ class LivePredictor:
             predicted_return = float(np.mean(list(base_preds.values())))
             dir_prob = None
 
+        # --- Blend technical prediction with time-decayed news sentiment ---
+        technical_prediction = float(predicted_return or 0.0)
+        sentiment_meta = self._compute_weighted_sentiment_signal(
+            ticker=ticker,
+            prediction_dt=datetime.now(IST),
+        )
+        weighted_sentiment = float(
+            sentiment_meta.get("weighted_sentiment_decimal", 0.0) or 0.0
+        )
+        sentiment_article_count = int(sentiment_meta.get("article_count", 0) or 0)
+
+        if sentiment_article_count > 0:
+            ensemble_weight_used = float(np.clip(ENSEMBLE_WEIGHT, 0.0, 1.0))
+            sentiment_weight_used = float(np.clip(SENTIMENT_WEIGHT, 0.0, 1.0))
+            if sentiment_meta.get("weighted_sentiment_raw", 0.0) <= NEGATIVE_SENTIMENT_CUTOFF:
+                # Very poor sentiment: ignore sentiment contribution and trust model output.
+                ensemble_weight_used = 1.0
+                sentiment_weight_used = 0.0
+        else:
+            # No fresh news in lookback window => neutral sentiment contribution.
+            ensemble_weight_used = 1.0
+            sentiment_weight_used = 0.0
+            weighted_sentiment = 0.0
+
+        predicted_return = (
+            ensemble_weight_used * technical_prediction
+            + sentiment_weight_used * weighted_sentiment
+        )
+
         # --- Compute derived quantities ---
         predicted_return = _sanitize_predicted_return(predicted_return, base_preds)
         predicted_price = round(current_price * (1 + predicted_return), 2)
@@ -890,10 +1353,36 @@ class LivePredictor:
         )
         rvol = float(feat_df["RVOL"].iloc[-1]) if "RVOL" in feat_df.columns else 1.0
 
-        # Model agreement (what fraction of base models agree on direction)
+        # Model agreement combines directional consistency + magnitude alignment.
         if base_preds:
-            signs = [1 if v > 0 else -1 for v in base_preds.values()]
-            model_agreement = abs(sum(signs)) / len(signs)
+            if ensemble_weights:
+                total_w = sum(abs(float(ensemble_weights.get(k, 0) or 0)) for k in base_preds)
+                if total_w > 0:
+                    weighted_sign = sum(
+                        (1 if float(v) > 0 else -1)
+                        * (float(ensemble_weights.get(k, 0) or 0) / total_w)
+                        for k, v in base_preds.items()
+                    )
+                    directional_agreement = float(np.clip(abs(weighted_sign), 0.0, 1.0))
+                    ref = abs(technical_prediction) + max(atr_pct * 0.5, 1e-6)
+                    magnitude_alignment = sum(
+                        (float(ensemble_weights.get(k, 0) or 0) / total_w)
+                        * max(0.0, 1.0 - (abs(float(v) - technical_prediction) / (2.0 * ref)))
+                        for k, v in base_preds.items()
+                    )
+                    model_agreement = float(
+                        np.clip(
+                            0.7 * directional_agreement + 0.3 * magnitude_alignment,
+                            0.0,
+                            1.0,
+                        )
+                    )
+                else:
+                    signs = [1 if v > 0 else -1 for v in base_preds.values()]
+                    model_agreement = abs(sum(signs)) / len(signs)
+            else:
+                signs = [1 if v > 0 else -1 for v in base_preds.values()]
+                model_agreement = abs(sum(signs)) / len(signs)
         else:
             model_agreement = 0.0
 
@@ -928,6 +1417,18 @@ class LivePredictor:
         result = {
             "ticker": ticker,
             "predicted_return": round(predicted_return * 100, 4),  # in %
+            "technical_predicted_return": round(technical_prediction * 100, 4),
+            "weighted_sentiment_raw": float(
+                sentiment_meta.get("weighted_sentiment_raw", 0.0) or 0.0
+            ),
+            "weighted_sentiment_decimal": float(
+                sentiment_meta.get("weighted_sentiment_decimal", 0.0) or 0.0
+            ),
+            "sentiment_articles": int(sentiment_meta.get("article_count", 0) or 0),
+            "sentiment_sources": sentiment_meta.get("sources", []),
+            "sentiment_decay_weights": sentiment_meta.get("weights_used", {}),
+            "ensemble_weight_used": round(ensemble_weight_used, 4),
+            "sentiment_weight_used": round(sentiment_weight_used, 4),
             "predicted_price": predicted_price,
             "current_price": round(current_price, 2),
             "previous_close": round(previous_close, 2),
