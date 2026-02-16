@@ -589,7 +589,8 @@ async function showTopAnalysis() {
             const strategyLabel = nextDayMode ? `Strategy (Next Day ${s.predicted_for_date || ''})` : 'Strategy Predicted';
             const aiLabel = nextDayMode ? `AI (Next Day ${s.predicted_for_date || ''})` : 'AI Predicted';
             const strategyPct = nextDayMode ? s.close_to_strategy_pct : s.open_to_predicted_pct;
-            const aiPct = nextDayMode ? s.close_to_ai_pct : (s.open_to_ai_predicted_pct ?? s.open_to_predicted_pct);
+            const aiPct = nextDayMode ? s.close_to_ai_pct : s.open_to_ai_predicted_pct;
+            const aiAvailable = Number(s.ai_predicted_price || 0) > 0;
             const strategyTime = s.strategy_predicted_at || s.strategy_predicted_at_open;
             const aiTime = s.ai_predicted_at || s.ai_predicted_at_open;
 
@@ -617,9 +618,9 @@ async function showTopAnalysis() {
                     </div>
                     <div class="top10-price-item predicted">
                         <span class="label">${aiLabel}</span>
-                        <span class="value ${isUp ? 'up-color' : 'down-color'}">${formatPrice(s.ai_predicted_price || s.predicted_price)}</span>
-                        <span class="pct ${Number(aiPct) >= 0 ? 'up-color' : 'down-color'}">${formatSignedPct(aiPct, 2)}</span>
-                        <span class="muted-text">${formatIstTimestamp(aiTime)}</span>
+                        <span class="value ${Number(aiPct) >= 0 ? 'up-color' : 'down-color'}">${aiAvailable ? formatPrice(s.ai_predicted_price) : '—'}</span>
+                        <span class="pct ${Number(aiPct) >= 0 ? 'up-color' : 'down-color'}">${aiAvailable ? formatSignedPct(aiPct, 2) : '—'}</span>
+                        <span class="muted-text">${aiAvailable ? formatIstTimestamp(aiTime) : 'AI unavailable'}</span>
                     </div>
                     <div class="top10-price-item current">
                         <span class="label">${liveLabel}</span>
@@ -692,7 +693,7 @@ async function showTopPicks() {
     grid.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>Running ML predictions across all sectors... This may take 2-5 minutes.</p></div>';
 
     try {
-        const res = await fetch('/api/top-picks?sectors=large_cap&sectors=banking&sectors=mid_cap&n=10&grouped=true');
+        const res = await fetch('/api/top-picks?sectors=large_cap&sectors=banking&sectors=mid_cap&n=30&grouped=true');
         const data = await res.json();
 
         if (data.error) {
@@ -909,7 +910,7 @@ async function loadCurrentSecondSnapshot() {
     if (label) label.textContent = ticker;
     try {
         const strategyUrl = `/api/strategy-price/${encodeURIComponent(ticker)}?use_latest_stored=${useLatestStoredPredictions ? 'true' : 'false'}`;
-        const aiUrl = `/api/predict/${encodeURIComponent(ticker)}?use_latest_stored=${useLatestStoredPredictions ? 'true' : 'false'}`;
+        const aiUrl = `/api/groq-price-forecast/${encodeURIComponent(ticker)}`;
         const priceUrl = `/api/prices?tickers=${encodeURIComponent(ticker)}`;
         const [strategyRes, aiRes, priceRes] = await Promise.all([
             fetch(strategyUrl),
@@ -923,28 +924,24 @@ async function loadCurrentSecondSnapshot() {
             body.innerHTML = `<tr><td colspan="4" class="muted-text">${strategyData.error || 'Strategy snapshot unavailable'}</td></tr>`;
             return;
         }
-        if (!aiRes.ok || aiData.error) {
-            body.innerHTML = `<tr><td colspan="4" class="muted-text">${aiData.error || 'AI snapshot unavailable'}</td></tr>`;
-            return;
-        }
 
         const current = Number(priceData?.[ticker]?.price || strategyData.current_price || aiData.current_price || 0);
         const strategyNow = Number(strategyData.strategy_price || 0);
-        const aiNow = Number(aiData.predicted_price || 0);
+        const aiNow = Number(aiData.ai_predicted_price || 0);
         const strategyDir = strategyNow > current ? 'UP' : strategyNow < current ? 'DOWN' : 'FLAT';
-        const aiAvailable = aiNow > 0;
+        const aiAvailable = aiRes.ok && !aiData.error && aiNow > 0;
         const aiDir = aiAvailable ? (aiNow > current ? 'UP' : aiNow < current ? 'DOWN' : 'FLAT') : 'N/A';
         const aligned = aiAvailable ? strategyDir === aiDir : null;
         const badgeClass = aligned === null ? '' : (aligned ? 'correct' : 'wrong');
         const badgeText = aligned === null ? `${strategyDir}/N/A` : `${strategyDir}/${aiDir}`;
         const strategyTime = formatIstTimestamp(strategyData.strategy_generated_at);
-        const aiTime = formatIstTimestamp(aiData.timestamp || aiData.generated_at || aiData.generated_at_iso);
+        const aiTime = formatIstTimestamp(aiData.generated_at_iso || aiData.generated_at);
 
         body.innerHTML = `
             <tr>
                 <td>${formatPrice(current)}</td>
                 <td>${strategyNow > 0 ? `${formatPrice(strategyNow)}<br><span class="muted-text">${strategyTime}</span>` : '—'}</td>
-                <td>${aiNow > 0 ? `${formatPrice(aiNow)}<br><span class="muted-text">${aiTime}</span>` : '—'}</td>
+                <td>${aiAvailable ? `${formatPrice(aiNow)}<br><span class="muted-text">${aiTime}</span>` : '—'}</td>
                 <td><span class="direction-badge ${badgeClass}">${badgeText}</span></td>
             </tr>
         `;
@@ -1034,6 +1031,10 @@ async function loadExpectedVsActual() {
             const predColor = r.predicted_return_pct >= 0 ? 'up-color' : 'down-color';
             const actColor = r.actual_return_pct >= 0 ? 'up-color' : 'down-color';
             const alpColor = r.alpha_pct >= 0 ? 'up-color' : 'down-color';
+            const capmAlpha = Number(r.alpha_capm_pct);
+            const capmText = Number.isFinite(capmAlpha)
+                ? `<div class="muted-text">CAPM: ${capmAlpha >= 0 ? '+' : ''}${capmAlpha.toFixed(3)}%</div>`
+                : '';
 
             rows += `
             <tr onclick="window.location='/stock/${encodeURIComponent(r.ticker)}'" style="cursor:pointer">
@@ -1046,7 +1047,7 @@ async function loadExpectedVsActual() {
                 <td>${formatPrice(r.actual_price)}</td>
                 <td class="${actColor}">${r.actual_return_pct >= 0 ? '+' : ''}${r.actual_return_pct}%</td>
                 <td><span class="direction-badge ${dirClass}">${dirText}</span></td>
-                <td class="${alpColor}">${r.alpha_pct >= 0 ? '+' : ''}${r.alpha_pct}%</td>
+                <td class="${alpColor}">${r.alpha_pct >= 0 ? '+' : ''}${r.alpha_pct}%${capmText}</td>
             </tr>`;
         }
 

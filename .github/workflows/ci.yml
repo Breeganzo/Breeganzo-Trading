@@ -11,6 +11,8 @@ on:
 jobs:
   test-lint:
     runs-on: ubuntu-latest
+    env:
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
     defaults:
       run:
         working-directory: masters_trading_ai

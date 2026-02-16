@@ -12,6 +12,7 @@ Structure:
 """
 
 import json
+import os
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
@@ -29,6 +30,9 @@ ACCURACY_FILE = TRACKING_DIR / "accuracy_history.json"
 
 for d in [TRACKING_DIR, DAILY_DIR, MONTHLY_DIR]:
     d.mkdir(parents=True, exist_ok=True)
+
+ALPHA_RISK_FREE_ANNUAL = float(os.environ.get("ALPHA_RISK_FREE_ANNUAL", "0.0"))
+ALPHA_DEFAULT_BETA = float(os.environ.get("ALPHA_DEFAULT_BETA", "1.0"))
 
 
 class PredictionTracker:
@@ -56,6 +60,28 @@ class PredictionTracker:
         if delta < -eps:
             return "DOWN"
         return "FLAT"
+
+    @staticmethod
+    def _alpha_metrics(
+        portfolio_return_pct: float,
+        benchmark_return_pct: float,
+        beta: float | None = None,
+    ) -> dict:
+        rp = PredictionTracker._to_float(portfolio_return_pct)
+        rm = PredictionTracker._to_float(benchmark_return_pct)
+        beta_used = PredictionTracker._to_float(beta, ALPHA_DEFAULT_BETA)
+        if not np.isfinite(beta_used) or abs(beta_used) < 1e-9:
+            beta_used = ALPHA_DEFAULT_BETA
+        beta_used = float(np.clip(beta_used, -5.0, 5.0))
+        rf_daily_pct = (ALPHA_RISK_FREE_ANNUAL / 252.0) * 100.0
+        return {
+            "simplified_alpha_pct": round(rp - rm, 6),
+            "capm_alpha_pct": round(
+                rp - (rf_daily_pct + beta_used * (rm - rf_daily_pct)), 6
+            ),
+            "beta_used": round(beta_used, 6),
+            "risk_free_daily_pct": round(rf_daily_pct, 6),
+        }
 
     @staticmethod
     def record_prediction(ticker: str, prediction_data: dict):
@@ -199,6 +225,10 @@ class PredictionTracker:
             ),
             "actual_return_pct": None,
             "alpha_pct": None,
+            "alpha_capm_pct": None,
+            "benchmark_return_pct": None,
+            "strategy_alpha_expected_pct": None,
+            "strategy_vs_actual_error_pct": None,
             "actual_direction": None,
             "direction_correct": None,
             "checked_at": None,
@@ -249,6 +279,41 @@ class PredictionTracker:
             )
             if data is None or data.empty:
                 return {"error": "Could not fetch actual prices"}
+
+            benchmark_return_pct = 0.0
+            try:
+                bench = yf.download(
+                    "^NSEI",
+                    start=start,
+                    end=end,
+                    interval="1d",
+                    progress=False,
+                    auto_adjust=True,
+                    threads=False,
+                )
+                if bench is not None and not bench.empty:
+                    open_vals = (
+                        bench["Open"].dropna()
+                        if "Open" in bench.columns
+                        else pd.Series(dtype=float)
+                    )
+                    close_vals = (
+                        bench["Close"].dropna()
+                        if "Close" in bench.columns
+                        else pd.Series(dtype=float)
+                    )
+                    if (
+                        not open_vals.empty
+                        and not close_vals.empty
+                        and float(open_vals.iloc[0]) > 0
+                    ):
+                        benchmark_return_pct = (
+                            (float(close_vals.iloc[0]) - float(open_vals.iloc[0]))
+                            / float(open_vals.iloc[0])
+                            * 100.0
+                        )
+            except Exception:
+                benchmark_return_pct = 0.0
 
             for ticker in tickers:
                 pred = predictions[ticker]
@@ -344,7 +409,18 @@ class PredictionTracker:
                         if open_price > 0 and ai_last_prediction > 0
                         else None
                     )
-                    alpha_pct = actual_return - strategy_return
+                    beta_val = PredictionTracker._to_float(
+                        pred.get("beta"), ALPHA_DEFAULT_BETA
+                    )
+                    alpha_actual = PredictionTracker._alpha_metrics(
+                        actual_return, benchmark_return_pct, beta=beta_val
+                    )
+                    alpha_strategy = PredictionTracker._alpha_metrics(
+                        strategy_return, benchmark_return_pct, beta=beta_val
+                    )
+                    alpha_pct = alpha_actual["simplified_alpha_pct"]
+                    alpha_capm_pct = alpha_actual["capm_alpha_pct"]
+                    strategy_error_pct = actual_return - strategy_return
                     direction_comparison = strategy_direction == actual_direction
                     direction_vs_actual = ai_direction == actual_direction
 
@@ -362,6 +438,12 @@ class PredictionTracker:
                         round(ai_return, 4) if ai_return is not None else None
                     )
                     pred["alpha_pct"] = round(alpha_pct, 4)
+                    pred["alpha_capm_pct"] = round(alpha_capm_pct, 4)
+                    pred["benchmark_return_pct"] = round(benchmark_return_pct, 4)
+                    pred["strategy_alpha_expected_pct"] = round(
+                        alpha_strategy["simplified_alpha_pct"], 4
+                    )
+                    pred["strategy_vs_actual_error_pct"] = round(strategy_error_pct, 4)
                     pred["actual_direction"] = actual_direction
                     pred["strategy_price_at_open"] = round(strategy_price_at_open, 2)
                     pred["open_price"] = round(open_price, 2)
@@ -391,6 +473,12 @@ class PredictionTracker:
                             round(ai_return, 4) if ai_return is not None else None
                         ),
                         "alpha_pct": round(alpha_pct, 4),
+                        "alpha_capm_pct": round(alpha_capm_pct, 4),
+                        "benchmark_return_pct": round(benchmark_return_pct, 4),
+                        "strategy_alpha_expected_pct": round(
+                            alpha_strategy["simplified_alpha_pct"], 4
+                        ),
+                        "strategy_vs_actual_error_pct": round(strategy_error_pct, 4),
                         "predicted_price": pred["predicted_price"],
                         "strategy_price_at_open": round(strategy_price_at_open, 2),
                         "ai_last_prediction": round(ai_last_prediction, 2),

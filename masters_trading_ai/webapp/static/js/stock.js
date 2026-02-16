@@ -804,6 +804,7 @@ async function loadPrediction(options = {}) {
 async function loadStrategyTradeLevels(options = {}) {
     const force = Boolean(options.force);
     const useLatestStored = Boolean(options.useLatestStored);
+    const riskNoteEl = document.getElementById('strategy-risk-note');
     try {
         const params = new URLSearchParams({
             force: force ? 'true' : 'false',
@@ -816,6 +817,7 @@ async function loadStrategyTradeLevels(options = {}) {
             document.getElementById('level-target').textContent = '—';
             document.getElementById('level-sl').textContent = '—';
             document.getElementById('level-rr').textContent = '—';
+            if (riskNoteEl) riskNoteEl.textContent = 'Strategy risk note unavailable right now.';
             return;
         }
         const current = Number(data.current_price || predictionData?.current_price || latestLivePrice || 0);
@@ -831,11 +833,26 @@ async function loadStrategyTradeLevels(options = {}) {
         document.getElementById('level-target').textContent = target > 0 ? `₹${formatN(target)}` : '—';
         document.getElementById('level-sl').textContent = stopLoss > 0 ? `₹${formatN(stopLoss)}` : '—';
         document.getElementById('level-rr').textContent = rr > 0 ? rr.toFixed(2) : '—';
+
+        if (riskNoteEl) {
+            if (entry > 0 && target > 0 && target < entry) {
+                riskNoteEl.textContent = stopLoss > 0
+                    ? `Strategy is defensive (possible downside). Consider stop-loss near ₹${formatN(stopLoss)} and size positions conservatively.`
+                    : 'Strategy is defensive (possible downside). Keep risk tight until trend confirms.';
+            } else if (entry > 0 && target > entry) {
+                riskNoteEl.textContent = stopLoss > 0
+                    ? `Strategy is bullish, but protect capital with stop-loss near ₹${formatN(stopLoss)} if market weakens.`
+                    : 'Strategy is bullish. Use a predefined stop-loss before entering.';
+            } else {
+                riskNoteEl.textContent = 'Strategy is neutral. Wait for stronger confirmation before increasing exposure.';
+            }
+        }
     } catch (_) {
         document.getElementById('level-entry').textContent = '—';
         document.getElementById('level-target').textContent = '—';
         document.getElementById('level-sl').textContent = '—';
         document.getElementById('level-rr').textContent = '—';
+        if (riskNoteEl) riskNoteEl.textContent = 'Strategy risk note unavailable right now.';
     }
 }
 

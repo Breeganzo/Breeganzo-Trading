@@ -1198,7 +1198,11 @@ class LivePredictor:
 
         buys = sorted(
             [r for r in results if str(r.get("signal", "")).upper() in buy_signals],
-            key=lambda x: x["_score"],
+            key=lambda x: (
+                x.get("confidence", 0),
+                x.get("predicted_return", 0),
+                x.get("_score", 0),
+            ),
             reverse=True,
         )[:top_n]
         sells = sorted(

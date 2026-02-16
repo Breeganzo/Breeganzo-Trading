@@ -90,13 +90,13 @@
         <!-- Top Picks section (hidden by default) -->
         <div class="top-picks-section hidden" id="top-picks-section">
             <h2 class="section-title">🎯 AI Top Picks</h2>
-            <p class="section-subtitle">ML model predictions ranked by composite score</p>
+            <p class="section-subtitle">BUY list ranked by strategy confidence first, then return. SELL/HOLD are limited to your portfolio tickers.</p>
             <div class="top-picks-controls">
                 <label for="top-picks-filter" class="pick-filter-label">Show:</label>
                 <select id="top-picks-filter" class="pick-filter-select" onchange="setTopPickFilter(this.value)">
-                    <option value="top_buy">Top 10 BUY</option>
-                    <option value="top_sell">Top 10 SELL</option>
-                    <option value="top_hold">Top 10 HOLD</option>
+                    <option value="top_buy">BUY Candidates</option>
+                    <option value="top_sell">Portfolio SELL</option>
+                    <option value="top_hold">Portfolio HOLD</option>
                 </select>
             </div>
             <div class="premarket-panels">

@@ -56,6 +56,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.inference.predictor import LivePredictor, get_market_status, get_intraday_data
 from src.tracking.prediction_logger import PredictionLogger
 from src.tracking.performance_reporter import PerformanceReporter
+from src.backtest.costs import GrowwCostCalculator
 
 from webapp.groq_explainer import (
     explain_fundamental,
@@ -163,6 +164,9 @@ _settings = _load_settings()
 _webapp_settings = (
     _settings.get("webapp", {}) if isinstance(_settings.get("webapp", {}), dict) else {}
 )
+_market_settings = (
+    _settings.get("market", {}) if isinstance(_settings.get("market", {}), dict) else {}
+)
 PREMARKET_MAX_BUFFER_MINUTES = int(
     os.environ.get(
         "PREMARKET_MAX_BUFFER_MINUTES",
@@ -222,6 +226,14 @@ MARKET_LOCK_END_MINUTE = int(
         _webapp_settings.get("market_lock_end_minute", 30),
     )
 )
+ALPHA_RISK_FREE_ANNUAL = float(
+    os.environ.get(
+        "ALPHA_RISK_FREE_ANNUAL", _market_settings.get("risk_free_rate", 0.0)
+    )
+)
+ALPHA_DEFAULT_BETA = float(
+    os.environ.get("ALPHA_DEFAULT_BETA", _market_settings.get("default_beta", 1.0))
+)
 
 # Thread-safe lock for file I/O
 _log_lock = threading.Lock()
@@ -244,6 +256,11 @@ models_load_completed_at: float | None = None
 _groq_forecast_cache: dict[str, dict] = {}
 _groq_forecast_cache_time: dict[str, float] = {}
 GROQ_FORECAST_TTL = 900  # 15m
+try:
+    _groww_cost_calculator = GrowwCostCalculator()
+except Exception as _cost_exc:
+    _groww_cost_calculator = None
+    log.warning("Groww transaction cost model unavailable: %s", _cost_exc)
 
 
 def _clean_name(ticker: str) -> str:
@@ -763,26 +780,74 @@ def _portfolio_summary_from_trades(
     trades: list[dict], include_live_prices: bool = True
 ) -> dict:
     positions: dict[str, dict] = {}
-    realized_total = 0.0
+    realized_gross_total = 0.0
+    realized_cost_total = 0.0
+    realized_intraday_cost_total = 0.0
+    realized_delivery_cost_total = 0.0
+
+    def _trade_day(ts: str) -> date | None:
+        try:
+            dt = datetime.fromisoformat(str(ts))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=IST)
+            return dt.astimezone(IST).date()
+        except Exception:
+            return None
 
     # FIFO lot accounting for accurate realized pnl
     lots: dict[str, list[dict]] = {}
-    for tr in trades:
+    ordered_trades = sorted(trades, key=lambda t: str(t.get("timestamp", "")))
+    for tr in ordered_trades:
         ticker = tr.get("ticker")
         side = str(tr.get("side", "BUY")).upper()
         qty = float(tr.get("quantity", 0) or 0)
         price = float(tr.get("price", 0) or 0)
+        trade_ts = str(tr.get("timestamp", "") or datetime.now(IST).isoformat())
+        trade_dt = _trade_day(trade_ts)
         if not ticker or qty <= 0 or price <= 0:
             continue
         lots.setdefault(ticker, [])
         if side == "BUY":
-            lots[ticker].append({"qty": qty, "price": price})
+            lots[ticker].append(
+                {
+                    "qty": qty,
+                    "price": price,
+                    "timestamp": trade_ts,
+                    "trade_date": trade_dt,
+                }
+            )
         elif side == "SELL":
             remaining = qty
             while remaining > 1e-9 and lots[ticker]:
                 lot = lots[ticker][0]
                 consume = min(remaining, lot["qty"])
-                realized_total += (price - lot["price"]) * consume
+                buy_value = float(lot["price"]) * consume
+                sell_value = float(price) * consume
+                gross_pnl = sell_value - buy_value
+                realized_gross_total += gross_pnl
+
+                trade_type = "equity_delivery"
+                lot_day = lot.get("trade_date")
+                if lot_day is not None and trade_dt is not None and lot_day == trade_dt:
+                    trade_type = "equity_intraday"
+
+                txn_cost = 0.0
+                if _groww_cost_calculator is not None:
+                    try:
+                        cost = _groww_cost_calculator.round_trip_cost(
+                            buy_value=buy_value,
+                            sell_value=sell_value,
+                            trade_type=trade_type,
+                        )
+                        txn_cost = float(cost.total)
+                    except Exception:
+                        txn_cost = 0.0
+                realized_cost_total += txn_cost
+                if trade_type == "equity_intraday":
+                    realized_intraday_cost_total += txn_cost
+                else:
+                    realized_delivery_cost_total += txn_cost
+
                 lot["qty"] -= consume
                 remaining -= consume
                 if lot["qty"] <= 1e-9:
@@ -822,14 +887,19 @@ def _portfolio_summary_from_trades(
         )
         unrealized_total += m2m - row["cost_value"]
 
+    realized_net_total = realized_gross_total - realized_cost_total
     return {
         "positions": sorted(
             positions.values(), key=lambda x: x["cost_value"], reverse=True
         ),
         "position_count": len(positions),
-        "realized_pnl": round(realized_total, 2),
+        "realized_pnl": round(realized_net_total, 2),
+        "realized_pnl_before_cost": round(realized_gross_total, 2),
+        "transaction_costs_total": round(realized_cost_total, 2),
+        "transaction_costs_intraday": round(realized_intraday_cost_total, 2),
+        "transaction_costs_delivery": round(realized_delivery_cost_total, 2),
         "unrealized_pnl": round(unrealized_total, 2),
-        "total_pnl": round(realized_total + unrealized_total, 2),
+        "total_pnl": round(realized_net_total + unrealized_total, 2),
     }
 
 
@@ -1002,6 +1072,92 @@ def _get_close_prices_for_date(tickers: list[str], date_str: str) -> dict[str, f
         log.warning(f"Date-close fetch failed for {date_str}: {e}")
 
     return prices
+
+
+def _compute_alpha_metrics(
+    portfolio_return_pct: float,
+    benchmark_return_pct: float,
+    *,
+    beta: float | None = None,
+    risk_free_annual: float | None = None,
+) -> dict[str, float]:
+    """
+    Compute both simplified and CAPM-style daily alpha (in percentage points).
+    """
+    rp = float(portfolio_return_pct or 0.0)
+    rm = float(benchmark_return_pct or 0.0)
+    beta_used = float(beta if beta is not None else ALPHA_DEFAULT_BETA)
+    if not np.isfinite(beta_used):
+        beta_used = ALPHA_DEFAULT_BETA
+    beta_used = float(np.clip(beta_used, -5.0, 5.0))
+
+    rf_annual = float(
+        risk_free_annual if risk_free_annual is not None else ALPHA_RISK_FREE_ANNUAL
+    )
+    if not np.isfinite(rf_annual):
+        rf_annual = 0.0
+    rf_daily_pct = (rf_annual / 252.0) * 100.0
+
+    simplified_alpha_pct = rp - rm
+    capm_alpha_pct = rp - (rf_daily_pct + beta_used * (rm - rf_daily_pct))
+    return {
+        "simplified_alpha_pct": float(round(simplified_alpha_pct, 6)),
+        "capm_alpha_pct": float(round(capm_alpha_pct, 6)),
+        "beta_used": float(round(beta_used, 6)),
+        "risk_free_daily_pct": float(round(rf_daily_pct, 6)),
+    }
+
+
+def _get_benchmark_return_pct(date_str: str, use_eod_close: bool) -> float:
+    """
+    Return benchmark daily return in percent for the requested view.
+    """
+    bench_ticker = str(_market_settings.get("benchmark_ticker", "^NSEI") or "^NSEI")
+
+    def _live_fallback() -> float:
+        live = _get_live_prices_batch([bench_ticker]).get(bench_ticker, {})
+        px = _safe_float(live.get("price"))
+        prev_close = _safe_float(live.get("prev_close"))
+        if px > 0 and prev_close > 0:
+            return (px - prev_close) / prev_close * 100.0
+        return 0.0
+
+    if not use_eod_close:
+        return _live_fallback()
+
+    try:
+        import yfinance as yf
+
+        day = datetime.strptime(date_str, "%Y-%m-%d").date()
+        start = day.strftime("%Y-%m-%d")
+        end = (day + timedelta(days=2)).strftime("%Y-%m-%d")
+        data = yf.download(
+            bench_ticker,
+            start=start,
+            end=end,
+            interval="1d",
+            progress=False,
+            auto_adjust=False,
+            threads=False,
+        )
+        if data is None or data.empty:
+            return _live_fallback()
+        open_col = data["Open"] if "Open" in data.columns else None
+        close_col = data["Close"] if "Close" in data.columns else None
+        if open_col is None or close_col is None:
+            return _live_fallback()
+        open_vals = open_col.dropna()
+        close_vals = close_col.dropna()
+        if open_vals.empty or close_vals.empty:
+            return _live_fallback()
+        open_px = float(open_vals.iloc[0])
+        close_px = float(close_vals.iloc[0])
+        if open_px <= 0:
+            return _live_fallback()
+        return (close_px - open_px) / open_px * 100.0
+    except Exception as exc:
+        log.debug("Benchmark return fetch failed for %s: %s", date_str, exc)
+        return _live_fallback()
 
 
 # ---------------------------------------------------------------------------
@@ -1245,26 +1401,69 @@ def api_top_picks():
         return jsonify({"error": "Models still loading..."}), 503
 
     sectors = request.args.getlist("sectors") or ["large_cap", "banking"]
-    top_n = int(request.args.get("n", 5))
+    top_n = int(request.args.get("n", 20))
     grouped = request.args.get("grouped", "").lower() in ("1", "true", "yes")
+    portfolio_tickers = {
+        str(row.get("ticker", "")).upper()
+        for row in _portfolio_summary_from_trades(
+            _read_portfolio_trades(), include_live_prices=False
+        ).get("positions", [])
+        if str(row.get("ticker", "")).strip()
+    }
+
+    def _enrich_pick(pick: dict) -> dict:
+        p = dict(pick)
+        ticker = str(p.get("ticker", "")).upper()
+        current_price = _safe_float(p.get("current_price"))
+        if current_price <= 0:
+            return p
+        p["name"] = ticker_names.get(ticker, _clean_name(ticker))
+        strategy_px = _safe_float(p.get("target_price") or p.get("predicted_price"))
+        if strategy_px <= 0 and current_price > 0:
+            pred_ret = _normalize_predicted_return_pct(p.get("predicted_return", 0))
+            strategy_px = round(current_price * (1 + pred_ret / 100.0), 2)
+        ai_meta = _resolve_ai_forecast_price(
+            ticker,
+            open_price=_safe_float(p.get("open_price")) or current_price,
+            strategy_price=strategy_px or current_price,
+            current_price=current_price,
+            allow_generate=bool(os.environ.get("GROQ_API_KEY")),
+        )
+        ai_px = _safe_float(ai_meta.get("price"))
+        p["target_price"] = round(strategy_px, 2) if strategy_px > 0 else None
+        p["ai_predicted_price"] = round(ai_px, 2) if ai_px > 0 else None
+        p["ai_source"] = ai_meta.get("source", "none")
+        return p
 
     try:
         if grouped:
             groups = predictor.predict_top_picks_grouped(sectors=sectors, top_n=top_n)
-            for group in groups.values():
-                for pick in group:
-                    if pick.get("current_price", 0) > 0:
-                        pick["name"] = ticker_names.get(pick.get("ticker", ""), "")
-            groups = {
-                key: [p for p in value if p.get("current_price", 0) > 0]
-                for key, value in groups.items()
+            cleaned_groups: dict[str, list[dict]] = {
+                "top_buy": [],
+                "top_sell": [],
+                "top_hold": [],
             }
+            for key in cleaned_groups:
+                raw_rows = groups.get(key, [])
+                rows = [
+                    _enrich_pick(p)
+                    for p in raw_rows
+                    if _safe_float(p.get("current_price")) > 0
+                ]
+                if key in {"top_sell", "top_hold"}:
+                    rows = [
+                        r
+                        for r in rows
+                        if str(r.get("ticker", "")).upper() in portfolio_tickers
+                    ]
+                cleaned_groups[key] = rows
+            groups = cleaned_groups
             return jsonify(groups)
 
         picks = predictor.predict_top_picks(sectors=sectors, top_n=top_n)
-        picks = [p for p in picks if p.get("current_price", 0) > 0]
-        for p in picks:
-            p["name"] = ticker_names.get(p.get("ticker", ""), "")
+        picks = [
+            _enrich_pick(p) for p in picks if _safe_float(p.get("current_price")) > 0
+        ]
         return jsonify(picks)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1412,13 +1611,8 @@ def api_expected_vs_actual():
         actuals = _get_live_prices_batch(tickers_to_check)
         actual_prices = {k: v.get("price", 0) for k, v in actuals.items()}
 
-    # Fetch benchmark (Nifty 50) return for alpha
-    benchmark_data = _get_live_prices_batch(["^NSEI"])
-    benchmark_return = 0.0
-    if "^NSEI" in benchmark_data:
-        bd = benchmark_data["^NSEI"]
-        if bd["prev_close"] > 0:
-            benchmark_return = (bd["price"] - bd["prev_close"]) / bd["prev_close"]
+    # Benchmark return for requested date/view (in %).
+    benchmark_return_pct = _get_benchmark_return_pct(date_str, use_eod_close)
 
     def _rescale_logged_price(raw_price: float, actual_price: float) -> float:
         """
@@ -1543,8 +1737,15 @@ def api_expected_vs_actual():
             actual_return_pct = 0.0
             strategy_return_pct = 0.0
             ai_return_pct = None
-        strategy_alpha_pct = actual_return_pct - strategy_return_pct
-        benchmark_alpha_pct = actual_return_pct - (benchmark_return * 100.0)
+        beta_val = _safe_float(
+            tracker_row.get("beta")
+            or (pred.get("fundamentals", {}) if isinstance(pred, dict) else {}).get(
+                "beta"
+            )
+            or ALPHA_DEFAULT_BETA
+        )
+        if not np.isfinite(beta_val) or abs(beta_val) < 1e-9:
+            beta_val = ALPHA_DEFAULT_BETA
 
         if "strategy_return_pct" in tracker_row:
             tracker_strategy_ret = _safe_float(
@@ -1563,7 +1764,17 @@ def api_expected_vs_actual():
             ai_return_pct = None
         elif ai_return_pct is not None and abs(ai_return_pct) > 200:
             ai_return_pct = None
-        strategy_alpha_pct = actual_return_pct - strategy_return_pct
+        strategy_error_pct = actual_return_pct - strategy_return_pct
+        actual_alpha = _compute_alpha_metrics(
+            actual_return_pct,
+            benchmark_return_pct,
+            beta=beta_val,
+        )
+        strategy_alpha = _compute_alpha_metrics(
+            strategy_return_pct,
+            benchmark_return_pct,
+            beta=beta_val,
+        )
 
         strategy_predicted_at_open = _normalize_open_window_timestamp(
             tracker_row.get("strategy_predicted_at_open")
@@ -1648,6 +1859,7 @@ def api_expected_vs_actual():
                     strategy_vs_actual_price_diff, 2
                 ),
                 "strategy_vs_actual_pct": round(strategy_vs_actual_pct, 3),
+                "strategy_vs_actual_error_pct": round(strategy_error_pct, 3),
                 "direction_predicted": pred_dir,
                 "direction_actual": actual_dir,
                 "strategy_direction_at_open": strategy_direction,
@@ -1672,8 +1884,18 @@ def api_expected_vs_actual():
                 "ai_last_prediction_at_display": _format_ist_timestamp(
                     ai_last_prediction_at
                 ),
-                "alpha_pct": round(strategy_alpha_pct, 3),
-                "benchmark_alpha_pct": round(benchmark_alpha_pct, 3),
+                "alpha_pct": round(actual_alpha["simplified_alpha_pct"], 3),
+                "alpha_capm_pct": round(actual_alpha["capm_alpha_pct"], 3),
+                "strategy_alpha_expected_pct": round(
+                    strategy_alpha["simplified_alpha_pct"], 3
+                ),
+                "strategy_alpha_expected_capm_pct": round(
+                    strategy_alpha["capm_alpha_pct"], 3
+                ),
+                "benchmark_alpha_pct": round(actual_alpha["simplified_alpha_pct"], 3),
+                "benchmark_return_pct": round(benchmark_return_pct, 3),
+                "beta_used": round(actual_alpha["beta_used"], 4),
+                "risk_free_daily_pct": round(actual_alpha["risk_free_daily_pct"], 4),
                 "confidence": pred.get("confidence", 50),
                 "checked_at": tracker_row.get("checked_at"),
                 "market_status": market_status,
@@ -1699,7 +1921,7 @@ def api_expected_vs_actual():
             "hit_rate_pct": round(hit_rate, 1),
             "avg_alpha_pct": round(avg_alpha, 3),
             "total_alpha_pct": round(total_alpha, 3),
-            "benchmark_return_pct": round(benchmark_return * 100, 3),
+            "benchmark_return_pct": round(benchmark_return_pct, 3),
             "avg_confidence": round(avg_confidence, 1),
             "schema_version": PredictionTracker.SCHEMA_VERSION,
             "market_status": market_status,
@@ -3199,7 +3421,7 @@ def api_price_tracker(ticker: str):
         open_price=float(open_price or 0),
         strategy_price=float(strategy_price_at_open or 0),
         current_price=float(current_price or 0),
-        allow_generate=False,
+        allow_generate=bool(os.environ.get("GROQ_API_KEY")),
     )
     ai_predicted_price = float(ai_meta_open.get("price") or 0)
     ai_available = ai_predicted_price > 0
@@ -3246,8 +3468,12 @@ def api_price_tracker(ticker: str):
     current_ai_predicted_at = (
         ai_meta_open.get("generated_at_iso")
         or pred.get("ai_last_prediction_at")
-        or (pred.get("timestamp") if ai_open_price > 0 else None)
-        or None
+        or (
+            ai_predicted_at_open
+            if (ai_open_price > 0 or ai_predicted_price > 0)
+            else pred.get("timestamp")
+        )
+        or datetime.now(IST).isoformat()
     )
 
     if open_price <= 0:
@@ -3269,7 +3495,7 @@ def api_price_tracker(ticker: str):
             open_price=float(open_price or 0),
             strategy_price=float(next_day_strategy_price or 0),
             current_price=float(current_price or 0),
-            allow_generate=False,
+            allow_generate=bool(os.environ.get("GROQ_API_KEY")),
         )
         next_day_ai_price = float(ai_meta_now.get("price") or 0)
         next_day_predicted_at = now_ist.isoformat()
@@ -3425,11 +3651,14 @@ def api_groq_price_forecast(ticker: str):
         return jsonify({"error": "Models still loading..."}), 503
 
     now = time.time()
-    if (
-        ticker in _groq_forecast_cache
-        and (now - _groq_forecast_cache_time.get(ticker, 0)) < GROQ_FORECAST_TTL
-    ):
-        return jsonify(_groq_forecast_cache[ticker])
+    cached_payload = _groq_forecast_cache.get(ticker)
+    cached_age = now - _groq_forecast_cache_time.get(ticker, 0)
+    if cached_payload and cached_age < GROQ_FORECAST_TTL:
+        cached_ai = _safe_float(cached_payload.get("ai_predicted_price"))
+        # Keep returning valid cached values, but do not pin an unavailable response
+        # when a Groq key is available for regeneration.
+        if cached_ai > 0 or not os.environ.get("GROQ_API_KEY"):
+            return jsonify(cached_payload)
 
     try:
         tracker = api_price_tracker(ticker)
