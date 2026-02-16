@@ -267,7 +267,8 @@ This codebase uses caching and hard limits to avoid Groq overuse:
 - UI explanation cache (`webapp/groq_explainer.py`): prompt cache + endpoint queue
 - strict limits: `GROQ_GLOBAL_MAX_PER_MIN` and `GROQ_ENDPOINT_MAX_PER_MIN`
 - multi-key failover: `GROQ_API_KEY` -> `GROQ_API_KEY_2` -> `GROQ_API_KEY_3` (or `GROQ_API_KEYS`)
-- round-robin controls: `GROQ_KEY_ROTATION_ENABLED` (no key cooldown blocking)
+- sticky-key behavior: keep using current key until it hits 429 exhaustion, then switch to next
+- controls: `GROQ_KEY_ROTATION_ENABLED`
 - model fallback chain: `GROQ_MODELS` (tries next model on same key before failing over key)
 - AI forecast cache (`webapp/server.py`): `GROQ_FORECAST_TTL=900s`
 - News-sentiment scoring cache (`src/inference/predictor.py`): `SENTIMENT_CACHE_TTL_SECONDS` (default 1800s)

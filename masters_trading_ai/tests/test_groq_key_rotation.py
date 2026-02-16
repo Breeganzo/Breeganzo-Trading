@@ -51,13 +51,20 @@ def test_groq_rotates_to_next_key_on_429(monkeypatch):
     out = ge._call_groq("rotation-test")
     assert out == "ok-from-key-2"
     assert ge._key_last_429_at.get(0, 0) > 0
+    assert ge._active_key_index == 1
+
+    # Sticky behavior: once key-1 is exhausted, next calls stay on key-2.
+    out2 = ge._call_groq("rotation-test-2")
+    assert out2 == "ok-from-key-2"
+    assert ge._active_key_index == 1
+
     status = ge.get_groq_system_status()
     assert status["degraded_mode"] is False
     assert status["key_pool_size"] == 2
     assert status["key_last_429"][0]["last_429_iso"] is not None
 
 
-def test_groq_round_robin_across_calls(monkeypatch):
+def test_groq_sticky_key_across_calls(monkeypatch):
     _reset_groq_state()
     monkeypatch.setattr(ge, "_get_cached", lambda _key: None)
     monkeypatch.setattr(ge, "_set_cache", lambda _key, _text: None)
@@ -78,10 +85,10 @@ def test_groq_round_robin_across_calls(monkeypatch):
 
     monkeypatch.setattr(ge, "_get_client_for_key", _client_for_key)
 
-    out1 = ge._call_groq("rotation-1")
-    out2 = ge._call_groq("rotation-2")
+    out1 = ge._call_groq("sticky-1")
+    out2 = ge._call_groq("sticky-2")
     assert out1 == "ok-key-1"
-    assert out2 == "ok-key-2"
+    assert out2 == "ok-key-1"
 
 
 def test_groq_falls_back_to_secondary_model_on_same_key(monkeypatch):

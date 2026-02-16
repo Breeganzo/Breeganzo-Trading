@@ -141,9 +141,8 @@ def _get_client_for_key(api_key: str):
         return None
 
 
-def _next_key_order() -> list[int]:
-    """Round-robin key order for each request (no cooldown gating)."""
-    global _active_key_index
+def _active_first_key_order() -> list[int]:
+    """Return active key first, then remaining keys for failover."""
     if not _groq_keys:
         return []
     n = len(_groq_keys)
@@ -152,7 +151,6 @@ def _next_key_order() -> list[int]:
 
     with _key_lock:
         start = _active_key_index % n
-        _active_key_index = (start + 1) % n
 
     return [(start + offset) % n for offset in range(n)]
 
@@ -311,7 +309,7 @@ def get_groq_system_status() -> dict:
 
 
 def _call_groq(prompt: str, max_tokens: int = 500) -> str:
-    """Call Groq API with queueing, key-rotation failover, and cache fallback."""
+    """Call Groq API with sticky-primary key and failover on exhaustion."""
     global _last_call_time, _last_success_at, _degraded_until, _degraded_reason
 
     key = _cache_key(prompt)
@@ -342,7 +340,8 @@ def _call_groq(prompt: str, max_tokens: int = 500) -> str:
 
         last_err = ""
         saw_429 = False
-        for idx in _next_key_order():
+        key_order = _active_first_key_order()
+        for order_pos, idx in enumerate(key_order):
             client = _get_client_for_key(_groq_keys[idx])
             if client is None:
                 continue
@@ -372,7 +371,7 @@ def _call_groq(prompt: str, max_tokens: int = 500) -> str:
                     _last_success_at = _last_call_time
                     _degraded_until = 0.0
                     _degraded_reason = ""
-                    _set_active_key((idx + 1) % len(_groq_keys))
+                    _set_active_key(idx)
                     text = resp.choices[0].message.content.strip()
                     _set_cache(key, text)
                     return text
@@ -389,6 +388,9 @@ def _call_groq(prompt: str, max_tokens: int = 500) -> str:
                     # Try next model for the same key before failing over keys.
                     continue
             if key_rate_limited and GROQ_KEY_ROTATION_ENABLED and len(_groq_keys) > 1:
+                # Promote next key only when current active key is exhausted (429).
+                if order_pos == 0:
+                    _set_active_key((idx + 1) % len(_groq_keys))
                 continue
 
         if saw_429:
