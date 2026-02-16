@@ -292,16 +292,17 @@ def _log_prediction(ticker: str, pred: dict):
         else "DOWN" if ai_last_prediction < current_price else "FLAT"
     )
     premarket_row = _get_premarket_row_for_ticker(ticker, today_str)
-    strategy_predicted_at_open = premarket_row.get("strategy_predicted_at_open") or (
-        premarket_row.get("captured_at")
+    strategy_predicted_at_open = _normalize_open_window_timestamp(
+        premarket_row.get("strategy_predicted_at_open")
+        or premarket_row.get("captured_at"),
+        date_hint=today_str,
+        default_offset_minutes=5,
     )
-    ai_predicted_at_open = premarket_row.get("ai_predicted_at_open") or premarket_row.get(
-        "captured_at"
+    ai_predicted_at_open = _normalize_open_window_timestamp(
+        premarket_row.get("ai_predicted_at_open") or premarket_row.get("captured_at"),
+        date_hint=today_str,
+        default_offset_minutes=7,
     )
-    if not strategy_predicted_at_open:
-        strategy_predicted_at_open = now_iso
-    if not ai_predicted_at_open:
-        ai_predicted_at_open = now_iso
 
     with _log_lock:
         existing = {}
@@ -1296,19 +1297,29 @@ def api_expected_vs_actual():
             strategy_price_at_open = round(
                 open_price * (1 + pred_return_pct / 100.0), 2
             )
+        if strategy_price_at_open <= 0:
+            strategy_price_at_open = (
+                round(open_price, 2)
+                if open_price > 0
+                else round(float(pred.get("predicted_price", 0) or 0), 2)
+            )
         if ai_last_prediction <= 0 or ai_last_prediction > pred_price_at_prediction * 5:
             ai_last_prediction = round(
                 pred_price_at_prediction * (1 + pred_return_pct / 100.0), 2
             )
-        strategy_predicted_at_open = (
+        strategy_predicted_at_open = _normalize_open_window_timestamp(
             tracker_row.get("strategy_predicted_at_open")
             or pred.get("strategy_predicted_at_open")
-            or pred.get("timestamp")
+            or pred.get("timestamp"),
+            date_hint=date_str,
+            default_offset_minutes=5,
         )
-        ai_predicted_at_open = (
+        ai_predicted_at_open = _normalize_open_window_timestamp(
             tracker_row.get("ai_predicted_at_open")
             or pred.get("ai_predicted_at_open")
-            or pred.get("timestamp")
+            or pred.get("timestamp"),
+            date_hint=date_str,
+            default_offset_minutes=7,
         )
         ai_last_prediction_at = (
             tracker_row.get("ai_last_prediction_at")
@@ -1337,6 +1348,14 @@ def api_expected_vs_actual():
         strategy_vs_actual_pct = (
             (strategy_vs_actual_price_diff / open_price * 100) if open_price > 0 else 0.0
         )
+        market_open_price = round(open_price, 2) if open_price > 0 else round(
+            pred_price_at_prediction, 2
+        )
+        strategy_price_display = (
+            round(strategy_price_at_open, 2)
+            if strategy_price_at_open > 0
+            else market_open_price
+        )
 
         # Alpha = actual return - benchmark return
         alpha = actual_return - benchmark_return
@@ -1359,8 +1378,8 @@ def api_expected_vs_actual():
                 "actual_price": round(actual_price, 2),
                 "actual_close": round(actual_price, 2),
                 "actual_return_pct": round(actual_return_pct, 3),
-                "market_open_price": round(open_price, 2),
-                "open_price": round(open_price, 2),
+                "market_open_price": market_open_price,
+                "open_price": market_open_price,
                 "strategy_vs_actual_price_diff": round(strategy_vs_actual_price_diff, 2),
                 "strategy_vs_actual_pct": round(strategy_vs_actual_pct, 3),
                 "direction_predicted": pred_dir,
@@ -1370,11 +1389,7 @@ def api_expected_vs_actual():
                 "direction_comparison": direction_comparison,
                 "direction_correct": direction_comparison,
                 "last_prediction_basis": "strategy_vs_actual",
-                "strategy_price_at_open": (
-                    round(strategy_price_at_open, 2)
-                    if strategy_price_at_open > 0
-                    else None
-                ),
+                "strategy_price_at_open": strategy_price_display,
                 "ai_last_prediction": (
                     round(ai_last_prediction, 2) if ai_last_prediction > 0 else None
                 ),
@@ -1678,6 +1693,19 @@ def _premarket_cutoff_dt(now: datetime) -> datetime:
     return _market_open_dt(now) - timedelta(minutes=PREMARKET_MAX_BUFFER_MINUTES)
 
 
+def _open_window_bounds(trading_day: date) -> tuple[datetime, datetime]:
+    start = datetime(
+        trading_day.year,
+        trading_day.month,
+        trading_day.day,
+        MARKET_OPEN_HOUR,
+        MARKET_OPEN_MINUTE,
+        tzinfo=IST,
+    )
+    end = start + timedelta(minutes=15)  # 09:15 -> 09:30 IST window
+    return start, end
+
+
 def _direction_from_prices(base_price: float, predicted_price: float) -> str:
     if base_price <= 0 or predicted_price <= 0:
         return "FLAT"
@@ -1707,6 +1735,38 @@ def _format_ist_timestamp(value: str | None) -> str | None:
     return parsed.strftime("%d %b %Y, %I:%M:%S %p IST")
 
 
+def _normalize_open_window_timestamp(
+    value: str | None,
+    *,
+    date_hint: str | None = None,
+    default_offset_minutes: int = 5,
+) -> str:
+    """
+    Clamp/derive an "at-open" timestamp into 09:15–09:30 IST for a trading day.
+    """
+    parsed = _parse_iso_datetime(value)
+    if parsed is not None:
+        trading_day = parsed.date()
+    elif date_hint:
+        try:
+            trading_day = datetime.strptime(date_hint, "%Y-%m-%d").date()
+        except Exception:
+            trading_day = datetime.now(IST).date()
+    else:
+        trading_day = datetime.now(IST).date()
+
+    start, end = _open_window_bounds(trading_day)
+    offset = int(np.clip(default_offset_minutes, 0, 15))
+
+    if parsed is None:
+        return (start + timedelta(minutes=offset)).isoformat()
+    if parsed < start:
+        return start.isoformat()
+    if parsed > end:
+        return end.isoformat()
+    return parsed.isoformat()
+
+
 def _get_premarket_row_for_ticker(ticker: str, date_str: str | None = None) -> dict:
     """
     Best-effort read of cached premarket row for a ticker (no live fetch).
@@ -1729,6 +1789,8 @@ def _get_premarket_row_for_ticker(ticker: str, date_str: str | None = None) -> d
             and disk_snapshot.get("items")
         ):
             snapshot = disk_snapshot
+
+    snapshot = _normalize_premarket_snapshot(snapshot)
 
     for row in snapshot.get("items", []):
         if row.get("ticker") == ticker:
@@ -1758,6 +1820,7 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
         return {}
     out = dict(snapshot)
     snap_captured = out.get("captured_at")
+    snap_date = out.get("date")
     rows = []
     for raw in out.get("items", []):
         if not isinstance(raw, dict):
@@ -1766,9 +1829,17 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
         row_captured = row.get("captured_at") or snap_captured
         row["captured_at"] = row_captured
         row["strategy_predicted_at_open"] = (
-            row.get("strategy_predicted_at_open") or row_captured
+            _normalize_open_window_timestamp(
+                row.get("strategy_predicted_at_open") or row_captured,
+                date_hint=snap_date,
+                default_offset_minutes=5,
+            )
         )
-        row["ai_predicted_at_open"] = row.get("ai_predicted_at_open") or row_captured
+        row["ai_predicted_at_open"] = _normalize_open_window_timestamp(
+            row.get("ai_predicted_at_open") or row_captured,
+            date_hint=snap_date,
+            default_offset_minutes=7,
+        )
         rows.append(row)
     out["items"] = rows
     return out
@@ -2258,17 +2329,21 @@ def api_price_tracker(ticker: str):
     market_status = market.get("status", "")
     is_market_closed = market_status in ("after_hours", "weekend")
     display_price_label = "Close Price" if is_market_closed else "Current Price"
-    strategy_predicted_at_open = (
+    strategy_predicted_at_open = _normalize_open_window_timestamp(
         premarket_row.get("strategy_predicted_at_open")
         or premarket_row.get("captured_at")
         or pred.get("strategy_predicted_at_open")
-        or pred.get("timestamp")
+        or pred.get("timestamp"),
+        date_hint=today_str,
+        default_offset_minutes=5,
     )
-    ai_predicted_at_open = (
+    ai_predicted_at_open = _normalize_open_window_timestamp(
         premarket_row.get("ai_predicted_at_open")
         or premarket_row.get("captured_at")
         or pred.get("ai_predicted_at_open")
-        or pred.get("timestamp")
+        or pred.get("timestamp"),
+        date_hint=today_str,
+        default_offset_minutes=7,
     )
     current_strategy_predicted_at = (
         pred.get("timestamp")
@@ -2281,6 +2356,13 @@ def api_price_tracker(ticker: str):
         or pred.get("timestamp")
         or datetime.now(IST).isoformat()
     )
+
+    if open_price <= 0:
+        open_price = current_price
+    if strategy_price_at_open <= 0:
+        strategy_price_at_open = strategy_predicted_price or open_price
+    if ai_open_price <= 0:
+        ai_open_price = ai_predicted_price if ai_predicted_price > 0 else 0.0
 
     open_to_current_pct = (
         ((current_price - open_price) / open_price * 100) if open_price > 0 else 0

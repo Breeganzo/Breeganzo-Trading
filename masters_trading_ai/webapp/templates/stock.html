@@ -57,6 +57,7 @@
     <!-- Price Tracker: Opening vs Predicted vs Current -->
     <div class="price-tracker-section" id="price-tracker">
         <h3 class="section-heading">📍 Price Tracker — Today's Journey</h3>
+        <p class="section-help-text">Tracks market-open price, open-time strategy/AI targets, and live updates so you can compare plan vs reality.</p>
         <div class="price-tracker-grid">
             <div class="price-tracker-card opening">
                 <div class="tracker-label">Opening Price</div>
@@ -173,6 +174,7 @@
     <!-- Performance stats (Groww-style) -->
     <div class="performance-section">
         <h3 class="section-heading">Performance</h3>
+        <p class="section-help-text">Shows intraday range and key quote stats from the live market feed for this ticker.</p>
         <div class="performance-bar">
             <div class="perf-label">Today's Low <span id="today-low">---</span></div>
             <div class="perf-range">
@@ -192,6 +194,7 @@
     <!-- ML Prediction section -->
     <div class="prediction-section" id="prediction-section">
         <h3 class="section-heading">🤖 AI Prediction <span class="pred-timestamp" id="pred-generated-at"></span></h3>
+        <p class="section-help-text">AI model output at request time: return %, target price, confidence, and model agreement with full feature breakdown.</p>
         <div class="prediction-loading" id="pred-loading">
             <div class="spinner"></div>
             <p>Running ML models...</p>
@@ -254,6 +257,7 @@
     <!-- Strategy Section -->
     <div class="strategy-section" id="strategy-section">
         <h3 class="section-heading">🧠 Strategy Analysis</h3>
+        <p class="section-help-text">Rule-based strategy view plus Groq narrative. Strategy values are derived from current indicators, fundamentals, and greeks.</p>
         <div class="strategy-content" id="strategy-content">
             <div class="strategy-card">
                 <div class="strategy-header prediction-strategy">
@@ -288,6 +292,7 @@
     <!-- Prediction Hit/Miss Tracking -->
     <div class="tracking-section" id="tracking-section">
         <h3 class="section-heading">🎯 Prediction Tracking</h3>
+        <p class="section-help-text">Daily scorecard: how many predictions were made, evaluated, and how often strategy direction matched actual market direction.</p>
         <div class="tracking-summary" id="tracking-summary">
             <p class="muted-text">Loading prediction outcomes...</p>
         </div>
@@ -297,6 +302,7 @@
     <!-- Expected vs Actual for this stock -->
     <div class="eva-stock-section">
         <h3 class="section-heading">📊 Expected vs Actual</h3>
+        <p class="section-help-text">Compares market-open price and strategy-at-open target against live/close price, then reports direction correctness and alpha.</p>
         <div id="stock-eva-content">
             <p class="muted-text">Prediction will be compared with actual close at end of day.</p>
         </div>
@@ -305,6 +311,7 @@
     <!-- Features Affecting Price -->
     <div class="feature-importance-section" id="feature-importance-section">
         <h3 class="section-heading">🔬 What's Affecting This Stock's Price</h3>
+        <p class="section-help-text">Top drivers behind the prediction ranked by feature influence from the ensemble models.</p>
         <p class="section-subtitle-sm">Key factors from ML models that influence the prediction</p>
         <div class="feature-list" id="feature-list">
             <div class="loading-spinner"><div class="spinner"></div><p>Analyzing key factors...</p></div>
@@ -314,6 +321,7 @@
     <!-- Stock Assistant -->
     <div class="strategy-section" id="stock-chat-section">
         <h3 class="section-heading">💬 Stock Assistant</h3>
+        <p class="section-help-text">Ask ticker-specific questions; responses use live prediction context, indicators, and current sentiment.</p>
         <div class="strategy-card">
             <div class="strategy-body">
                 <textarea id="stock-chat-input" placeholder="Ask: what does current RSI + MACD indicate?" style="width:100%;min-height:72px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;padding:10px;"></textarea>
@@ -328,6 +336,7 @@
     <!-- Real World News Section -->
     <div class="news-section" id="news-section">
         <h3 class="section-heading">📰 Real-World News & Sentiment</h3>
+        <p class="section-help-text">News and sentiment impact layer used to contextualize strategy and AI targets during the trading day.</p>
         <div class="news-content" id="news-content">
             <div class="loading-spinner"><div class="spinner"></div><p>Fetching latest news...</p></div>
         </div>

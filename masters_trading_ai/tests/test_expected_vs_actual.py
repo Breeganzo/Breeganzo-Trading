@@ -130,6 +130,8 @@ def test_api_expected_vs_actual_includes_training_fields(tmp_path: Path, monkeyp
     assert row["ai_last_prediction"] == 102.0
     assert row["actual_close"] == 103.0
     assert row["direction_comparison"] is True
+    pred_open_ts = datetime.fromisoformat(row["strategy_predicted_at_open"])
+    assert pred_open_ts.hour == 9 and 15 <= pred_open_ts.minute <= 30
 
 
 def test_api_expected_vs_actual_direction_uses_strategy_vs_open(

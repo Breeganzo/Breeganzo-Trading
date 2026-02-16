@@ -150,3 +150,7 @@ def test_api_price_tracker_includes_times_and_close_label(tmp_path, monkeypatch)
     assert payload["current_strategy_predicted_at"] is not None
     assert payload["current_ai_predicted_at"] is not None
     assert payload["close_price"] == 202.0
+    strategy_ts = datetime.fromisoformat(payload["strategy_predicted_at_open"])
+    ai_ts = datetime.fromisoformat(payload["ai_predicted_at_open"])
+    assert strategy_ts.hour == 9 and 15 <= strategy_ts.minute <= 30
+    assert ai_ts.hour == 9 and 15 <= ai_ts.minute <= 30

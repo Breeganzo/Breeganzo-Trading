@@ -90,6 +90,25 @@ function formatTimestamp(value) {
     return String(value);
 }
 
+function toNum(value, fallback = 0) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+}
+
+function istDateStrNow() {
+    return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+}
+
+function openWindowFallbackIso(dateStr = '', minute = 20) {
+    const day = dateStr || istDateStrNow();
+    const mm = String(Math.max(15, Math.min(30, minute))).padStart(2, '0');
+    return `${day}T09:${mm}:00+05:30`;
+}
+
+function formatOpenWindowTime(value, dateStr = '', minute = 20) {
+    return formatTimestamp(value || openWindowFallbackIso(dateStr, minute));
+}
+
 function moveMetricTooltip(evt) {
     const tip = document.getElementById('metric-tooltip');
     if (!tip || !evt) return;
@@ -691,9 +710,12 @@ async function loadStockEVA() {
         let html = '<div style="margin-top: 12px;">';
 
         if (trackerData && !trackerData.error) {
-            const openPx = Number(trackerData.open_price || 0);
-            const strategyOpenPx = Number(trackerData.strategy_predicted_price || trackerData.predicted_price || 0);
-            const currentPx = Number(trackerData.current_price || 0);
+            const openPx = toNum(trackerData.open_price || predictionData?.current_price, 0);
+            const strategyOpenPx = toNum(
+                trackerData.strategy_predicted_price || trackerData.predicted_price || predictionData?.predicted_price,
+                openPx
+            );
+            const currentPx = toNum(trackerData.current_price || predictionData?.current_price, 0);
             const label = trackerData.display_price_label || 'Current Price';
             const direction = strategyOpenPx > openPx ? 'UP' : strategyOpenPx < openPx ? 'DOWN' : 'FLAT';
 
@@ -707,7 +729,7 @@ async function loadStockEVA() {
                 <div class="pred-card">
                     <span class="pred-label">Strategy @ Open</span>
                     <span class="pred-value ${strategyOpenPx >= openPx ? 'up-color' : 'down-color'}">₹${formatN(strategyOpenPx)}</span>
-                    <span class="muted-text">${formatTimestamp(trackerData.strategy_predicted_at_open)}</span>
+                    <span class="muted-text">${formatOpenWindowTime(trackerData.strategy_predicted_at_open, istDateStrNow(), 20)}</span>
                 </div>
                 <div class="pred-card">
                     <span class="pred-label">${label}</span>
@@ -739,27 +761,34 @@ async function loadStockEVA() {
                         const closeLabel = latestDate === todayIst
                             ? (stockResult.actual_close ? 'Current / Close Price' : 'Current Price')
                             : 'Close Price';
+                        const openPx = toNum(stockResult.market_open_price ?? stockResult.open_price ?? predictionData?.current_price, 0);
+                        const strategyOpenPx = toNum(stockResult.strategy_price_at_open ?? stockResult.predicted_price ?? openPx, openPx);
+                        const actualClosePx = toNum(stockResult.actual_close ?? stockResult.actual_price ?? 0, 0);
+                        const diffPx = Number.isFinite(Number(stockResult.strategy_vs_actual_price_diff))
+                            ? Number(stockResult.strategy_vs_actual_price_diff)
+                            : (actualClosePx > 0 && strategyOpenPx > 0 ? actualClosePx - strategyOpenPx : 0);
+                        const alphaPct = toNum(stockResult.alpha_pct, 0);
                         html += `
                         <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
                             <h4 class="sub-heading">Last Prediction (${latestDate})</h4>
                             <div class="pred-grid">
                                 <div class="pred-card">
                                     <span class="pred-label">Market Open Price</span>
-                                    <span class="pred-value">₹${formatN(stockResult.market_open_price || stockResult.open_price)}</span>
+                                    <span class="pred-value">₹${formatN(openPx)}</span>
                                 </div>
                                 <div class="pred-card">
                                     <span class="pred-label">Strategy @ Open</span>
-                                    <span class="pred-value ${Number(stockResult.strategy_price_at_open || 0) >= Number(stockResult.market_open_price || stockResult.open_price || 0) ? 'up-color' : 'down-color'}">₹${formatN(stockResult.strategy_price_at_open)}</span>
-                                    <span class="muted-text">${formatTimestamp(stockResult.strategy_predicted_at_open)}</span>
+                                    <span class="pred-value ${strategyOpenPx >= openPx ? 'up-color' : 'down-color'}">₹${formatN(strategyOpenPx)}</span>
+                                    <span class="muted-text">${formatOpenWindowTime(stockResult.strategy_predicted_at_open, latestDate, 20)}</span>
                                 </div>
                                 <div class="pred-card">
                                     <span class="pred-label">${closeLabel}</span>
-                                    <span class="pred-value ${Number(stockResult.actual_close || 0) >= Number(stockResult.market_open_price || stockResult.open_price || 0) ? 'up-color' : 'down-color'}">₹${formatN(stockResult.actual_close)}</span>
+                                    <span class="pred-value ${actualClosePx >= openPx ? 'up-color' : 'down-color'}">₹${formatN(actualClosePx)}</span>
                                 </div>
                                 <div class="pred-card">
                                     <span class="pred-label">Actual vs Strategy Price</span>
-                                    <span class="pred-value ${Number(stockResult.strategy_vs_actual_price_diff || 0) >= 0 ? 'up-color' : 'down-color'}">
-                                        ${Number(stockResult.strategy_vs_actual_price_diff || 0) >= 0 ? '+' : ''}₹${formatN(stockResult.strategy_vs_actual_price_diff)}
+                                    <span class="pred-value ${diffPx >= 0 ? 'up-color' : 'down-color'}">
+                                        ${diffPx >= 0 ? '+' : ''}₹${formatN(diffPx)}
                                     </span>
                                 </div>
                                 <div class="pred-card">
@@ -768,8 +797,8 @@ async function loadStockEVA() {
                                 </div>
                                 <div class="pred-card">
                                     <span class="pred-label">Alpha Generated</span>
-                                    <span class="pred-value ${Number(stockResult.alpha_pct || 0) >= 0 ? 'up-color' : 'down-color'}">
-                                        ${Number(stockResult.alpha_pct || 0) >= 0 ? '+' : ''}${Number(stockResult.alpha_pct || 0).toFixed(3)}%
+                                    <span class="pred-value ${alphaPct >= 0 ? 'up-color' : 'down-color'}">
+                                        ${alphaPct >= 0 ? '+' : ''}${alphaPct.toFixed(3)}%
                                     </span>
                                 </div>
                             </div>
@@ -977,21 +1006,168 @@ async function explainGreek(name, value) {
     }
 }
 
+function classifyStrategyScore(score) {
+    if (score >= 1) return { cls: 'bullish', label: 'Bullish' };
+    if (score <= -1) return { cls: 'bearish', label: 'Bearish' };
+    return { cls: 'neutral', label: 'Neutral' };
+}
+
+function renderStrategyEvidenceCard(title, rows) {
+    if (!rows.length) {
+        return `
+        <div class="strategy-evidence-card">
+            <div class="strategy-evidence-title">${title}</div>
+            <div class="muted-text">Not enough live values.</div>
+        </div>`;
+    }
+    return `
+    <div class="strategy-evidence-card">
+        <div class="strategy-evidence-title">${title}</div>
+        ${rows.map((row) => {
+            const tag = classifyStrategyScore(row.score);
+            return `
+            <div class="strategy-evidence-row">
+                <span class="strategy-evidence-key">${row.key}</span>
+                <span class="strategy-evidence-value">${row.value}</span>
+                <span class="strategy-evidence-tag ${tag.cls}">${tag.label}</span>
+            </div>`;
+        }).join('')}
+    </div>`;
+}
+
+function buildStrategyEvidence(predData) {
+    const indicators = predData?.indicators || {};
+    const fundamentals = predData?.fundamentals || {};
+    const greeks = predData?.greeks || {};
+
+    const indicatorRows = [];
+    const rsi = toNum(indicators.rsi, NaN);
+    if (Number.isFinite(rsi)) {
+        const score = rsi < 35 ? 1 : rsi > 70 ? -1 : 0;
+        indicatorRows.push({ key: 'RSI (14)', value: rsi.toFixed(1), score });
+    }
+    const macd = toNum(indicators.macd, NaN);
+    const macdSignal = toNum(indicators.macd_signal, NaN);
+    if (Number.isFinite(macd) && Number.isFinite(macdSignal)) {
+        indicatorRows.push({
+            key: 'MACD vs Signal',
+            value: `${macd.toFixed(3)} / ${macdSignal.toFixed(3)}`,
+            score: macd > macdSignal ? 1 : -1,
+        });
+    }
+    const adx = toNum(indicators.adx, NaN);
+    if (Number.isFinite(adx)) {
+        indicatorRows.push({
+            key: 'ADX',
+            value: adx.toFixed(1),
+            score: adx >= 25 ? 1 : 0,
+        });
+    }
+    const volRatio = toNum(indicators.volume_ratio, NaN);
+    if (Number.isFinite(volRatio)) {
+        indicatorRows.push({
+            key: 'Volume Ratio',
+            value: `${volRatio.toFixed(2)}x`,
+            score: volRatio >= 1.2 ? 1 : volRatio < 0.8 ? -1 : 0,
+        });
+    }
+
+    const fundamentalRows = [];
+    const pe = toNum(fundamentals.pe_ratio, NaN);
+    if (Number.isFinite(pe)) {
+        fundamentalRows.push({
+            key: 'P/E Ratio',
+            value: pe.toFixed(2),
+            score: pe > 0 && pe <= 25 ? 1 : pe > 45 ? -1 : 0,
+        });
+    }
+    const roe = toNum(fundamentals.roe, NaN);
+    if (Number.isFinite(roe)) {
+        fundamentalRows.push({
+            key: 'ROE',
+            value: `${(roe * 100).toFixed(1)}%`,
+            score: roe >= 0.15 ? 1 : roe < 0.08 ? -1 : 0,
+        });
+    }
+    const debtToEquity = toNum(fundamentals.debt_to_equity, NaN);
+    if (Number.isFinite(debtToEquity)) {
+        fundamentalRows.push({
+            key: 'Debt / Equity',
+            value: debtToEquity.toFixed(2),
+            score: debtToEquity <= 1.0 ? 1 : debtToEquity >= 2.0 ? -1 : 0,
+        });
+    }
+    const earningsGrowth = toNum(fundamentals.earnings_growth, NaN);
+    if (Number.isFinite(earningsGrowth)) {
+        fundamentalRows.push({
+            key: 'Earnings Growth',
+            value: `${(earningsGrowth * 100).toFixed(1)}%`,
+            score: earningsGrowth > 0 ? 1 : -1,
+        });
+    }
+
+    const greekRows = [];
+    const delta = toNum(greeks.delta, NaN);
+    if (Number.isFinite(delta)) {
+        greekRows.push({
+            key: 'Delta',
+            value: delta.toFixed(3),
+            score: delta >= 0.55 ? 1 : delta <= 0.45 ? -1 : 0,
+        });
+    }
+    const gamma = toNum(greeks.gamma, NaN);
+    if (Number.isFinite(gamma)) {
+        greekRows.push({
+            key: 'Gamma',
+            value: gamma.toFixed(4),
+            score: gamma >= 0.03 ? 1 : 0,
+        });
+    }
+    const theta = toNum(greeks.theta, NaN);
+    if (Number.isFinite(theta)) {
+        greekRows.push({
+            key: 'Theta',
+            value: theta.toFixed(3),
+            score: theta >= 0 ? 0 : -1,
+        });
+    }
+    const iv = toNum(greeks.iv, NaN);
+    if (Number.isFinite(iv)) {
+        greekRows.push({
+            key: 'Implied Vol',
+            value: `${(iv * 100).toFixed(1)}%`,
+            score: iv <= 0.25 ? 1 : iv >= 0.45 ? -1 : 0,
+        });
+    }
+
+    return `
+    <div class="strategy-evidence">
+        <div class="strategy-evidence-grid">
+            ${renderStrategyEvidenceCard('Strategy Indicators', indicatorRows)}
+            ${renderStrategyEvidenceCard('Strategy Fundamentals', fundamentalRows)}
+            ${renderStrategyEvidenceCard('Strategy Greeks', greekRows)}
+        </div>
+    </div>`;
+}
+
 // ── Strategy Loading ──────────────────────────────
 async function loadStrategies(predData) {
     // ML Strategy — immediate (from prediction data)
     const mlEl = document.getElementById('ml-strategy');
     if (predData) {
         const signal = predData.signal || 'HOLD';
-        const ret = predData.predicted_return || 0;
-        const conf = predData.confidence || 50;
-        const agreement = predData.model_agreement || 0;
+        const ret = toNum(predData.predicted_return, 0);
+        const conf = toNum(predData.confidence, 50);
+        const agreement = toNum(predData.model_agreement, 0);
+        const strategyEvidence = buildStrategyEvidence(predData);
         mlEl.innerHTML = `
             <div class="strategy-signal ${signal}">${signal}</div>
             <p>Predicted return: <strong class="${ret >= 0 ? 'up-color' : 'down-color'}">${ret >= 0 ? '+' : ''}${ret.toFixed(3)}%</strong> 
                with ${conf.toFixed(0)}% confidence and ${agreement.toFixed(0)}% model agreement.</p>
             <p>Entry: ₹${formatN(predData.entry_price)} → Target: ₹${formatN(predData.target_price)} | SL: ₹${formatN(predData.stop_loss)}</p>
             <p>Risk:Reward = ${predData.risk_reward?.toFixed(1)}</p>
+            <p class="muted-text">Strategy evidence below uses live model inputs (indicators, fundamentals, and option greeks) with rule tags.</p>
+            ${strategyEvidence}
         `;
     }
 
@@ -1029,7 +1205,11 @@ async function loadTracking() {
         // Find this stock in today's tracking
         const stockPred = data.predictions?.find(p => p.ticker === TICKER);
 
-        let html = '<div class="tracking-cards">';
+        let html = `
+        <p class="section-help-text">
+            This table tracks how many strategy predictions were logged today, how many already had outcome data, and how often strategy direction matched actual market direction.
+        </p>
+        <div class="tracking-cards">`;
 
         // Overall summary
         html += `
@@ -1196,11 +1376,11 @@ async function loadPriceTracker() {
         }
         const strategyOpenTimeEl = document.getElementById('tracker-strategy-open-time');
         if (strategyOpenTimeEl) {
-            strategyOpenTimeEl.textContent = `Predicted: ${formatTimestamp(stock.strategy_predicted_at_open)}`;
+            strategyOpenTimeEl.textContent = `Predicted: ${formatOpenWindowTime(stock.strategy_predicted_at_open, istDateStrNow(), 20)}`;
         }
         const aiOpenTimeEl = document.getElementById('tracker-ai-open-time');
         if (aiOpenTimeEl) {
-            aiOpenTimeEl.textContent = `Predicted: ${formatTimestamp(stock.ai_predicted_at_open)}`;
+            aiOpenTimeEl.textContent = `Predicted: ${formatOpenWindowTime(stock.ai_predicted_at_open, istDateStrNow(), 22)}`;
         }
         const currentTimeEl = document.getElementById('tracker-current-time');
         if (currentTimeEl) {
