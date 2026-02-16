@@ -739,11 +739,24 @@ async function showTopPicks(evt = null) {
     updateTopPickFilterButtons();
 
     const grid = document.getElementById('picks-grid');
-    grid.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>Running ML predictions across all sectors... This may take 2-5 minutes.</p></div>';
+    grid.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>Loading Top Picks (cache-first)...</p></div>';
 
+    let timeoutId = null;
     try {
-        const res = await fetch('/api/top-picks?sectors=large_cap&sectors=banking&sectors=mid_cap&sectors=high_volatility&sectors=commodities&n=50&grouped=true');
+        const controller = new AbortController();
+        timeoutId = setTimeout(() => controller.abort(), 45000);
+        const res = await fetch(
+            '/api/top-picks?sectors=large_cap&sectors=banking&sectors=mid_cap&sectors=high_volatility&sectors=commodities&n=50&grouped=true&use_cached_analysis=true',
+            { signal: controller.signal }
+        );
         const data = await res.json();
+
+        if (res.status === 202 && data.status === 'warming') {
+            const waitSec = Number(data.retry_after_sec || 5);
+            grid.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>ML picks are warming up in background... retrying shortly.</p></div>';
+            setTimeout(() => showTopPicks(), Math.max(2, waitSec) * 1000);
+            return;
+        }
 
         if (data.error) {
             grid.innerHTML = `<div class="loading-spinner"><p>⚠️ ${data.error}</p></div>`;
@@ -765,7 +778,12 @@ async function showTopPicks(evt = null) {
             await refreshAdvisorSummary();
         }
     } catch (e) {
-        grid.innerHTML = `<div class="loading-spinner"><p>Error: ${e.message}</p></div>`;
+        const msg = e?.name === 'AbortError'
+            ? 'Top Picks request timed out. Please retry in a few seconds.'
+            : `Error: ${e.message}`;
+        grid.innerHTML = `<div class="loading-spinner"><p>${msg}</p></div>`;
+    } finally {
+        if (timeoutId) clearTimeout(timeoutId);
     }
 }
 
@@ -985,32 +1003,45 @@ async function loadCurrentSecondSnapshot() {
     if (label) label.textContent = ticker;
     try {
         const strategyUrl = `/api/strategy-price/${encodeURIComponent(ticker)}?use_latest_stored=${useLatestStoredPredictions ? 'true' : 'false'}`;
-        const aiUrl = `/api/groq-price-forecast/${encodeURIComponent(ticker)}`;
+        const trackerUrl = `/api/price-tracker/${encodeURIComponent(ticker)}`;
         const priceUrl = `/api/prices?tickers=${encodeURIComponent(ticker)}`;
-        const [strategyRes, aiRes, priceRes] = await Promise.all([
+        const [strategyRes, trackerRes, priceRes] = await Promise.all([
             fetch(strategyUrl),
-            fetch(aiUrl),
+            fetch(trackerUrl),
             fetch(priceUrl),
         ]);
         const strategyData = await strategyRes.json();
-        const aiData = await aiRes.json();
+        const trackerData = trackerRes.ok ? await trackerRes.json() : {};
         const priceData = await priceRes.json();
         if (!strategyRes.ok || strategyData.error) {
             body.innerHTML = `<tr><td colspan="4" class="muted-text">${strategyData.error || 'Strategy snapshot unavailable'}</td></tr>`;
             return;
         }
 
-        const current = Number(priceData?.[ticker]?.price || strategyData.current_price || aiData.current_price || 0);
+        const current = Number(
+            priceData?.[ticker]?.price
+            || trackerData.current_price
+            || strategyData.current_price
+            || 0
+        );
         const strategyNow = Number(strategyData.strategy_price || 0);
-        const aiNow = Number(aiData.ai_predicted_price || 0);
+        const aiNow = Number(
+            trackerData.current_ai_predicted_price
+            || trackerData.ai_predicted_price
+            || 0
+        );
         const strategyDir = strategyNow > current ? 'UP' : strategyNow < current ? 'DOWN' : 'FLAT';
-        const aiAvailable = aiRes.ok && !aiData.error && aiNow > 0;
+        const aiAvailable = aiNow > 0;
         const aiDir = aiAvailable ? (aiNow > current ? 'UP' : aiNow < current ? 'DOWN' : 'FLAT') : 'N/A';
         const aligned = aiAvailable ? strategyDir === aiDir : null;
         const badgeClass = aligned === null ? '' : (aligned ? 'correct' : 'wrong');
         const badgeText = aligned === null ? `${strategyDir}/N/A` : `${strategyDir}/${aiDir}`;
         const strategyTime = formatIstTimestamp(strategyData.strategy_generated_at);
-        const aiTime = formatIstTimestamp(aiData.generated_at_iso || aiData.generated_at);
+        const aiTime = formatIstTimestamp(
+            trackerData.current_ai_predicted_at
+            || trackerData.ai_display_predicted_at
+            || trackerData.ai_predicted_at_open
+        );
 
         body.innerHTML = `
             <tr>

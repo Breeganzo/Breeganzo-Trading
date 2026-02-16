@@ -691,15 +691,21 @@ async function loadPrediction(options = {}) {
     const useLatestStored = Boolean(options.useLatestStored);
 
     loading.classList.remove('hidden');
-    loading.innerHTML = '<div class="spinner"></div><p>Running ML models...</p>';
+    loading.innerHTML = '<div class="spinner"></div><p>Loading ML prediction (cache-first)...</p>';
     content.classList.add('hidden');
 
+    let timeoutId = null;
     try {
         const params = new URLSearchParams({
             force: force ? 'true' : 'false',
             use_latest_stored: useLatestStored ? 'true' : 'false',
         });
-        const res = await fetch(`/api/predict/${encodeURIComponent(TICKER)}?${params.toString()}`);
+        const controller = new AbortController();
+        timeoutId = setTimeout(() => controller.abort(), 20000);
+        const res = await fetch(
+            `/api/predict/${encodeURIComponent(TICKER)}?${params.toString()}`,
+            { signal: controller.signal }
+        );
 
         if (res.status === 503) {
             loading.innerHTML = '<div class="spinner"></div><p>Models still loading... will retry in 5s</p>';
@@ -849,7 +855,12 @@ async function loadPrediction(options = {}) {
         loadStockEVA();
 
     } catch (e) {
-        loading.innerHTML = `<p class="muted-text">⚠️ Prediction error: ${e.message}</p>`;
+        const message = e?.name === 'AbortError'
+            ? 'Prediction timed out. Using cached values, try refresh.'
+            : `Prediction error: ${e.message}`;
+        loading.innerHTML = `<p class="muted-text">⚠️ ${message}</p>`;
+    } finally {
+        if (timeoutId) clearTimeout(timeoutId);
     }
 }
 
@@ -1662,7 +1673,8 @@ async function loadPriceTracker() {
                     ? (stock.next_day_predicted_at || stock.current_strategy_predicted_at)
                     : (liveWindow
                         ? stock.current_strategy_predicted_at
-                        : stock.strategy_predicted_at_open));
+                        : stock.strategy_predicted_at_open))
+                || stock.current_snapshot_at;
             strategyOpenTimeEl.textContent = `Predicted: ${formatTimestamp(strategyDisplayTime)}`;
         }
         const aiOpenTimeEl = document.getElementById('tracker-ai-open-time');
@@ -1672,7 +1684,8 @@ async function loadPriceTracker() {
                     ? (stock.next_day_predicted_at || stock.current_ai_predicted_at)
                     : (liveWindow
                         ? stock.current_ai_predicted_at
-                        : stock.ai_predicted_at_open));
+                        : stock.ai_predicted_at_open))
+                || stock.current_snapshot_at;
             aiOpenTimeEl.textContent = `Predicted: ${formatTimestamp(aiDisplayTime)}`;
         }
         const currentTimeEl = document.getElementById('tracker-current-time');

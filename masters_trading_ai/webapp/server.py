@@ -162,7 +162,9 @@ SIMULATED_TRADE_LOG_FILE = PREDICTION_LOG_DIR / "simulated_trades.jsonl"
 DELISTED_TICKERS_FILE = CACHE_DIR / "delisted_tickers.csv"
 PREMARKET_OUTLOOK_FILE = CACHE_DIR / "premarket_outlook.json"
 PREDICTION_SNAPSHOTS_FILE = CACHE_DIR / "prediction_snapshots.json"
+GROQ_FORECAST_CACHE_FILE = CACHE_DIR / "groq_forecasts.json"
 SNAPSHOT_SCHEMA_VERSION = 1
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 PREDICTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
 SIMULATION_DEFAULT_CASH = float(os.environ.get("SIMULATION_DEFAULT_CASH", "40000"))
 SIMULATION_DEFAULT_CASH = max(1000.0, SIMULATION_DEFAULT_CASH)
@@ -324,6 +326,8 @@ models_load_started_at: float | None = None
 models_load_completed_at: float | None = None
 _groq_forecast_cache: dict[str, dict] = {}
 _groq_forecast_cache_time: dict[str, float] = {}
+_groq_forecast_cache_lock = threading.Lock()
+_groq_forecast_cache_loaded = False
 GROQ_FORECAST_TTL = 900  # 15m
 try:
     _groww_cost_calculator = GrowwCostCalculator()
@@ -1792,16 +1796,22 @@ def api_predict(ticker: str):
         "1",
         "yes",
     )
+    use_cache_arg = request.args.get("use_cache", "").lower()
+    use_cache = use_cache_arg in ("true", "1", "yes")
+    if use_cache_arg in ("false", "0", "no"):
+        use_cache = False
+    elif not force:
+        # Cache-first default for fast stock-page loads.
+        use_cache = True
+    if use_latest_stored and not force:
+        use_cache = True
     try:
         if force:
             try:
                 predictor.cache.invalidate(ticker)
             except Exception:
                 pass
-        # Default behavior is fresh inference. Stored cache is opt-in.
-        pred = predictor.predict_single(
-            ticker, use_cache=use_latest_stored and not force
-        )
+        pred = predictor.predict_single(ticker, use_cache=use_cache and not force)
         if pred is None:
             return jsonify({"error": f"Prediction failed for {ticker}"}), 404
 
@@ -1813,7 +1823,7 @@ def api_predict(ticker: str):
         pred["cache_policy"] = (
             "force_refresh"
             if force
-            else ("stored_cache" if use_latest_stored else "fresh_inference")
+            else ("cache_first" if use_cache else "fresh_inference")
         )
         return jsonify(pred)
     except Exception as e:
@@ -1836,6 +1846,14 @@ def api_strategy_price(ticker: str):
         "1",
         "yes",
     )
+    use_cache_arg = request.args.get("use_cache", "").lower()
+    use_cache = use_cache_arg in ("true", "1", "yes")
+    if use_cache_arg in ("false", "0", "no"):
+        use_cache = False
+    elif not force:
+        use_cache = True
+    if use_latest_stored and not force:
+        use_cache = True
     now = datetime.now(IST)
     window_type = _prediction_window_type(now)
     try:
@@ -1875,7 +1893,7 @@ def api_strategy_price(ticker: str):
 
         strategy = predictor.get_strategy_price(
             ticker,
-            use_cache=use_latest_stored and not force,
+            use_cache=use_cache and not force,
         )
         if not strategy:
             return jsonify({"error": f"Strategy price unavailable for {ticker}"}), 404
@@ -1885,7 +1903,7 @@ def api_strategy_price(ticker: str):
         strategy["cache_policy"] = (
             "force_refresh"
             if force
-            else ("stored_cache" if use_latest_stored else "fresh_inference")
+            else ("cache_first" if use_cache else "fresh_inference")
         )
         return jsonify(strategy)
     except Exception as exc:
@@ -2625,6 +2643,13 @@ def api_top_picks():
         top_n = 20
     top_n = max(1, min(top_n, 50))
     grouped = request.args.get("grouped", "").lower() in ("1", "true", "yes")
+    force = request.args.get("force", "").lower() in ("1", "true", "yes")
+    refresh_ai = request.args.get("refresh_ai", "").lower() in ("1", "true", "yes")
+    use_cached_analysis = (
+        request.args.get("use_cached_analysis", "false").lower() in ("1", "true", "yes")
+    )
+    ai_refresh_limit = max(0, int(os.environ.get("TOP_PICKS_AI_REFRESH_LIMIT", "6")))
+    ai_refresh_count = 0
     portfolio_tickers = {
         str(row.get("ticker", "")).upper()
         for row in _portfolio_summary_from_trades(
@@ -2634,6 +2659,7 @@ def api_top_picks():
     }
 
     def _enrich_pick(pick: dict) -> dict:
+        nonlocal ai_refresh_count
         p = dict(pick)
         ticker = str(p.get("ticker", "")).upper()
         current_price = _safe_float(p.get("current_price"))
@@ -2644,24 +2670,102 @@ def api_top_picks():
         if strategy_px <= 0 and current_price > 0:
             pred_ret = _normalize_predicted_return_pct(p.get("predicted_return", 0))
             strategy_px = round(current_price * (1 + pred_ret / 100.0), 2)
-        ai_meta = _resolve_ai_forecast_price(
-            ticker,
-            open_price=_safe_float(p.get("open_price")) or current_price,
-            strategy_price=strategy_px or current_price,
-            current_price=current_price,
-            allow_generate=bool(os.environ.get("GROQ_API_KEY")),
+        ai_px_existing = _safe_float(p.get("ai_predicted_price"))
+        ai_meta = {"source": str(p.get("ai_source", "none"))}
+        should_try_ai = ai_px_existing <= 0 or refresh_ai
+        allow_generate = (
+            refresh_ai
+            and ai_refresh_count < ai_refresh_limit
+            and bool(os.environ.get("GROQ_API_KEY"))
         )
-        ai_px = _safe_float(ai_meta.get("price"))
+        if should_try_ai:
+            ai_meta = _resolve_ai_forecast_price(
+                ticker,
+                open_price=_safe_float(p.get("open_price")) or current_price,
+                strategy_price=strategy_px or current_price,
+                current_price=current_price,
+                allow_generate=allow_generate,
+            )
+            if allow_generate:
+                ai_refresh_count += 1
+        ai_px = _safe_float(ai_meta.get("price")) if should_try_ai else ai_px_existing
+        if ai_px <= 0:
+            ai_px = ai_px_existing
         p["target_price"] = round(strategy_px, 2) if strategy_px > 0 else None
         p["ai_predicted_price"] = round(ai_px, 2) if ai_px > 0 else None
-        p["ai_source"] = ai_meta.get("source", "none")
+        p["ai_source"] = ai_meta.get("source", p.get("ai_source", "none"))
         p["source"] = "strategy"
         p["ai_value_source"] = "ai"
         return p
 
+    def _group_from_cached_analysis() -> dict[str, list[dict]] | None:
+        if not use_cached_analysis or force:
+            return None
+        with _daily_analysis_lock:
+            cached_rows = list((_daily_analysis_cache or {}).get("all_stocks", []))
+        if not cached_rows:
+            return None
+
+        allowed_tickers: set[str] | None = None
+        if sectors:
+            allowed_tickers = set()
+            for sec in sectors:
+                allowed_tickers.update(tickers_by_sector.get(sec, []))
+
+        rows = []
+        for row in cached_rows:
+            ticker = str(row.get("ticker", "")).upper()
+            if allowed_tickers is not None and ticker not in allowed_tickers:
+                continue
+            if _safe_float(row.get("current_price")) <= 0:
+                continue
+            r = dict(row)
+            if "_score" not in r:
+                r["_score"] = _safe_float(r.get("composite_score"))
+            rows.append(r)
+
+        def _rank_key(item: dict):
+            return (_safe_float(item.get("confidence")), _safe_float(item.get("_score")))
+
+        buys = sorted(
+            [r for r in rows if str(r.get("signal", "")).upper() == "BUY"],
+            key=_rank_key,
+            reverse=True,
+        )[:top_n]
+        sells = sorted(
+            [r for r in rows if str(r.get("signal", "")).upper() == "SELL"],
+            key=_rank_key,
+            reverse=True,
+        )[:top_n]
+        holds = sorted(
+            [r for r in rows if str(r.get("signal", "")).upper() == "HOLD"],
+            key=_rank_key,
+            reverse=True,
+        )[:top_n]
+        for r in buys:
+            r["pick_type"] = "BUY"
+        for r in sells:
+            r["pick_type"] = "SELL"
+        for r in holds:
+            r["pick_type"] = "HOLD"
+        return {"top_buy": buys, "top_sell": sells, "top_hold": holds}
+
     try:
         if grouped:
-            groups = predictor.predict_top_picks_grouped(sectors=sectors, top_n=top_n)
+            groups = _group_from_cached_analysis()
+            if use_cached_analysis and not force and not groups:
+                return (
+                    jsonify(
+                        {
+                            "status": "warming",
+                            "message": "Top picks are warming up in background. Please retry shortly.",
+                            "retry_after_sec": 5,
+                        }
+                    ),
+                    202,
+                )
+            if not groups:
+                groups = predictor.predict_top_picks_grouped(sectors=sectors, top_n=top_n)
             cleaned_groups: dict[str, list[dict]] = {
                 "top_buy": [],
                 "top_sell": [],
@@ -3963,7 +4067,7 @@ def _build_premarket_snapshot(tickers: list[str] | None = None) -> dict:
             open_price=open_price,
             strategy_price=strategy_price_at_open,
             current_price=current_price,
-            allow_generate=True,
+            allow_generate=False,
         )
         ai_predicted_price = _safe_float(ai_meta.get("price"))
         ai_direction = (
@@ -4138,6 +4242,92 @@ def _safe_float(value) -> float:
     return 0.0
 
 
+def _load_groq_forecast_cache() -> None:
+    """Load persisted Groq price-forecast cache once per process."""
+    global _groq_forecast_cache_loaded, _groq_forecast_cache, _groq_forecast_cache_time
+    with _groq_forecast_cache_lock:
+        if _groq_forecast_cache_loaded:
+            return
+        _groq_forecast_cache_loaded = True
+        if not GROQ_FORECAST_CACHE_FILE.exists():
+            return
+        try:
+            raw = json.loads(GROQ_FORECAST_CACHE_FILE.read_text())
+        except Exception as exc:
+            log.debug("Failed to read Groq forecast cache file: %s", exc)
+            return
+
+        if isinstance(raw, dict) and isinstance(raw.get("items"), dict):
+            items = raw.get("items", {})
+        elif isinstance(raw, dict):
+            # Backward compatibility with legacy map format.
+            items = raw
+        else:
+            items = {}
+
+        loaded_count = 0
+        now_ts = time.time()
+        for ticker, entry in items.items():
+            payload = None
+            cached_at = 0.0
+            if isinstance(entry, dict) and "payload" in entry:
+                payload = entry.get("payload")
+                cached_at = _safe_float(entry.get("cached_at"))
+            else:
+                payload = entry
+            if not isinstance(payload, dict):
+                continue
+            ai_price = _safe_float(payload.get("ai_predicted_price"))
+            if ai_price <= 0:
+                continue
+            if cached_at <= 0:
+                generated_at_iso = payload.get("generated_at_iso")
+                try:
+                    cached_at = datetime.fromisoformat(str(generated_at_iso)).timestamp()
+                except Exception:
+                    cached_at = now_ts
+            t = str(ticker or "").upper()
+            if not t:
+                continue
+            _groq_forecast_cache[t] = payload
+            _groq_forecast_cache_time[t] = cached_at
+            loaded_count += 1
+        if loaded_count:
+            log.info("Loaded %d cached Groq forecasts from disk", loaded_count)
+
+
+def _persist_groq_forecast_cache_unlocked() -> None:
+    items = {}
+    for ticker, payload in _groq_forecast_cache.items():
+        if not isinstance(payload, dict):
+            continue
+        items[ticker] = {
+            "payload": payload,
+            "cached_at": float(_groq_forecast_cache_time.get(ticker, time.time())),
+        }
+    data = {
+        "schema_version": 1,
+        "saved_at": datetime.now(IST).isoformat(),
+        "items": items,
+    }
+    GROQ_FORECAST_CACHE_FILE.write_text(json.dumps(data, indent=2, default=str))
+
+
+def _set_groq_forecast_cache_entry(ticker: str, payload: dict) -> None:
+    """Set in-memory + persisted Groq forecast cache for one ticker."""
+    _load_groq_forecast_cache()
+    t = str(ticker or "").upper()
+    if not t:
+        return
+    with _groq_forecast_cache_lock:
+        _groq_forecast_cache[t] = dict(payload)
+        _groq_forecast_cache_time[t] = time.time()
+        try:
+            _persist_groq_forecast_cache_unlocked()
+        except Exception as exc:
+            log.debug("Failed to persist Groq forecast cache for %s: %s", t, exc)
+
+
 def _get_recent_legit_news_context(ticker: str, max_items: int = 6) -> str:
     """
     Pull recent Yahoo Finance-linked headlines with publisher names.
@@ -4182,9 +4372,12 @@ def _get_recent_legit_news_context(ticker: str, max_items: int = 6) -> str:
 
 
 def _get_cached_ai_forecast_meta(ticker: str) -> dict:
+    _load_groq_forecast_cache()
     now = time.time()
-    cached = _groq_forecast_cache.get(ticker, {})
-    cached_at = _groq_forecast_cache_time.get(ticker, 0)
+    t = str(ticker or "").upper()
+    with _groq_forecast_cache_lock:
+        cached = _groq_forecast_cache.get(t, {})
+        cached_at = _groq_forecast_cache_time.get(t, 0)
     if not cached:
         return {
             "available": False,
@@ -4192,14 +4385,14 @@ def _get_cached_ai_forecast_meta(ticker: str) -> dict:
             "source": "none",
             "generated_at_iso": None,
         }
+    ai_price = _safe_float(cached.get("ai_predicted_price"))
     if (now - cached_at) >= GROQ_FORECAST_TTL:
         return {
-            "available": False,
-            "price": 0.0,
-            "source": "stale",
+            "available": ai_price > 0,
+            "price": round(ai_price, 2) if ai_price > 0 else 0.0,
+            "source": "stale_cache" if ai_price > 0 else "stale",
             "generated_at_iso": cached.get("generated_at_iso"),
         }
-    ai_price = _safe_float(cached.get("ai_predicted_price"))
     return {
         "available": ai_price > 0,
         "price": round(ai_price, 2) if ai_price > 0 else 0.0,
@@ -4301,8 +4494,7 @@ def _resolve_ai_forecast_price(
             "generated_at_iso": generated_at_iso,
             "generated_at": _format_ist_timestamp(generated_at_iso),
         }
-        _groq_forecast_cache[ticker] = payload
-        _groq_forecast_cache_time[ticker] = time.time()
+        _set_groq_forecast_cache_entry(ticker, payload)
         return {
             "available": True,
             "price": round(ai_price, 2),
@@ -4792,6 +4984,7 @@ def api_price_tracker(ticker: str):
     """
     if not models_loaded or predictor is None:
         return jsonify({"error": "Models still loading..."}), 503
+    refresh_ai = request.args.get("refresh_ai", "").lower() in ("true", "1", "yes")
 
     # Try cached prices first (from background analysis), then live fetch
     curr = _price_cache.get(ticker, {})
@@ -4846,7 +5039,8 @@ def api_price_tracker(ticker: str):
         open_price=float(open_price or 0),
         strategy_price=float(strategy_price_at_open or 0),
         current_price=float(current_price or 0),
-        allow_generate=bool(os.environ.get("GROQ_API_KEY")),
+        # Keep this endpoint lightweight; explicit AI refresh is optional.
+        allow_generate=refresh_ai and bool(os.environ.get("GROQ_API_KEY")),
     )
     ai_predicted_price = float(ai_meta_open.get("price") or 0)
     ai_available = ai_predicted_price > 0
@@ -4904,7 +5098,8 @@ def api_price_tracker(ticker: str):
     live_strategy_return = predicted_return
     if prediction_window == "after_hours_live":
         try:
-            live_pred = predictor.predict_single(ticker, use_cache=False) or {}
+            # Cache-first to prevent expensive model reruns on 3s polling.
+            live_pred = predictor.predict_single(ticker, use_cache=True) or {}
         except Exception:
             live_pred = {}
         live_strategy_return = _normalize_predicted_return_pct(
@@ -4946,13 +5141,12 @@ def api_price_tracker(ticker: str):
             open_price=float(open_price or 0),
             strategy_price=float(current_strategy_price or strategy_price_at_open or 0),
             current_price=float(current_price or 0),
-            allow_generate=bool(os.environ.get("GROQ_API_KEY")),
+            allow_generate=refresh_ai and bool(os.environ.get("GROQ_API_KEY")),
         )
     current_ai_price = float(ai_meta_live.get("price") or ai_open_price or 0)
     if prediction_window == "after_hours_live":
         current_ai_predicted_at = (
             ai_meta_live.get("generated_at_iso")
-            or current_ai_predicted_at
             or now_ist.isoformat()
         )
 
@@ -5161,15 +5355,27 @@ def api_groq_price_forecast(ticker: str):
     if not models_loaded or predictor is None:
         return jsonify({"error": "Models still loading..."}), 503
 
+    _load_groq_forecast_cache()
     now = time.time()
-    cached_payload = _groq_forecast_cache.get(ticker)
-    cached_age = now - _groq_forecast_cache_time.get(ticker, 0)
+    t = str(ticker or "").upper()
+    with _groq_forecast_cache_lock:
+        cached_payload = _groq_forecast_cache.get(t)
+        cached_age = now - _groq_forecast_cache_time.get(t, 0)
+    force = request.args.get("force", "").lower() in ("true", "1", "yes")
     if cached_payload and cached_age < GROQ_FORECAST_TTL:
         cached_ai = _safe_float(cached_payload.get("ai_predicted_price"))
         # Keep returning valid cached values, but do not pin an unavailable response
         # when a Groq key is available for regeneration.
         if cached_ai > 0 or not os.environ.get("GROQ_API_KEY"):
             return jsonify(cached_payload)
+    if cached_payload and not force:
+        cached_ai = _safe_float(cached_payload.get("ai_predicted_price"))
+        if cached_ai > 0:
+            stale_payload = dict(cached_payload)
+            stale_payload["ai_source"] = str(stale_payload.get("ai_source") or "groq")
+            stale_payload["ai_source"] = f"{stale_payload['ai_source']}:stale_cache"
+            stale_payload["stale"] = True
+            return jsonify(stale_payload)
 
     try:
         tracker = api_price_tracker(ticker)
@@ -5230,8 +5436,7 @@ def api_groq_price_forecast(ticker: str):
             "generated_at_iso": generated_at_iso,
             "generated_at": _format_ist_timestamp(generated_at_iso),
         }
-        _groq_forecast_cache[ticker] = payload
-        _groq_forecast_cache_time[ticker] = now
+        _set_groq_forecast_cache_entry(ticker, payload)
         return jsonify(payload)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
