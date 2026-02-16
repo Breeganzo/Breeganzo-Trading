@@ -19,6 +19,7 @@
         </div>
         <div class="nav-links" style="gap:12px;">
             <a href="/" class="nav-link">Dashboard</a>
+            <a href="/portfolio" class="nav-link">Portfolio</a>
             <a href="/risk" class="nav-link">Risk Analytics</a>
         </div>
         <div class="nav-status">
@@ -128,6 +129,20 @@
         <label><input type="checkbox" id="ind-sma20" onchange="toggleIndicator('sma20')"> SMA20</label>
         <label><input type="checkbox" id="ind-ema20" onchange="toggleIndicator('ema20')"> EMA20</label>
         <label><input type="checkbox" id="ind-vwap" onchange="toggleIndicator('vwap')"> VWAP</label>
+        <select id="indicator-preset" class="pick-filter-select" onchange="applyIndicatorPreset(this.value)">
+            <option value="custom">Indicators: Custom</option>
+            <option value="intraday">Preset: Intraday</option>
+            <option value="swing">Preset: Swing</option>
+            <option value="trend">Preset: Trend</option>
+        </select>
+    </div>
+    <div class="chart-controls draw-controls" style="margin-top:8px;">
+        <span class="muted-text">Draw:</span>
+        <button class="tf-btn" id="draw-trendline" onclick="setDrawMode('trendline')">Trendline</button>
+        <button class="tf-btn" id="draw-support" onclick="setDrawMode('support')">Support</button>
+        <button class="tf-btn" id="draw-resistance" onclick="setDrawMode('resistance')">Resistance</button>
+        <button class="tf-btn" onclick="clearDrawings()">Clear Drawings</button>
+        <span class="muted-text" id="draw-status">Click chart to draw.</span>
     </div>
 
     <!-- Price chart -->

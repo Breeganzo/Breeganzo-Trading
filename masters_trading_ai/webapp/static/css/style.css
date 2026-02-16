@@ -2340,3 +2340,26 @@ a:hover { text-decoration: underline; }
     .risk-header { padding: 16px; }
     .risk-dashboard { padding: 12px; }
 }
+
+/* ── Portfolio Page + Chart Draw Tools ─────────────────────── */
+.portfolio-toolbar {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+a.tf-btn {
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+}
+
+.draw-controls {
+    align-items: center;
+}
+
+#draw-status {
+    font-size: 12px;
+}

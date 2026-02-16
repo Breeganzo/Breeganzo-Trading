@@ -12,6 +12,9 @@ let autoRefreshInterval = null;
 let latestLivePrice = 0;
 let chartRecords = [];
 let indicatorSeries = {};
+let drawMode = null;
+let pendingDrawPoint = null;
+let drawingSeries = [];
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -103,6 +106,8 @@ function initChart() {
     window.addEventListener('resize', () => {
         chart.applyOptions({ width: container.clientWidth });
     });
+
+    chart.subscribeClick(handleChartClick);
 }
 
 function clearIndicatorSeries() {
@@ -172,6 +177,92 @@ function toggleIndicator() {
         s.setData(times.map((t, i) => ({ time: t, value: vwap[i] })));
         indicatorSeries.vwap = s;
     }
+}
+
+function applyIndicatorPreset(preset) {
+    const presets = {
+        custom: { sma20: false, ema20: false, vwap: false },
+        intraday: { sma20: true, ema20: true, vwap: true },
+        swing: { sma20: true, ema20: false, vwap: false },
+        trend: { sma20: true, ema20: true, vwap: false },
+    };
+    const sel = presets[preset] || presets.custom;
+    const m = {
+        sma20: document.getElementById('ind-sma20'),
+        ema20: document.getElementById('ind-ema20'),
+        vwap: document.getElementById('ind-vwap'),
+    };
+    if (m.sma20) m.sma20.checked = sel.sma20;
+    if (m.ema20) m.ema20.checked = sel.ema20;
+    if (m.vwap) m.vwap.checked = sel.vwap;
+    toggleIndicator();
+}
+
+function setDrawMode(mode) {
+    drawMode = mode;
+    pendingDrawPoint = null;
+    document.querySelectorAll('#draw-trendline, #draw-support, #draw-resistance')
+        .forEach(btn => btn?.classList.remove('active'));
+    const activeBtn = document.getElementById(`draw-${mode}`);
+    if (activeBtn) activeBtn.classList.add('active');
+    const status = document.getElementById('draw-status');
+    if (!status) return;
+    if (mode === 'trendline') status.textContent = 'Trendline: click 2 points on chart.';
+    if (mode === 'support') status.textContent = 'Support: click a price level.';
+    if (mode === 'resistance') status.textContent = 'Resistance: click a price level.';
+}
+
+function clearDrawings() {
+    for (const s of drawingSeries) {
+        try { chart.removeSeries(s); } catch (_) {}
+    }
+    drawingSeries = [];
+    pendingDrawPoint = null;
+    const status = document.getElementById('draw-status');
+    if (status) status.textContent = 'Drawings cleared.';
+}
+
+function handleChartClick(param) {
+    if (!drawMode || !param || !param.time) return;
+    let price = param.seriesData?.get?.(lineSeries)?.value;
+    if (price == null && chartRecords.length) {
+        // Fallback if direct series data is unavailable.
+        price = chartRecords[chartRecords.length - 1].close;
+    }
+    if (price == null) return;
+
+    if (drawMode === 'trendline') {
+        if (!pendingDrawPoint) {
+            pendingDrawPoint = { time: param.time, value: price };
+            const status = document.getElementById('draw-status');
+            if (status) status.textContent = 'Trendline: select second point.';
+            return;
+        }
+        const s = chart.addLineSeries({
+            color: '#00c2ff',
+            lineWidth: 2,
+            priceLineVisible: false,
+            lastValueVisible: false,
+        });
+        s.setData([pendingDrawPoint, { time: param.time, value: price }]);
+        drawingSeries.push(s);
+        pendingDrawPoint = null;
+    } else if (drawMode === 'support' || drawMode === 'resistance') {
+        if (!chartRecords.length) return;
+        const firstTime = chartRecords[0].time;
+        const lastTime = chartRecords[chartRecords.length - 1].time;
+        const s = chart.addLineSeries({
+            color: drawMode === 'support' ? '#2ecc71' : '#ff6b6b',
+            lineWidth: 2,
+            lineStyle: 2,
+            priceLineVisible: false,
+            lastValueVisible: false,
+        });
+        s.setData([{ time: firstTime, value: price }, { time: lastTime, value: price }]);
+        drawingSeries.push(s);
+    }
+    const status = document.getElementById('draw-status');
+    if (status) status.textContent = 'Drawing added.';
 }
 
 async function loadChartData(period, interval) {

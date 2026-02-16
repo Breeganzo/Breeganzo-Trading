@@ -11,9 +11,11 @@ Open: http://localhost:5001
 import sys
 import os
 import json
+import csv
 import time
 import logging
 import threading
+from io import StringIO
 from pathlib import Path
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
@@ -37,7 +39,7 @@ for _key, _msg in _OPTIONAL_ENV.items():
 # ── CRITICAL: import torch FIRST to avoid segfault with statsmodels C extensions ──
 import torch  # noqa: F401
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, make_response
 from flask_cors import CORS
 import numpy as np
 import pandas as pd
@@ -475,6 +477,12 @@ def stock_detail(ticker: str):
     """Individual stock detail page with live chart and predictions."""
     name = ticker_names.get(ticker, _clean_name(ticker))
     return render_template("stock.html", ticker=ticker, name=name)
+
+
+@app.route("/portfolio")
+def portfolio_page():
+    """Portfolio page with positions and full trade ledger."""
+    return render_template("portfolio.html")
 
 
 # ---------------------------------------------------------------------------
@@ -1497,6 +1505,49 @@ def api_portfolio_summary():
             summary["strategy_suggestion"] = f"Suggestion unavailable: {e}"
     summary["trade_count"] = len(trades)
     return jsonify(summary)
+
+
+@app.route("/api/portfolio/trades")
+def api_portfolio_trades():
+    """Return full trade history."""
+    ticker = request.args.get("ticker", "").strip().upper()
+    limit = request.args.get("limit")
+    trades = _read_portfolio_trades()
+    if ticker:
+        trades = [t for t in trades if str(t.get("ticker", "")).upper() == ticker]
+    trades = sorted(trades, key=lambda x: x.get("timestamp", ""), reverse=True)
+    if limit:
+        try:
+            n = max(1, int(limit))
+            trades = trades[:n]
+        except ValueError:
+            pass
+    return jsonify({"trades": trades, "count": len(trades)})
+
+
+@app.route("/api/portfolio/export.csv")
+def api_portfolio_export_csv():
+    """Export trade ledger as CSV."""
+    trades = sorted(_read_portfolio_trades(), key=lambda x: x.get("timestamp", ""))
+    out = StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["timestamp", "ticker", "name", "side", "quantity", "price", "notional"])
+    for tr in trades:
+        qty = float(tr.get("quantity", 0) or 0)
+        price = float(tr.get("price", 0) or 0)
+        writer.writerow([
+            tr.get("timestamp", ""),
+            tr.get("ticker", ""),
+            tr.get("name", ""),
+            tr.get("side", ""),
+            round(qty, 4),
+            round(price, 2),
+            round(qty * price, 2),
+        ])
+    resp = make_response(out.getvalue())
+    resp.headers["Content-Type"] = "text/csv; charset=utf-8"
+    resp.headers["Content-Disposition"] = "attachment; filename=portfolio_trades.csv"
+    return resp
 
 
 @app.route("/api/explain-model")

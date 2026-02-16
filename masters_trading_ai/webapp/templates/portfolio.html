@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Portfolio — Masters AI Trading Bot</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <span class="logo">📈</span>
+            <span class="brand-name">Masters AI Trading</span>
+        </div>
+        <div class="nav-links">
+            <a href="/" class="nav-link">Dashboard</a>
+            <a href="/portfolio" class="nav-link active">Portfolio</a>
+            <a href="/risk" class="nav-link">Risk Analytics</a>
+        </div>
+        <div class="nav-status">
+            <span id="market-status" class="status-badge"></span>
+        </div>
+    </nav>
+
+    <div class="risk-header">
+        <h1>Portfolio Ledger</h1>
+        <p class="risk-subtitle">Open positions, realized/unrealized P&L, and complete buy/sell trade history.</p>
+    </div>
+
+    <main class="main-content">
+        <section class="risk-section">
+            <div class="portfolio-toolbar">
+                <button class="tf-btn active" onclick="refreshPortfolioPage()">Refresh</button>
+                <a class="tf-btn" href="/api/portfolio/export.csv">Export Trades CSV</a>
+            </div>
+            <div class="summary-cards" id="portfolio-summary-cards"></div>
+        </section>
+
+        <section class="risk-section">
+            <h2 class="section-title">Open Positions</h2>
+            <div class="eva-table-container" id="portfolio-holdings-table"></div>
+        </section>
+
+        <section class="risk-section">
+            <h2 class="section-title">Trade History</h2>
+            <div class="eva-table-container" id="portfolio-trades-table"></div>
+        </section>
+    </main>
+
+    <script src="/static/js/portfolio.js"></script>
+</body>
+</html>
