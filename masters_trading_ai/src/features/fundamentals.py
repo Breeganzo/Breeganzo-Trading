@@ -249,7 +249,7 @@ class FundamentalAnalyzer:
             "target_price": data.get("Target_Price"),
             "fifty_two_high": data.get("FiftyTwo_Week_High"),
             "fifty_two_low": data.get("FiftyTwo_Week_Low"),
-            "analyst_upside": round(upside, 2),
+            "analyst_upside": None if pd.isna(upside) else round(upside, 2),
             "value_score": round(value_score, 1),
             "quality_score": round(quality_score, 1),
             "growth_score": round(growth_score, 1),

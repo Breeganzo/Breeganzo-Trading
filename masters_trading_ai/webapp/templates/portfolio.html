@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Portfolio — Masters AI Trading Bot</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <span class="logo">📈</span>
+            <a href="/" class="brand-name">Masters AI Trading</a>
+        </div>
+        <div class="nav-links">
+            <a href="/" class="nav-link">Dashboard</a>
+            <a href="/portfolio" class="nav-link active">Portfolio</a>
+            <a href="/risk" class="nav-link">Risk Analytics</a>
+            <a href="/ai-risk" class="nav-link">AI Risk Analysis</a>
+        </div>
+        <div class="nav-status">
+            <span id="market-status" class="status-badge"></span>
+        </div>
+    </nav>
+
+    <div class="risk-header">
+        <h1>Portfolio Ledger</h1>
+        <p class="risk-subtitle">Open positions, realized/unrealized P&L, and complete buy/sell trade history.</p>
+    </div>
+
+    <main class="main-content">
+        <section class="risk-section">
+            <div class="portfolio-toolbar">
+                <button class="tf-btn active" onclick="refreshPortfolioPage()">Refresh</button>
+                <button class="tf-btn" onclick="cleanInvalidPortfolioRows()">Remove Dummy/Invalid</button>
+                <button class="tf-btn" onclick="clearEntirePortfolio()">Clear Entire Portfolio</button>
+                <a class="tf-btn" href="/api/portfolio/export.csv">Export Trades CSV</a>
+            </div>
+            <div id="portfolio-toolbar-status" class="muted-text"></div>
+            <div class="summary-cards" id="portfolio-summary-cards"></div>
+        </section>
+
+        <section class="risk-section">
+            <h2 class="section-title">Groq Ticker Advisor</h2>
+            <div class="portfolio-toolbar">
+                <button class="tf-btn" onclick="loadGroqTickerSuggestions()">Load Suggestions</button>
+                <select id="groq-ticker-select" class="pick-filter-select"></select>
+                <input id="groq-entry-price" class="portfolio-qty-input" type="number" min="0" step="0.01" placeholder="Entry Price">
+                <input id="groq-entry-qty" class="portfolio-qty-input" type="number" min="1" step="1" value="1" placeholder="Qty">
+                <button class="tf-btn" onclick="reviewGroqTradePlan()">Review My Trade Plan</button>
+            </div>
+            <div id="groq-suggestions-output" class="muted-text"></div>
+            <div id="groq-review-output" class="muted-text" style="margin-top:10px;"></div>
+        </section>
+
+        <section class="risk-section">
+            <h2 class="section-title">Open Positions</h2>
+            <div class="eva-table-container" id="portfolio-holdings-table"></div>
+        </section>
+
+        <section class="risk-section">
+            <h2 class="section-title">Trade History</h2>
+            <div class="eva-table-container" id="portfolio-trades-table"></div>
+        </section>
+    </main>
+
+    <script src="/static/js/portfolio.js"></script>
+</body>
+</html>

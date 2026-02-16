@@ -96,6 +96,7 @@ class FeaturePipeline:
         # Step 5: Rolling z-score normalisation (using ONLY past data)
         # This normalises each feature by its own rolling mean and std
         normalised_cols = []
+        zscore_features: dict[str, pd.Series] = {}
         for col in feature_cols:
             if df[col].dtype in [np.float64, np.float32, np.int64, np.int32]:
                 # Skip binary/categorical features
@@ -107,8 +108,11 @@ class FeaturePipeline:
                 roll_std = df[col].rolling(
                     window=self.zscore_window, min_periods=60
                 ).std()
-                df[f"{col}_zscore"] = (df[col] - roll_mean) / (roll_std + 1e-10)
-                normalised_cols.append(f"{col}_zscore")
+                feat_name = f"{col}_zscore"
+                zscore_features[feat_name] = (df[col] - roll_mean) / (roll_std + 1e-10)
+                normalised_cols.append(feat_name)
+        if zscore_features:
+            df = pd.concat([df, pd.DataFrame(zscore_features, index=df.index)], axis=1)
 
         # Step 6: Add lagged features (for key indicators)
         key_features = [
@@ -117,10 +121,13 @@ class FeaturePipeline:
             "Mean_Reversion_Score", "Momentum_Quality", "ADX_Smooth_14",
             "Hurst_20", "Efficiency_Ratio",
         ]
+        lag_features: dict[str, pd.Series] = {}
         for col in key_features:
             if col in df.columns:
                 for lag in self.lag_periods:
-                    df[f"{col}_lag{lag}"] = df[col].shift(lag)
+                    lag_features[f"{col}_lag{lag}"] = df[col].shift(lag)
+        if lag_features:
+            df = pd.concat([df, pd.DataFrame(lag_features, index=df.index)], axis=1)
 
         # Step 7: Drop warmup rows (first N rows have NaN from rolling calcs)
         df = df.iloc[self.min_warmup:]

@@ -67,3 +67,8 @@ horizons:
   - 5    # 1 week
   - 10   # 2 weeks
   - 20   # 1 month
+
+# --- Web App Runtime ---
+webapp:
+  premarket_max_buffer_minutes: 30   # Snapshot must be captured no later than market open - 30m
+  premarket_default_tickers: 10      # Number of large-cap rows in premarket dashboard table

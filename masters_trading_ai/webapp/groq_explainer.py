@@ -12,6 +12,8 @@ import os
 import json
 import time
 import hashlib
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +31,7 @@ except ImportError:
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 if not GROQ_API_KEY:
     import warnings
+
     warnings.warn(
         "GROQ_API_KEY not set in .env — AI explanations will be unavailable. "
         "Get a key at https://console.groq.com/keys",
@@ -57,6 +60,29 @@ def _cache_key(prompt: str) -> str:
     return hashlib.md5(prompt.encode()).hexdigest()
 
 
+def _normalize_explanation_text(
+    text: str,
+    *,
+    max_chars: int = 2600,
+    max_sections: int = 12,
+) -> str:
+    """Clip and normalize long LLM output so UI popovers stay readable."""
+    if not isinstance(text, str):
+        return str(text)
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    sections = [s.strip() for s in cleaned.split("\n\n") if s.strip()]
+    if len(sections) > max_sections:
+        cleaned = (
+            "\n\n".join(sections[:max_sections])
+            + "\n\n[Truncated to keep explanation readable in-app.]"
+        )
+    if len(cleaned) > max_chars:
+        clipped = cleaned[:max_chars].rsplit(" ", 1)[0]
+        cleaned = f"{clipped} ... [Truncated]"
+    return cleaned
+
+
 def _get_cached(key: str) -> Optional[str]:
     path = CACHE_DIR / f"{key}.json"
     if path.exists():
@@ -64,7 +90,7 @@ def _get_cached(key: str) -> Optional[str]:
             data = json.loads(path.read_text())
             # Cache valid for 24 hours
             if time.time() - data.get("ts", 0) < 86400:
-                return data["text"]
+                return _normalize_explanation_text(data["text"])
         except Exception:
             pass
     return None
@@ -72,7 +98,9 @@ def _get_cached(key: str) -> Optional[str]:
 
 def _set_cache(key: str, text: str):
     path = CACHE_DIR / f"{key}.json"
-    path.write_text(json.dumps({"text": text, "ts": time.time()}))
+    path.write_text(
+        json.dumps({"text": _normalize_explanation_text(text), "ts": time.time()})
+    )
 
 
 def _call_groq(prompt: str, max_tokens: int = 500) -> str:
@@ -86,7 +114,9 @@ def _call_groq(prompt: str, max_tokens: int = 500) -> str:
 
     client = _get_client()
     if client is None:
-        return "Groq API not available. Install: pip install groq"
+        return _normalize_explanation_text(
+            "Groq API not available. Install: pip install groq"
+        )
 
     # Rate limit
     elapsed = time.time() - _last_call_time
@@ -115,17 +145,21 @@ def _call_groq(prompt: str, max_tokens: int = 500) -> str:
         )
         _last_call_time = time.time()
         text = resp.choices[0].message.content.strip()
+        text = _normalize_explanation_text(text)
         _set_cache(key, text)
         return text
     except Exception as e:
-        return f"Groq API error: {str(e)}"
+        return _normalize_explanation_text(f"Groq API error: {str(e)}")
 
 
 # ════════════════════════════════════════════════════
 # Public API — Called from Flask routes
 # ════════════════════════════════════════════════════
 
-def explain_fundamental(metric_name: str, value, ticker: str = "", stock_name: str = "") -> str:
+
+def explain_fundamental(
+    metric_name: str, value, ticker: str = "", stock_name: str = ""
+) -> str:
     """Explain a fundamental metric (PE ratio, ROE, etc.) with current value context."""
     stock_ctx = f" for {stock_name} ({ticker})" if ticker else ""
     prompt = (
@@ -138,8 +172,13 @@ def explain_fundamental(metric_name: str, value, ticker: str = "", stock_name: s
     return _call_groq(prompt)
 
 
-def explain_greek(greek_name: str, value: float, option_type: str = "call",
-                  ticker: str = "", stock_name: str = "") -> str:
+def explain_greek(
+    greek_name: str,
+    value: float,
+    option_type: str = "call",
+    ticker: str = "",
+    stock_name: str = "",
+) -> str:
     """Explain an option Greek and what its current value means for trading."""
     stock_ctx = f" for {stock_name} ({ticker})" if ticker else ""
     prompt = (
@@ -158,56 +197,61 @@ INDICATOR_THRESHOLDS = {
         "buy_below": 30,
         "sell_above": 70,
         "desc": "RSI (Relative Strength Index) measures momentum on a 0-100 scale.",
-        "interpretation": "Below 30 = oversold (potential buy), Above 70 = overbought (potential sell)"
+        "interpretation": "Below 30 = oversold (potential buy), Above 70 = overbought (potential sell)",
     },
     "MACD": {
         "buy_condition": "MACD crosses above signal line",
         "sell_condition": "MACD crosses below signal line",
         "desc": "MACD shows momentum by comparing two moving averages.",
-        "interpretation": "Positive = bullish momentum, Negative = bearish momentum"
+        "interpretation": "Positive = bullish momentum, Negative = bearish momentum",
     },
     "ADX": {
         "strong_trend": 25,
         "very_strong": 50,
         "desc": "ADX measures trend strength (not direction) on a 0-100 scale.",
-        "interpretation": "Below 20 = weak/no trend, 20-25 = potential trend, Above 25 = strong trend"
+        "interpretation": "Below 20 = weak/no trend, 20-25 = potential trend, Above 25 = strong trend",
     },
     "Stochastic": {
         "buy_below": 20,
         "sell_above": 80,
         "desc": "Stochastic compares closing price to price range over a period.",
-        "interpretation": "Below 20 = oversold (potential buy), Above 80 = overbought (potential sell)"
+        "interpretation": "Below 20 = oversold (potential buy), Above 80 = overbought (potential sell)",
     },
     "Bollinger Bands": {
         "buy_condition": "Price touches lower band",
         "sell_condition": "Price touches upper band",
         "desc": "Bollinger Bands show volatility with 2 standard deviations from moving average.",
-        "interpretation": "Price at lower band = potential buy, Price at upper band = potential sell"
+        "interpretation": "Price at lower band = potential buy, Price at upper band = potential sell",
     },
     "ATR": {
         "desc": "ATR (Average True Range) measures volatility in absolute terms.",
-        "interpretation": "Higher ATR = more volatile, use for stop-loss sizing (typically 1.5-2x ATR)"
+        "interpretation": "Higher ATR = more volatile, use for stop-loss sizing (typically 1.5-2x ATR)",
     },
     "Volume Ratio": {
         "high_volume": 1.5,
         "low_volume": 0.5,
         "desc": "Volume Ratio compares current volume to average volume.",
-        "interpretation": "Above 1.5 = high interest (confirms trend), Below 0.5 = low interest"
+        "interpretation": "Above 1.5 = high interest (confirms trend), Below 0.5 = low interest",
     },
     "RVOL": {
         "high_volume": 1.5,
         "desc": "RVOL (Relative Volume) compares current volume to historical average.",
-        "interpretation": "Above 1.5 = unusual activity, important for breakout confirmation"
+        "interpretation": "Above 1.5 = unusual activity, important for breakout confirmation",
     },
     "OBV": {
         "desc": "OBV (On-Balance Volume) tracks cumulative volume flow.",
-        "interpretation": "Rising OBV with rising price = bullish confirmation, Divergence = warning"
-    }
+        "interpretation": "Rising OBV with rising price = bullish confirmation, Divergence = warning",
+    },
 }
 
 
-def explain_indicator(indicator_name: str, app_value, actual_value=None,
-                      ticker: str = "", stock_name: str = "") -> str:
+def explain_indicator(
+    indicator_name: str,
+    app_value,
+    actual_value=None,
+    ticker: str = "",
+    stock_name: str = "",
+) -> str:
     """Explain a technical indicator with buy/sell thresholds and current value context."""
     stock_ctx = f" for {stock_name} ({ticker})" if ticker else ""
     value_ctx = f"The current value is {app_value}."
@@ -228,10 +272,14 @@ def explain_indicator(indicator_name: str, app_value, actual_value=None,
             if "sell_condition" in thresholds:
                 threshold_info += f"• SELL condition: {thresholds['sell_condition']}\n"
             if "strong_trend" in thresholds:
-                threshold_info += f"• Strong trend: Above {thresholds['strong_trend']}\n"
+                threshold_info += (
+                    f"• Strong trend: Above {thresholds['strong_trend']}\n"
+                )
             if "high_volume" in thresholds:
                 threshold_info += f"• High volume: Above {thresholds['high_volume']}\n"
-            threshold_info += f"\nInterpretation: {thresholds.get('interpretation', '')}"
+            threshold_info += (
+                f"\nInterpretation: {thresholds.get('interpretation', '')}"
+            )
             break
 
     prompt = (
@@ -247,8 +295,13 @@ def explain_indicator(indicator_name: str, app_value, actual_value=None,
     return _call_groq(prompt, max_tokens=600)
 
 
-def get_stock_overview(ticker: str, stock_name: str, fundamentals: dict = None,
-                       current_price: float = 0, prediction_signal: str = "") -> str:
+def get_stock_overview(
+    ticker: str,
+    stock_name: str,
+    fundamentals: dict = None,
+    current_price: float = 0,
+    prediction_signal: str = "",
+) -> str:
     """
     Get a comprehensive stock overview including what the company does,
     recent sentiment, and investment thesis.
@@ -262,7 +315,7 @@ def get_stock_overview(ticker: str, stock_name: str, fundamentals: dict = None,
         if fundamentals.get("pe_ratio"):
             fund_items.append(f"P/E: {fundamentals['pe_ratio']:.1f}")
         if fundamentals.get("market_cap"):
-            mc = fundamentals['market_cap']
+            mc = fundamentals["market_cap"]
             mc_str = f"₹{mc/1e12:.2f}T" if mc > 1e12 else f"₹{mc/1e9:.2f}B"
             fund_items.append(f"Market Cap: {mc_str}")
         if fundamentals.get("revenue_growth"):
@@ -272,9 +325,13 @@ def get_stock_overview(ticker: str, stock_name: str, fundamentals: dict = None,
         if fundamentals.get("debt_to_equity"):
             fund_items.append(f"Debt/Equity: {fundamentals['debt_to_equity']:.1f}")
         if fundamentals.get("fifty_two_high") and fundamentals.get("fifty_two_low"):
-            fund_items.append(f"52W Range: ₹{fundamentals['fifty_two_low']:.0f} - ₹{fundamentals['fifty_two_high']:.0f}")
+            fund_items.append(
+                f"52W Range: ₹{fundamentals['fifty_two_low']:.0f} - ₹{fundamentals['fifty_two_high']:.0f}"
+            )
         if fundamentals.get("analyst_upside"):
-            fund_items.append(f"Analyst Target Upside: {fundamentals['analyst_upside']:.1f}%")
+            fund_items.append(
+                f"Analyst Target Upside: {fundamentals['analyst_upside']:.1f}%"
+            )
         if fund_items:
             fund_ctx = "Key Metrics: " + ", ".join(fund_items)
 
@@ -299,8 +356,10 @@ def get_news_sentiment(ticker: str, stock_name: str) -> str:
     Get news-based sentiment analysis for a stock.
     Note: This uses Groq's knowledge - for real-time news, integrate a news API.
     """
+    today = datetime.utcnow().strftime("%Y-%m-%d")
     prompt = (
         f"Analyze the recent news sentiment for {stock_name} ({ticker}) on the Indian stock market. "
+        f"Today date: {today}. "
         f"Based on your knowledge of recent events and market conditions:\n\n"
         f"1. **Overall Sentiment**: Is the sentiment Bullish, Bearish, or Neutral?\n"
         f"2. **Key factors affecting sentiment**: List 3 recent factors or events.\n"
@@ -325,31 +384,43 @@ def get_groq_strategy(ticker: str, stock_name: str, prediction_data: dict) -> st
     pred_return = prediction_data.get("predicted_return", 0)
     signal = prediction_data.get("signal", "HOLD")
     confidence = prediction_data.get("confidence", 50)
-    ctx_parts.append(f"ML Prediction: {signal} (predicted return: {pred_return:.3f}%, confidence: {confidence:.0f}%)")
+    ctx_parts.append(
+        f"ML Prediction: {signal} (predicted return: {pred_return:.3f}%, confidence: {confidence:.0f}%)"
+    )
 
     model_preds = prediction_data.get("model_predictions", {})
     if model_preds:
-        ctx_parts.append("Individual model predictions: " + ", ".join(
-            f"{k}: {v:.3f}%" for k, v in model_preds.items()
-        ))
+        ctx_parts.append(
+            "Individual model predictions: "
+            + ", ".join(f"{k}: {v:.3f}%" for k, v in model_preds.items())
+        )
 
     fund = prediction_data.get("fundamentals", {})
     if fund:
         fund_items = []
-        if fund.get("pe_ratio"): fund_items.append(f"P/E: {fund['pe_ratio']:.1f}")
-        if fund.get("pb_ratio"): fund_items.append(f"P/B: {fund['pb_ratio']:.1f}")
-        if fund.get("roe"): fund_items.append(f"ROE: {fund['roe']*100:.1f}%")
-        if fund.get("debt_to_equity"): fund_items.append(f"D/E: {fund['debt_to_equity']:.1f}")
-        if fund.get("dividend_yield"): fund_items.append(f"Div Yield: {fund['dividend_yield']*100:.2f}%")
-        if fund.get("revenue_growth"): fund_items.append(f"Rev Growth: {fund['revenue_growth']*100:.1f}%")
-        if fund.get("beta"): fund_items.append(f"Beta: {fund['beta']:.2f}")
+        if fund.get("pe_ratio"):
+            fund_items.append(f"P/E: {fund['pe_ratio']:.1f}")
+        if fund.get("pb_ratio"):
+            fund_items.append(f"P/B: {fund['pb_ratio']:.1f}")
+        if fund.get("roe"):
+            fund_items.append(f"ROE: {fund['roe']*100:.1f}%")
+        if fund.get("debt_to_equity"):
+            fund_items.append(f"D/E: {fund['debt_to_equity']:.1f}")
+        if fund.get("dividend_yield"):
+            fund_items.append(f"Div Yield: {fund['dividend_yield']*100:.2f}%")
+        if fund.get("revenue_growth"):
+            fund_items.append(f"Rev Growth: {fund['revenue_growth']*100:.1f}%")
+        if fund.get("beta"):
+            fund_items.append(f"Beta: {fund['beta']:.2f}")
         if fund_items:
             ctx_parts.append("Fundamentals: " + ", ".join(fund_items))
 
     current_price = prediction_data.get("current_price", 0)
     target = prediction_data.get("target_price", 0)
     sl = prediction_data.get("stop_loss", 0)
-    ctx_parts.append(f"Current price: ₹{current_price:.2f}, Target: ₹{target:.2f}, Stop Loss: ₹{sl:.2f}")
+    ctx_parts.append(
+        f"Current price: ₹{current_price:.2f}, Target: ₹{target:.2f}, Stop Loss: ₹{sl:.2f}"
+    )
 
     atr = prediction_data.get("atr_pct", 0)
     vol_ratio = prediction_data.get("volume_ratio", 1)
@@ -369,8 +440,9 @@ def get_groq_strategy(ticker: str, stock_name: str, prediction_data: dict) -> st
     return _call_groq(prompt, max_tokens=400)
 
 
-def get_combined_strategy(ticker: str, stock_name: str,
-                          prediction_data: dict, groq_strategy: str) -> str:
+def get_combined_strategy(
+    ticker: str, stock_name: str, prediction_data: dict, groq_strategy: str
+) -> str:
     """
     Get a combined recommendation merging ML prediction + Groq analysis.
 
@@ -391,3 +463,197 @@ def get_combined_strategy(ticker: str, stock_name: str,
         f"End with a clear summary: Lean BUY, Lean SELL, or WAIT."
     )
     return _call_groq(prompt, max_tokens=350)
+
+
+def explain_risk_term(term: str, context: str = "") -> str:
+    """Explain a portfolio/risk analytics term in practical language."""
+    prompt = (
+        f"Explain the risk analytics term '{term}' for an Indian equity investor. "
+        f"Give: 1) simple definition, 2) how to read high/low values, "
+        f"3) one practical action point. "
+        f"Keep it concise but useful. Context: {context or 'Portfolio risk dashboard'}."
+    )
+    return _call_groq(prompt, max_tokens=350)
+
+
+def get_groq_price_forecast(
+    ticker: str,
+    stock_name: str,
+    open_price: float,
+    strategy_predicted_price: float,
+    current_price: float,
+    sentiment_text: str = "",
+) -> dict:
+    """
+    Ask Groq for a JSON-only AI price forecast from current context.
+    Returns dict with keys: ai_predicted_price, outlook, rationale.
+    """
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    prompt = (
+        f"You are analyzing {stock_name} ({ticker}) on NSE. "
+        f"Today date: {today}. "
+        f"Open price: {open_price:.2f}. "
+        f"Strategy predicted price (before market): {strategy_predicted_price:.2f}. "
+        f"Current price: {current_price:.2f}. "
+        f"News/sentiment context: {sentiment_text[:1200]}. "
+        f"Return ONLY valid JSON with keys: "
+        f"ai_predicted_price (number), outlook (Bullish/Bearish/Neutral), rationale (string <= 90 words). "
+        f"Keep ai_predicted_price realistic, within +/-8% of current price."
+    )
+    raw = _call_groq(prompt, max_tokens=350)
+
+    payload = None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        m = re.search(r"\{[\s\S]*\}", raw)
+        if m:
+            try:
+                payload = json.loads(m.group(0))
+            except Exception:
+                payload = None
+
+    if not isinstance(payload, dict):
+        return {
+            "ai_predicted_price": None,
+            "outlook": "Unavailable",
+            "rationale": (
+                raw[:240] if isinstance(raw, str) else "AI forecast unavailable"
+            ),
+            "source": "fallback_non_json",
+        }
+
+    ai_price = payload.get(
+        "ai_predicted_price", strategy_predicted_price or current_price
+    )
+    try:
+        ai_price = float(ai_price)
+    except Exception:
+        ai_price = 0.0
+
+    if ai_price <= 0:
+        return {
+            "ai_predicted_price": None,
+            "outlook": str(payload.get("outlook", "Unavailable"))[:20],
+            "rationale": str(payload.get("rationale", ""))[:600],
+            "source": "fallback_invalid_price",
+        }
+
+    base = current_price if current_price > 0 else strategy_predicted_price
+    if base > 0:
+        lo, hi = base * 0.92, base * 1.08
+        ai_price = min(max(ai_price, lo), hi)
+
+    return {
+        "ai_predicted_price": round(ai_price, 2),
+        "outlook": str(payload.get("outlook", "Neutral"))[:20],
+        "rationale": str(payload.get("rationale", ""))[:600],
+        "source": "groq_json",
+    }
+
+
+def explain_model(model_name: str) -> str:
+    """Explain a model in practical trading terms."""
+    prompt = (
+        f"Explain the ML model '{model_name}' used in stock prediction. "
+        f"Give 1) what it does, 2) strengths, 3) weaknesses, "
+        f"4) when trader should trust it less. Keep it concise."
+    )
+    return _call_groq(prompt, max_tokens=320)
+
+
+def stock_chat_response(
+    ticker: str,
+    stock_name: str,
+    question: str,
+    prediction_data: dict | None = None,
+    indicator_snapshot: dict | None = None,
+) -> str:
+    """Answer contextual stock question with current model and indicator context."""
+    prediction_data = prediction_data or {}
+    indicator_snapshot = indicator_snapshot or {}
+    prompt = (
+        f"You are a trading assistant for {stock_name} ({ticker}). "
+        f"User question: {question}\n\n"
+        f"Prediction context: signal={prediction_data.get('signal')}, "
+        f"predicted_return={prediction_data.get('predicted_return')}, "
+        f"confidence={prediction_data.get('confidence')}, "
+        f"model_agreement={prediction_data.get('model_agreement')}.\n"
+        f"Indicators: {json.dumps(indicator_snapshot)[:1000]}.\n\n"
+        f"Answer in short bullets: meaning now, risk, and one actionable next step. "
+        f"Do not give guaranteed returns."
+    )
+    return _call_groq(prompt, max_tokens=450)
+
+
+def portfolio_profit_suggestion(summary: dict) -> str:
+    """Suggest practical improvement steps for portfolio profitability."""
+    prompt = (
+        "You are assisting with an Indian equity portfolio. "
+        f"Summary: {json.dumps(summary)[:1400]}\n\n"
+        "Give a concise response with:\n"
+        "1) current health,\n"
+        "2) top 3 improvements to increase risk-adjusted profit,\n"
+        "3) what to avoid,\n"
+        "4) one immediate action.\n"
+        "No guaranteed claims."
+    )
+    return _call_groq(prompt, max_tokens=520)
+
+
+def suggest_ticker_shortlist(candidates: list[dict]) -> str:
+    """Suggest a concise ticker shortlist from model-ranked candidates."""
+    prompt = (
+        "You are reviewing model-ranked NSE tickers for short-term trading. "
+        f"Candidates JSON: {json.dumps(candidates)[:2200]}\n\n"
+        "Return short bullets:\n"
+        "1) Top 3 tickers to prioritize and why,\n"
+        "2) 2 tickers to avoid and why,\n"
+        "3) One risk-control rule for all picks.\n"
+        "No guaranteed claims."
+    )
+    return _call_groq(prompt, max_tokens=480)
+
+
+def review_trade_plan(
+    ticker: str,
+    stock_name: str,
+    entry_price: float,
+    quantity: float,
+    current_price: float,
+    signal: str,
+    predicted_return_pct: float,
+    confidence: float,
+    agreement: float,
+    sentiment_text: str,
+) -> str:
+    """Review user-selected trade plan and provide corrective suggestions."""
+    prompt = (
+        f"Review this planned trade for {stock_name} ({ticker}) on NSE.\n"
+        f"Planned entry price: {entry_price:.2f}, quantity: {quantity:.2f}.\n"
+        f"Current market price: {current_price:.2f}.\n"
+        f"Model signal: {signal}, predicted_return={predicted_return_pct:.3f}%, "
+        f"confidence={confidence:.1f}%, agreement={agreement:.1f}%.\n"
+        f"News sentiment context: {sentiment_text[:1000]}.\n\n"
+        "Answer in sections:\n"
+        "- Is this plan aligned or misaligned with current context?\n"
+        "- Top 3 risks in this specific plan.\n"
+        "- A safer alternative (entry zone, position sizing, invalidation).\n"
+        "Do not promise profits."
+    )
+    return _call_groq(prompt, max_tokens=620)
+
+
+def ai_risk_assessment(summary: dict) -> str:
+    """Separate AI page narrative: portfolio risk interpretation."""
+    prompt = (
+        "You are generating an AI risk report for an Indian equity portfolio. "
+        f"Portfolio summary JSON: {json.dumps(summary)[:1800]}\n\n"
+        "Provide:\n"
+        "1) Current risk posture,\n"
+        "2) Concentration/liquidity concerns,\n"
+        "3) Drawdown and scenario risks,\n"
+        "4) 3 concrete actions to reduce downside without over-trading.\n"
+        "Keep concise and practical. No guaranteed outcomes."
+    )
+    return _call_groq(prompt, max_tokens=650)

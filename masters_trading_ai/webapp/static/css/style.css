@@ -112,6 +112,7 @@ a:hover { text-decoration: underline; }
     font-size: 18px;
     font-weight: 700;
     color: var(--text-primary);
+    text-decoration: none;
 }
 
 .back-link {
@@ -145,6 +146,7 @@ a:hover { text-decoration: underline; }
     display: flex;
     align-items: center;
     gap: 12px;
+    flex-wrap: wrap;
 }
 
 .status-badge {
@@ -158,6 +160,11 @@ a:hover { text-decoration: underline; }
 .status-badge.closed { background: var(--red-bg); color: var(--red); }
 .status-badge.loading { background: var(--yellow-bg); color: var(--yellow); }
 .status-badge.ready { background: var(--green-bg); color: var(--green); }
+
+.status-detail {
+    font-size: 11px;
+    color: var(--text-muted);
+}
 
 /* ── Market Banner ──────────────────────────────── */
 .market-banner {
@@ -322,11 +329,12 @@ a:hover { text-decoration: underline; }
 .card-prediction {
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    align-items: flex-start;
     padding: 6px 8px;
     background: var(--bg-secondary);
     border-radius: 6px;
     margin-top: 2px;
+    gap: 10px;
 }
 
 .card-pred-label {
@@ -337,6 +345,27 @@ a:hover { text-decoration: underline; }
 .card-pred-value {
     font-size: 12px;
     font-weight: 600;
+    text-align: right;
+}
+
+.card-pred-left {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.card-pred-meta {
+    font-size: 10px;
+    color: var(--text-muted);
+    line-height: 1.35;
+}
+
+.card-live-label {
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
 }
 
 .stock-card-icon {
@@ -521,6 +550,14 @@ a:hover { text-decoration: underline; }
     font-weight: 600;
     color: var(--text-primary);
     margin-bottom: 16px;
+}
+
+.section-help-text {
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.5;
+    margin-top: -8px;
+    margin-bottom: 14px;
 }
 
 .pred-timestamp {
@@ -831,6 +868,53 @@ a:hover { text-decoration: underline; }
 
 .pick-signal.buy { background: var(--green-bg); color: var(--green); }
 .pick-signal.sell { background: var(--red-bg); color: var(--red); }
+.pick-signal.hold { background: var(--yellow-bg); color: var(--yellow); }
+
+.top-picks-controls {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.pick-filter-label {
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+.pick-filter-select {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 13px;
+    min-width: 160px;
+}
+
+.pick-filter-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: 18px;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    transition: all 0.2s;
+}
+
+.pick-filter-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--text-secondary);
+}
+
+.pick-filter-btn.active {
+    background: var(--blue-bg);
+    color: var(--blue);
+    border-color: var(--blue);
+}
 
 .pick-details {
     display: grid;
@@ -844,6 +928,93 @@ a:hover { text-decoration: underline; }
 
 .pick-detail .label { color: var(--text-muted); }
 .pick-detail .value { font-weight: 600; }
+
+.after-hours-summary {
+    margin: 8px 0 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid rgba(240, 185, 11, 0.4);
+    background: rgba(240, 185, 11, 0.1);
+    color: var(--yellow);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.premarket-panels {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.premarket-panel {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+}
+
+.premarket-panel.compact {
+    min-width: 0;
+}
+
+.premarket-panel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.premarket-panel-head h3 {
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.premarket-table-wrap {
+    overflow-x: auto;
+}
+
+.premarket-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.premarket-table th {
+    text-align: left;
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 11px;
+    padding: 8px 6px;
+    border-bottom: 1px solid var(--border);
+}
+
+.premarket-table td {
+    padding: 8px 6px;
+    border-bottom: 1px solid var(--border);
+}
+
+.premarket-row {
+    cursor: pointer;
+}
+
+.premarket-row:hover {
+    background: var(--bg-hover);
+}
+
+.premarket-row.selected {
+    background: rgba(91, 141, 239, 0.15);
+}
+
+.premarket-row.locked {
+    cursor: default;
+    opacity: 0.9;
+}
+
+.premarket-row.locked:hover {
+    background: transparent;
+}
 
 /* ── Expected vs Actual ─────────────────────────── */
 .date-selector {
@@ -1128,6 +1299,79 @@ a:hover { text-decoration: underline; }
 
 .strategy-body p {
     margin-bottom: 8px;
+}
+
+.strategy-evidence {
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+}
+
+.strategy-evidence-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px;
+}
+
+.strategy-evidence-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+}
+
+.strategy-evidence-title {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+}
+
+.strategy-evidence-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 8px;
+    align-items: center;
+    font-size: 12px;
+    padding: 5px 0;
+    border-bottom: 1px dashed rgba(255, 255, 255, 0.07);
+}
+
+.strategy-evidence-row:last-child {
+    border-bottom: none;
+}
+
+.strategy-evidence-key {
+    color: var(--text-muted);
+}
+
+.strategy-evidence-value {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.strategy-evidence-tag {
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.strategy-evidence-tag.bullish {
+    background: var(--green-bg);
+    color: var(--green);
+}
+
+.strategy-evidence-tag.bearish {
+    background: var(--red-bg);
+    color: var(--red);
+}
+
+.strategy-evidence-tag.neutral {
+    background: var(--yellow-bg);
+    color: var(--yellow);
 }
 
 .strategy-signal {
@@ -1432,12 +1676,110 @@ a:hover { text-decoration: underline; }
 .tracker-sub {
     font-size: 11px;
     color: var(--text-muted);
+    margin-top: 4px;
 }
 
 .price-tracker-arrow {
     font-size: 20px;
     color: var(--text-muted);
     font-weight: 700;
+}
+
+.current-second-panel {
+    margin-top: 8px;
+    margin-bottom: 16px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+}
+
+.current-second-title {
+    font-size: 11px;
+    letter-spacing: 0.7px;
+    font-weight: 700;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+}
+
+.current-second-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.current-second-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    background: var(--bg-card);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.current-second-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.current-second-price {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.current-second-time {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.explainable-label {
+    cursor: pointer;
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+}
+
+.portfolio-add-inline {
+    margin-top: 8px;
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+}
+
+.portfolio-qty-input {
+    width: 98px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    border-radius: 8px;
+    padding: 6px 8px;
+}
+
+.portfolio-add-btn {
+    border: 1px solid var(--blue);
+    background: var(--blue-bg);
+    color: var(--blue);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.portfolio-add-status {
+    margin-top: 6px;
+    font-size: 12px;
+    text-align: right;
+}
+
+.chart-controls label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
 }
 
 /* Progress bar */
@@ -1808,8 +2150,10 @@ a:hover { text-decoration: underline; }
     .overview-section { margin: 16px; }
     .price-tracker-grid { flex-direction: column; }
     .price-tracker-arrow { transform: rotate(90deg); }
+    .current-second-grid { grid-template-columns: 1fr; }
     .top10-cards { grid-template-columns: 1fr; }
     .top10-prices { grid-template-columns: 1fr; }
+    .premarket-panels { grid-template-columns: 1fr; }
     .feature-cards { grid-template-columns: 1fr; }
     .price-tracker-section, .feature-importance-section, .news-section { margin: 16px; padding: 16px; }
 }
@@ -1886,6 +2230,10 @@ a:hover { text-decoration: underline; }
 
 .risk-metric-card:hover {
     border-color: var(--blue);
+}
+
+.risk-term {
+    cursor: help;
 }
 
 .rmc-icon {
@@ -2191,6 +2539,42 @@ a:hover { text-decoration: underline; }
     color: var(--blue);
 }
 
+.risk-tooltip {
+    position: absolute;
+    z-index: 300;
+    width: min(360px, 92vw);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    padding: 10px 12px;
+    pointer-events: auto;
+}
+
+.groq-popover,
+.explain-popover {
+    max-height: 360px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    pointer-events: auto;
+}
+
+.risk-tooltip-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--blue);
+    margin-bottom: 6px;
+}
+
+.risk-tooltip-body {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.55;
+    max-height: 320px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+}
+
 /* ── Risk Page Responsive ──────────────────────── */
 
 @media (max-width: 900px) {
@@ -2216,3 +2600,25 @@ a:hover { text-decoration: underline; }
     .risk-dashboard { padding: 12px; }
 }
 
+/* ── Portfolio Page + Chart Draw Tools ─────────────────────── */
+.portfolio-toolbar {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+a.tf-btn {
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+}
+
+.draw-controls {
+    align-items: center;
+}
+
+#draw-status {
+    font-size: 12px;
+}

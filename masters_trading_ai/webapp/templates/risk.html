@@ -14,11 +14,13 @@
     <nav class="navbar">
         <div class="nav-brand">
             <span class="logo">📈</span>
-            <span class="brand-name">Masters AI Trading</span>
+            <a href="/" class="brand-name">Masters AI Trading</a>
         </div>
         <div class="nav-links">
             <a href="/" class="nav-link">Dashboard</a>
+            <a href="/portfolio" class="nav-link">Portfolio</a>
             <a href="/risk" class="nav-link active">Risk Analytics</a>
+            <a href="/ai-risk" class="nav-link">AI Risk Analysis</a>
         </div>
         <div class="nav-status">
             <span id="market-status" class="status-badge"></span>
@@ -43,6 +45,7 @@
         <!-- Row 1: Key Risk Metrics -->
         <section class="risk-section">
             <h2 class="section-title">Key Risk Metrics</h2>
+            <p class="section-desc">Hover any metric card to get Groq explanation. Long explanations are scrollable.</p>
             <div class="risk-metrics-grid" id="risk-metrics-grid"></div>
         </section>
 
@@ -90,6 +93,18 @@
             <h2 class="section-title">Portfolio Holdings</h2>
             <div id="portfolio-holdings"></div>
         </section>
+    </div>
+
+    <div
+        id="risk-tooltip"
+        class="risk-tooltip groq-popover explain-popover hidden"
+        role="dialog"
+        aria-live="polite"
+        aria-hidden="true"
+        tabindex="0"
+    >
+        <div class="risk-tooltip-title" id="risk-tooltip-title">Loading...</div>
+        <div class="risk-tooltip-body" id="risk-tooltip-body">Loading explanation...</div>
     </div>
 
     <script src="/static/js/risk.js"></script>

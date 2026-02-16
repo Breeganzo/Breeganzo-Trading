@@ -13,18 +13,21 @@
     <nav class="navbar">
         <div class="nav-brand">
             <span class="logo">📈</span>
-            <span class="brand-name">Masters AI Trading</span>
+            <a href="/" class="brand-name">Masters AI Trading</a>
         </div>
         <div class="nav-links">
             <a href="/" class="nav-link active" onclick="selectSector('all')">Stocks</a>
+            <a href="/portfolio" class="nav-link">Portfolio</a>
             <a href="#" class="nav-link" onclick="showTopAnalysis()">Top 10 Analysis</a>
             <a href="#" class="nav-link" onclick="showTopPicks()">Top Picks</a>
             <a href="#" class="nav-link" onclick="showExpectedVsActual()">Expected vs Actual</a>
             <a href="/risk" class="nav-link">Risk Analytics</a>
+            <a href="/ai-risk" class="nav-link">AI Risk Analysis</a>
         </div>
         <div class="nav-status">
             <span id="market-status" class="status-badge"></span>
             <span id="model-status" class="status-badge loading">Loading models...</span>
+            <span id="model-load-detail" class="status-detail">Preparing model pipeline...</span>
         </div>
     </nav>
 
@@ -88,6 +91,61 @@
         <div class="top-picks-section hidden" id="top-picks-section">
             <h2 class="section-title">🎯 AI Top Picks</h2>
             <p class="section-subtitle">ML model predictions ranked by composite score</p>
+            <div class="top-picks-controls">
+                <label for="top-picks-filter" class="pick-filter-label">Show:</label>
+                <select id="top-picks-filter" class="pick-filter-select" onchange="setTopPickFilter(this.value)">
+                    <option value="top_buy">Top 10 BUY</option>
+                    <option value="top_sell">Top 10 SELL</option>
+                    <option value="top_hold">Top 10 HOLD</option>
+                </select>
+            </div>
+            <div id="after-hours-summary" class="after-hours-summary hidden" aria-live="polite"></div>
+            <div class="premarket-panels">
+                <div class="premarket-panel">
+                    <div class="premarket-panel-head">
+                        <h3>Premarket vs Current</h3>
+                        <span id="premarket-captured-at" class="muted-text">Loading snapshot...</span>
+                    </div>
+                    <div class="premarket-table-wrap">
+                        <table class="premarket-table">
+                            <thead>
+                                <tr>
+                                    <th>Ticker</th>
+                                    <th>Current Price</th>
+                                    <th>Strategy Price (Open)</th>
+                                    <th>AI Predicted (Now)</th>
+                                    <th>Directions</th>
+                                    <th>Comparison</th>
+                                </tr>
+                            </thead>
+                            <tbody id="premarket-table-body">
+                                <tr><td colspan="6" class="muted-text">Loading premarket snapshot...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="premarket-panel compact">
+                    <div class="premarket-panel-head">
+                        <h3>Current Second Snapshot</h3>
+                        <span id="current-second-ticker" class="muted-text">—</span>
+                    </div>
+                    <div class="premarket-table-wrap">
+                        <table class="premarket-table">
+                            <thead>
+                                <tr>
+                                    <th>Current Price</th>
+                                    <th>Strategy Prediction (Now)</th>
+                                    <th>AI Prediction (Now)</th>
+                                    <th>Direction Comparison</th>
+                                </tr>
+                            </thead>
+                            <tbody id="current-second-body">
+                                <tr><td colspan="4" class="muted-text">Select a ticker to view current-second comparison.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
             <div class="picks-grid" id="picks-grid">
                 <div class="loading-spinner"><div class="spinner"></div><p>Generating predictions...</p></div>
             </div>
@@ -110,6 +168,18 @@
         <p>⚠️ DISCLAIMER: Academic research project for educational purposes only. NOT financial advice.
         Past performance does not guarantee future results. Always consult a qualified financial advisor.</p>
     </footer>
+
+    <div
+        id="metric-tooltip"
+        class="risk-tooltip groq-popover explain-popover hidden"
+        role="dialog"
+        aria-live="polite"
+        aria-hidden="true"
+        tabindex="0"
+    >
+        <div class="risk-tooltip-title" id="metric-tooltip-title">Loading...</div>
+        <div class="risk-tooltip-body" id="metric-tooltip-body">Loading explanation...</div>
+    </div>
 
     <script src="/static/js/app.js"></script>
 </body>

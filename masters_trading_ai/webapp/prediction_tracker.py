@@ -12,13 +12,13 @@ Structure:
 """
 
 import json
-import os
 from pathlib import Path
-from datetime import datetime, date, timedelta
+from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 import numpy as np
+import pandas as pd
 
 IST = ZoneInfo("Asia/Kolkata")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -34,8 +34,35 @@ for d in [TRACKING_DIR, DAILY_DIR, MONTHLY_DIR]:
 class PredictionTracker:
     """Track whether each predicted price threshold was hit during the day."""
 
+    SCHEMA_VERSION = 4
+
     @staticmethod
-    def record_prediction(ticker: str, prediction_data: dict):
+    def _to_float(value, default: float = 0.0) -> float:
+        try:
+            out = float(value)
+            if np.isfinite(out):
+                return out
+        except Exception:
+            pass
+        return default
+
+    @staticmethod
+    def _direction(from_price: float, to_price: float, eps: float = 1e-9) -> str:
+        if not np.isfinite(from_price) or not np.isfinite(to_price):
+            return "FLAT"
+        delta = to_price - from_price
+        if delta > eps:
+            return "UP"
+        if delta < -eps:
+            return "DOWN"
+        return "FLAT"
+
+    @staticmethod
+    def record_prediction(
+        ticker: str,
+        prediction_data: dict,
+        snapshot_type: Optional[str] = None,
+    ):
         """
         Record a new prediction for today.
 
@@ -52,9 +79,69 @@ class PredictionTracker:
             except (json.JSONDecodeError, OSError):
                 existing = {}
 
-        pred_return = prediction_data.get("predicted_return", 0)  # in %
-        current_price = prediction_data.get("current_price", 0)
-        predicted_price = prediction_data.get("predicted_price", 0)
+        pred_return = PredictionTracker._to_float(
+            prediction_data.get("predicted_return", 0)
+        )  # in %
+        current_price = PredictionTracker._to_float(
+            prediction_data.get("current_price", 0)
+        )
+        predicted_price = PredictionTracker._to_float(
+            prediction_data.get("predicted_price", 0)
+        )
+        open_price = PredictionTracker._to_float(
+            prediction_data.get(
+                "open_price", prediction_data.get("price_at_prediction", current_price)
+            ),
+            default=current_price,
+        )
+        strategy_price_at_open = PredictionTracker._to_float(
+            prediction_data.get(
+                "strategy_price_at_open",
+                prediction_data.get("strategy_predicted_price", predicted_price),
+            ),
+            default=predicted_price,
+        )
+        ai_last_prediction = PredictionTracker._to_float(
+            prediction_data.get("ai_last_prediction", predicted_price),
+            default=predicted_price,
+        )
+        strategy_predicted_at_open = str(
+            prediction_data.get("strategy_predicted_at_open", "")
+            or prediction_data.get("timestamp", "")
+            or datetime.now(IST).isoformat()
+        )
+        ai_predicted_at_open = str(
+            prediction_data.get("ai_predicted_at_open", "")
+            or prediction_data.get("timestamp", "")
+            or datetime.now(IST).isoformat()
+        )
+        ai_last_prediction_at = str(
+            prediction_data.get("ai_last_prediction_at", "")
+            or prediction_data.get("timestamp", "")
+            or datetime.now(IST).isoformat()
+        )
+        snapshot_type_value = (
+            str(snapshot_type or prediction_data.get("snapshot_type") or "intraday")
+            .strip()
+            .lower()
+        )
+        if snapshot_type_value not in {
+            "market_open",
+            "near_open_fallback",
+            "premarket_preview",
+            "intraday",
+        }:
+            snapshot_type_value = "intraday"
+
+        strategy_direction = PredictionTracker._direction(
+            open_price, strategy_price_at_open
+        )
+        ai_direction = PredictionTracker._direction(current_price, ai_last_prediction)
+        direction_comparison = bool(
+            prediction_data.get(
+                "direction_comparison", strategy_direction == ai_direction
+            )
+        )
 
         # Threshold: the predicted price level that needs to be hit
         # For BUY: stock needs to reach at or above predicted_price
@@ -65,31 +152,43 @@ class PredictionTracker:
             "predicted_return_pct": round(pred_return, 4),
             "predicted_price": round(predicted_price, 2),
             "price_at_prediction": round(current_price, 2),
+            "open_price": round(open_price, 2),
+            "strategy_price_at_open": round(strategy_price_at_open, 2),
+            "ai_last_prediction": round(ai_last_prediction, 2),
+            "strategy_predicted_at_open": strategy_predicted_at_open,
+            "ai_predicted_at_open": ai_predicted_at_open,
+            "ai_last_prediction_at": ai_last_prediction_at,
+            "strategy_direction_at_open": strategy_direction,
+            "ai_direction_last": ai_direction,
+            "direction_comparison": bool(direction_comparison),
+            "snapshot_type": snapshot_type_value,
             "signal": prediction_data.get("signal", "HOLD"),
             "confidence": round(prediction_data.get("confidence", 50), 1),
             "is_bullish": is_bullish,
             "threshold_price": round(predicted_price, 2),
             "model_predictions": prediction_data.get("model_predictions", {}),
             "ensemble_weights": prediction_data.get("ensemble_weights", {}),
+            "schema_version": PredictionTracker.SCHEMA_VERSION,
             "timestamp": datetime.now(IST).isoformat(),
             # Outcome fields — filled later
-            "outcome": None,          # "HIT" or "MISS"
+            "outcome": None,  # "HIT" or "MISS"
             "actual_close": None,
             "actual_high": None,
             "actual_low": None,
             "actual_return_pct": None,
+            "actual_direction": None,
+            "direction_correct": None,
             "checked_at": None,
         }
 
         file_path.write_text(json.dumps(existing, indent=2, default=str))
 
     @staticmethod
-    def check_outcomes(date_str: str = None) -> dict:
+    def check_outcomes(date_str: Optional[str] = None) -> dict:
         """
         Check if predictions for a given date hit their threshold.
 
-        For bullish predictions: HIT if actual high >= predicted_price
-        For bearish predictions: HIT if actual low <= predicted_price
+        Uses end-of-day close and compares strategy-open direction vs actual direction.
 
         Returns dict of {ticker: outcome_data}
         """
@@ -106,15 +205,24 @@ class PredictionTracker:
         if not predictions:
             return {"error": "Empty predictions"}
 
-        tickers = list(predictions.keys())
+        tickers = sorted(predictions.keys())
         results = {}
         updated = False
 
         try:
-            # Fetch actual prices
+            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            start = target_date.strftime("%Y-%m-%d")
+            end = (target_date + timedelta(days=7)).strftime("%Y-%m-%d")
+
+            # Fetch daily data once for all tickers and read the first trading bar on/after date.
             data = yf.download(
-                tickers, period="5d", interval="1d",
-                progress=False, auto_adjust=True, threads=True,
+                tickers,
+                start=start,
+                end=end,
+                interval="1d",
+                progress=False,
+                auto_adjust=True,
+                threads=True,
             )
             if data is None or data.empty:
                 return {"error": "Could not fetch actual prices"}
@@ -134,25 +242,75 @@ class PredictionTracker:
                     if close_vals.empty:
                         continue
 
-                    actual_close = float(close_vals.values[-1])
-                    actual_high = float(high_vals.values[-1])
-                    actual_low = float(low_vals.values[-1])
+                    if isinstance(close_vals.index, pd.DatetimeIndex):
+                        close_vals = close_vals[close_vals.index.date >= target_date]
+                        high_vals = high_vals[high_vals.index.date >= target_date]
+                        low_vals = low_vals[low_vals.index.date >= target_date]
+                    if close_vals.empty:
+                        continue
 
-                    price_at_pred = pred["price_at_prediction"]
-                    threshold_price = pred["threshold_price"]
-                    is_bullish = pred["is_bullish"]
+                    actual_close = float(close_vals.iloc[0])
+                    actual_high = (
+                        float(high_vals.iloc[0])
+                        if not high_vals.empty
+                        else actual_close
+                    )
+                    actual_low = (
+                        float(low_vals.iloc[0]) if not low_vals.empty else actual_close
+                    )
 
-                    # Determine outcome
-                    if is_bullish:
-                        # For bullish: HIT if actual price reached/exceeded threshold
-                        hit = actual_high >= threshold_price
-                    else:
-                        # For bearish: HIT if actual price dropped to/below threshold
-                        hit = actual_low <= threshold_price
+                    price_at_pred = PredictionTracker._to_float(
+                        pred.get("price_at_prediction", 0)
+                    )
+                    if price_at_pred <= 0:
+                        continue
 
+                    strategy_price_at_open = PredictionTracker._to_float(
+                        pred.get(
+                            "strategy_price_at_open",
+                            pred.get("predicted_price", price_at_pred),
+                        ),
+                        default=price_at_pred,
+                    )
+                    open_price = PredictionTracker._to_float(
+                        pred.get("open_price", price_at_pred),
+                        default=price_at_pred,
+                    )
+                    ai_last_prediction = PredictionTracker._to_float(
+                        pred.get(
+                            "ai_last_prediction",
+                            pred.get("predicted_price", price_at_pred),
+                        ),
+                        default=price_at_pred,
+                    )
+                    strategy_predicted_at_open = str(
+                        pred.get("strategy_predicted_at_open", "")
+                        or pred.get("timestamp", "")
+                    )
+                    ai_predicted_at_open = str(
+                        pred.get("ai_predicted_at_open", "")
+                        or pred.get("timestamp", "")
+                    )
+                    ai_last_prediction_at = str(
+                        pred.get("ai_last_prediction_at", "")
+                        or pred.get("timestamp", "")
+                    )
+                    strategy_direction = pred.get(
+                        "strategy_direction_at_open"
+                    ) or PredictionTracker._direction(
+                        open_price, strategy_price_at_open
+                    )
+                    ai_direction = pred.get(
+                        "ai_direction_last"
+                    ) or PredictionTracker._direction(price_at_pred, ai_last_prediction)
+                    actual_direction = PredictionTracker._direction(
+                        open_price, actual_close
+                    )
                     actual_return = (actual_close - price_at_pred) / price_at_pred * 100
+                    direction_comparison = strategy_direction == actual_direction
+                    direction_vs_actual = ai_direction == actual_direction
 
-                    outcome = "HIT" if hit else "MISS"
+                    outcome = "HIT" if direction_comparison else "MISS"
 
                     # Update prediction record
                     pred["outcome"] = outcome
@@ -160,6 +318,22 @@ class PredictionTracker:
                     pred["actual_high"] = round(actual_high, 2)
                     pred["actual_low"] = round(actual_low, 2)
                     pred["actual_return_pct"] = round(actual_return, 4)
+                    pred["actual_direction"] = actual_direction
+                    pred["strategy_price_at_open"] = round(strategy_price_at_open, 2)
+                    pred["open_price"] = round(open_price, 2)
+                    pred["ai_last_prediction"] = round(ai_last_prediction, 2)
+                    pred["strategy_predicted_at_open"] = strategy_predicted_at_open
+                    pred["ai_predicted_at_open"] = ai_predicted_at_open
+                    pred["ai_last_prediction_at"] = ai_last_prediction_at
+                    pred["strategy_direction_at_open"] = strategy_direction
+                    pred["ai_direction_last"] = ai_direction
+                    pred["direction_comparison"] = bool(direction_comparison)
+                    pred["direction_correct"] = bool(direction_comparison)
+                    pred["ai_direction_vs_actual"] = bool(direction_vs_actual)
+                    pred["snapshot_type"] = str(
+                        pred.get("snapshot_type", "intraday")
+                    ).lower()
+                    pred["schema_version"] = PredictionTracker.SCHEMA_VERSION
                     pred["checked_at"] = datetime.now(IST).isoformat()
                     updated = True
 
@@ -169,15 +343,32 @@ class PredictionTracker:
                         "predicted_return_pct": pred["predicted_return_pct"],
                         "actual_return_pct": round(actual_return, 4),
                         "predicted_price": pred["predicted_price"],
+                        "strategy_price_at_open": round(strategy_price_at_open, 2),
+                        "ai_last_prediction": round(ai_last_prediction, 2),
+                        "open_price": round(open_price, 2),
                         "actual_close": round(actual_close, 2),
                         "actual_high": round(actual_high, 2),
                         "actual_low": round(actual_low, 2),
+                        "strategy_predicted_at_open": strategy_predicted_at_open,
+                        "ai_predicted_at_open": ai_predicted_at_open,
+                        "ai_last_prediction_at": ai_last_prediction_at,
+                        "strategy_direction_at_open": strategy_direction,
+                        "ai_direction_last": ai_direction,
+                        "actual_direction": actual_direction,
+                        "direction_comparison": bool(direction_comparison),
+                        "direction_correct": bool(direction_comparison),
+                        "ai_direction_vs_actual": bool(direction_vs_actual),
+                        "snapshot_type": pred.get("snapshot_type", "intraday"),
                         "signal": pred["signal"],
                         "confidence": pred["confidence"],
-                        "is_bullish": is_bullish,
+                        "is_bullish": bool(pred.get("is_bullish", False)),
                     }
                 except Exception as e:
-                    results[ticker] = {"ticker": ticker, "outcome": "ERROR", "error": str(e)}
+                    results[ticker] = {
+                        "ticker": ticker,
+                        "outcome": "ERROR",
+                        "error": str(e),
+                    }
         except Exception as e:
             return {"error": f"Price fetch failed: {str(e)}"}
 
@@ -187,7 +378,9 @@ class PredictionTracker:
         return results
 
     @staticmethod
-    def get_monthly_report(year: int = None, month: int = None) -> dict:
+    def get_monthly_report(
+        year: Optional[int] = None, month: Optional[int] = None
+    ) -> dict:
         """
         Aggregate daily outcomes into monthly accuracy report.
 
@@ -231,24 +424,34 @@ class PredictionTracker:
         accuracy = (hits / len(evaluated) * 100) if evaluated else 0
 
         # Breakdown by signal
-        signal_breakdown = {}
+        signal_breakdown: dict[str, dict[str, float]] = {}
         for p in evaluated:
             sig = p.get("signal", "HOLD")
             if sig not in signal_breakdown:
-                signal_breakdown[sig] = {"total": 0, "hits": 0, "misses": 0}
-            signal_breakdown[sig]["total"] += 1
+                signal_breakdown[sig] = {"total": 0.0, "hits": 0.0, "misses": 0.0}
+            signal_breakdown[sig]["total"] += 1.0
             if p["outcome"] == "HIT":
-                signal_breakdown[sig]["hits"] += 1
+                signal_breakdown[sig]["hits"] += 1.0
             else:
-                signal_breakdown[sig]["misses"] += 1
+                signal_breakdown[sig]["misses"] += 1.0
 
         for sig in signal_breakdown:
             s = signal_breakdown[sig]
-            s["accuracy"] = round(s["hits"] / s["total"] * 100, 1) if s["total"] > 0 else 0
+            s["accuracy"] = (
+                round(s["hits"] / s["total"] * 100, 1) if s["total"] > 0 else 0
+            )
 
         # Average predicted vs actual return
-        pred_returns = [p["predicted_return_pct"] for p in evaluated if p.get("predicted_return_pct") is not None]
-        actual_returns = [p["actual_return_pct"] for p in evaluated if p.get("actual_return_pct") is not None]
+        pred_returns = [
+            p["predicted_return_pct"]
+            for p in evaluated
+            if p.get("predicted_return_pct") is not None
+        ]
+        actual_returns = [
+            p["actual_return_pct"]
+            for p in evaluated
+            if p.get("actual_return_pct") is not None
+        ]
 
         report = {
             "period": month_prefix,
@@ -259,8 +462,12 @@ class PredictionTracker:
             "misses": misses,
             "accuracy_pct": round(accuracy, 1),
             "signal_breakdown": signal_breakdown,
-            "avg_predicted_return": round(np.mean(pred_returns), 4) if pred_returns else 0,
-            "avg_actual_return": round(np.mean(actual_returns), 4) if actual_returns else 0,
+            "avg_predicted_return": (
+                round(np.mean(pred_returns), 4) if pred_returns else 0
+            ),
+            "avg_actual_return": (
+                round(np.mean(actual_returns), 4) if actual_returns else 0
+            ),
             "days_with_data": len(daily_files),
         }
 
@@ -284,7 +491,9 @@ class PredictionTracker:
                 history = []
 
         # Update or append
-        existing_idx = next((i for i, h in enumerate(history) if h["period"] == period), None)
+        existing_idx = next(
+            (i for i, h in enumerate(history) if h["period"] == period), None
+        )
         entry = {
             "period": period,
             "accuracy_pct": report["accuracy_pct"],
@@ -336,24 +545,64 @@ class PredictionTracker:
                     if pred.get("outcome") not in ("HIT", "MISS"):
                         continue
 
-                    outcomes.append({
-                        "date": f.stem,
-                        "ticker": ticker,
-                        "predicted_return": pred["predicted_return_pct"],
-                        "actual_return": pred.get("actual_return_pct", 0),
-                        "outcome": pred["outcome"],
-                        "signal": pred.get("signal", "HOLD"),
-                        "confidence": pred.get("confidence", 50),
-                    })
+                    strategy_price_at_open = PredictionTracker._to_float(
+                        pred.get(
+                            "strategy_price_at_open", pred.get("predicted_price", 0)
+                        )
+                    )
+                    ai_last_prediction = PredictionTracker._to_float(
+                        pred.get("ai_last_prediction", pred.get("predicted_price", 0))
+                    )
+                    actual_close = PredictionTracker._to_float(
+                        pred.get("actual_close", 0)
+                    )
+                    direction_comparison = bool(pred.get("direction_comparison", False))
+
+                    outcomes.append(
+                        {
+                            "date": f.stem,
+                            "ticker": ticker,
+                            "predicted_return": pred["predicted_return_pct"],
+                            "actual_return": pred.get("actual_return_pct", 0),
+                            "outcome": pred["outcome"],
+                            "signal": pred.get("signal", "HOLD"),
+                            "confidence": pred.get("confidence", 50),
+                            "open_price": round(
+                                PredictionTracker._to_float(pred.get("open_price", 0)),
+                                2,
+                            ),
+                            "strategy_price_at_open": round(strategy_price_at_open, 2),
+                            "ai_last_prediction": round(ai_last_prediction, 2),
+                            "strategy_predicted_at_open": pred.get(
+                                "strategy_predicted_at_open"
+                            ),
+                            "ai_predicted_at_open": pred.get("ai_predicted_at_open"),
+                            "ai_last_prediction_at": pred.get("ai_last_prediction_at"),
+                            "actual_close": round(actual_close, 2),
+                            "direction_comparison": direction_comparison,
+                            "direction_correct": direction_comparison,
+                            "strategy_direction_at_open": pred.get(
+                                "strategy_direction_at_open", "FLAT"
+                            ),
+                            "ai_direction_last": pred.get("ai_direction_last", "FLAT"),
+                            "actual_direction": pred.get("actual_direction", "FLAT"),
+                            "snapshot_type": pred.get("snapshot_type", "intraday"),
+                            "checked_at": pred.get("checked_at"),
+                        }
+                    )
 
                     # Track per-model direction accuracy
                     actual_ret = pred.get("actual_return_pct", 0)
-                    for model_name, model_pred in pred.get("model_predictions", {}).items():
+                    for model_name, model_pred in pred.get(
+                        "model_predictions", {}
+                    ).items():
                         if model_name not in model_correct:
                             model_correct[model_name] = [0, 0]
                         model_correct[model_name][1] += 1
                         # Check if model's direction was correct
-                        if (model_pred > 0 and actual_ret > 0) or (model_pred <= 0 and actual_ret <= 0):
+                        if (model_pred > 0 and actual_ret > 0) or (
+                            model_pred <= 0 and actual_ret <= 0
+                        ):
                             model_correct[model_name][0] += 1
             except Exception:
                 continue
@@ -368,7 +617,13 @@ class PredictionTracker:
             }
 
         # Confidence calibration
-        conf_buckets = {"0-40": [0, 0], "40-55": [0, 0], "55-70": [0, 0], "70-85": [0, 0], "85-100": [0, 0]}
+        conf_buckets = {
+            "0-40": [0, 0],
+            "40-55": [0, 0],
+            "55-70": [0, 0],
+            "70-85": [0, 0],
+            "85-100": [0, 0],
+        }
         for o in outcomes:
             conf = o["confidence"]
             if conf < 40:
@@ -394,6 +649,8 @@ class PredictionTracker:
             }
 
         return {
+            "schema_version": PredictionTracker.SCHEMA_VERSION,
+            "exported_at": datetime.now(IST).isoformat(),
             "total_outcomes": len(outcomes),
             "outcomes": outcomes,
             "model_accuracy": model_accuracy,
@@ -401,7 +658,7 @@ class PredictionTracker:
         }
 
     @staticmethod
-    def get_daily_summary(date_str: str = None) -> dict:
+    def get_daily_summary(date_str: Optional[str] = None) -> dict:
         """Get a summary of predictions and outcomes for a specific day."""
         if date_str is None:
             date_str = datetime.now(IST).strftime("%Y-%m-%d")
@@ -417,17 +674,33 @@ class PredictionTracker:
 
         predictions = []
         for ticker, pred in data.items():
-            predictions.append({
-                "ticker": ticker,
-                "predicted_return_pct": pred.get("predicted_return_pct", 0),
-                "predicted_price": pred.get("predicted_price", 0),
-                "price_at_prediction": pred.get("price_at_prediction", 0),
-                "signal": pred.get("signal", "HOLD"),
-                "confidence": pred.get("confidence", 50),
-                "outcome": pred.get("outcome"),  # None, "HIT", "MISS"
-                "actual_close": pred.get("actual_close"),
-                "actual_return_pct": pred.get("actual_return_pct"),
-            })
+            predictions.append(
+                {
+                    "ticker": ticker,
+                    "predicted_return_pct": pred.get("predicted_return_pct", 0),
+                    "predicted_price": pred.get("predicted_price", 0),
+                    "price_at_prediction": pred.get("price_at_prediction", 0),
+                    "open_price": pred.get("open_price"),
+                    "strategy_price_at_open": pred.get("strategy_price_at_open"),
+                    "ai_last_prediction": pred.get("ai_last_prediction"),
+                    "strategy_predicted_at_open": pred.get(
+                        "strategy_predicted_at_open"
+                    ),
+                    "ai_predicted_at_open": pred.get("ai_predicted_at_open"),
+                    "ai_last_prediction_at": pred.get("ai_last_prediction_at"),
+                    "strategy_direction_at_open": pred.get(
+                        "strategy_direction_at_open"
+                    ),
+                    "ai_direction_last": pred.get("ai_direction_last"),
+                    "direction_comparison": pred.get("direction_comparison"),
+                    "snapshot_type": pred.get("snapshot_type", "intraday"),
+                    "signal": pred.get("signal", "HOLD"),
+                    "confidence": pred.get("confidence", 50),
+                    "outcome": pred.get("outcome"),  # None, "HIT", "MISS"
+                    "actual_close": pred.get("actual_close"),
+                    "actual_return_pct": pred.get("actual_return_pct"),
+                }
+            )
 
         total = len(predictions)
         evaluated = [p for p in predictions if p["outcome"] in ("HIT", "MISS")]
@@ -439,6 +712,8 @@ class PredictionTracker:
             "evaluated": len(evaluated),
             "hits": hits,
             "misses": len(evaluated) - hits,
-            "accuracy_pct": round(hits / len(evaluated) * 100, 1) if evaluated else None,
+            "accuracy_pct": (
+                round(hits / len(evaluated) * 100, 1) if evaluated else None
+            ),
             "predictions": predictions,
         }

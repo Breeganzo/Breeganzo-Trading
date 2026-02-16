@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Risk Analysis — Masters AI Trading Bot</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <span class="logo">📈</span>
+            <a href="/" class="brand-name">Masters AI Trading</a>
+        </div>
+        <div class="nav-links">
+            <a href="/" class="nav-link">Dashboard</a>
+            <a href="/portfolio" class="nav-link">Portfolio</a>
+            <a href="/risk" class="nav-link">Risk Analytics</a>
+            <a href="/ai-risk" class="nav-link active">AI Risk Analysis</a>
+        </div>
+        <div class="nav-status">
+            <span id="market-status" class="status-badge"></span>
+        </div>
+    </nav>
+
+    <div class="risk-header">
+        <h1>AI Risk Analysis</h1>
+        <p class="risk-subtitle">Separate AI interpretation of your current portfolio risk posture.</p>
+    </div>
+
+    <main class="main-content">
+        <section class="risk-section">
+            <div class="portfolio-toolbar">
+                <button class="tf-btn active" onclick="loadAiRisk()">Refresh AI Analysis</button>
+            </div>
+            <div class="summary-cards" id="ai-risk-summary"></div>
+            <div class="news-content" id="ai-risk-output" style="margin-top:12px;">
+                <div class="loading-spinner"><div class="spinner"></div><p>Generating AI risk analysis...</p></div>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/js/ai_risk.js"></script>
+</body>
+</html>

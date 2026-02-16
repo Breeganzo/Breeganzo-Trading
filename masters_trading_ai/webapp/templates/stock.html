@@ -15,11 +15,13 @@
     <nav class="navbar">
         <div class="nav-brand">
             <a href="/" class="back-link">← Back</a>
-            <span class="brand-name">Masters AI Trading</span>
+            <a href="/" class="brand-name">Masters AI Trading</a>
         </div>
         <div class="nav-links" style="gap:12px;">
             <a href="/" class="nav-link">Dashboard</a>
+            <a href="/portfolio" class="nav-link">Portfolio</a>
             <a href="/risk" class="nav-link">Risk Analytics</a>
+            <a href="/ai-risk" class="nav-link">AI Risk Analysis</a>
         </div>
         <div class="nav-status">
             <span id="market-status" class="status-badge"></span>
@@ -38,12 +40,24 @@
         <div class="stock-header-right">
             <div class="stock-price-big" id="live-price">---</div>
             <div class="stock-change-big" id="live-change">---</div>
+            <div class="muted-text" id="quote-status">Loading quote...</div>
+            <div class="portfolio-add-inline">
+                <input id="portfolio-qty" type="number" min="1" step="1" value="1" class="portfolio-qty-input" />
+                <input id="portfolio-price" type="number" min="0" step="0.01" placeholder="Buy Price" class="portfolio-qty-input" />
+                <button class="portfolio-add-btn" onclick="addToPortfolio()">Add Buy</button>
+                <button class="portfolio-add-btn" onclick="reviewPlannedTrade()">Review Buy (Groq)</button>
+                <input id="portfolio-sell-qty" type="number" min="1" step="1" value="1" class="portfolio-qty-input" />
+                <input id="portfolio-sell-price" type="number" min="0" step="0.01" placeholder="Sell Price" class="portfolio-qty-input" />
+                <button class="portfolio-add-btn" onclick="sellFromPortfolio()">Add Sell</button>
+            </div>
+            <div class="portfolio-add-status muted-text" id="portfolio-add-status"></div>
         </div>
     </div>
 
     <!-- Price Tracker: Opening vs Predicted vs Current -->
     <div class="price-tracker-section" id="price-tracker">
         <h3 class="section-heading">📍 Price Tracker — Today's Journey</h3>
+        <p class="section-help-text">Tracks market-open price, open-time strategy/AI targets, and live updates so you can compare plan vs reality.</p>
         <div class="price-tracker-grid">
             <div class="price-tracker-card opening">
                 <div class="tracker-label">Opening Price</div>
@@ -52,15 +66,39 @@
             </div>
             <div class="price-tracker-arrow">→</div>
             <div class="price-tracker-card predicted">
-                <div class="tracker-label">AI Predicted</div>
+                <div class="tracker-label" id="tracker-strategy-label">Strategy Predicted</div>
                 <div class="tracker-price" id="tracker-predicted">---</div>
                 <div class="tracker-change" id="tracker-predicted-pct">---</div>
+                <div class="tracker-sub" id="tracker-strategy-open-time">Predicted at ---</div>
             </div>
             <div class="price-tracker-arrow">→</div>
             <div class="price-tracker-card current">
-                <div class="tracker-label">Current Price</div>
+                <div class="tracker-label" id="tracker-current-label">Current Price</div>
                 <div class="tracker-price" id="tracker-current">---</div>
                 <div class="tracker-change" id="tracker-current-pct">---</div>
+                <div class="tracker-sub" id="tracker-current-time">Updated ---</div>
+            </div>
+            <div class="price-tracker-arrow">→</div>
+            <div class="price-tracker-card predicted">
+                <div class="tracker-label" id="tracker-ai-label">AI Predicted (Groq)</div>
+                <div class="tracker-price" id="tracker-ai">---</div>
+                <div class="tracker-change" id="tracker-ai-pct">---</div>
+                <div class="tracker-sub" id="tracker-ai-open-time">Predicted at ---</div>
+            </div>
+        </div>
+        <div class="current-second-panel">
+            <div class="current-second-title">CURRENT SECOND COMPARISON</div>
+            <div class="current-second-grid">
+                <div class="current-second-card">
+                    <span class="current-second-label">Strategy Prediction (Now)</span>
+                    <span class="current-second-price" id="current-strategy-price">---</span>
+                    <span class="current-second-time" id="current-strategy-time">---</span>
+                </div>
+                <div class="current-second-card">
+                    <span class="current-second-label">AI Prediction (Now)</span>
+                    <span class="current-second-price" id="current-ai-price">---</span>
+                    <span class="current-second-time" id="current-ai-time">---</span>
+                </div>
             </div>
         </div>
         <div class="price-progress-bar">
@@ -102,12 +140,32 @@
 
     <!-- Chart timeframe buttons -->
     <div class="chart-controls">
-        <button class="tf-btn active" data-period="1d" data-interval="5m" onclick="changeTimeframe(this)">1D</button>
+        <button class="tf-btn active" data-period="1d" data-interval="1m" onclick="changeTimeframe(this)">1D</button>
         <button class="tf-btn" data-period="5d" data-interval="15m" onclick="changeTimeframe(this)">5D</button>
         <button class="tf-btn" data-period="1mo" data-interval="1h" onclick="changeTimeframe(this)">1M</button>
         <button class="tf-btn" data-period="3mo" data-interval="1d" onclick="changeTimeframe(this)">3M</button>
         <button class="tf-btn" data-period="6mo" data-interval="1d" onclick="changeTimeframe(this)">6M</button>
         <button class="tf-btn" data-period="1y" data-interval="1d" onclick="changeTimeframe(this)">1Y</button>
+        <span class="muted-text">Chart auto-refresh: 15s</span>
+    </div>
+    <div class="chart-controls" style="margin-top:8px;">
+        <label><input type="checkbox" id="ind-sma20" onchange="toggleIndicator('sma20')"> SMA20</label>
+        <label><input type="checkbox" id="ind-ema20" onchange="toggleIndicator('ema20')"> EMA20</label>
+        <label><input type="checkbox" id="ind-vwap" onchange="toggleIndicator('vwap')"> VWAP</label>
+        <select id="indicator-preset" class="pick-filter-select" onchange="applyIndicatorPreset(this.value)">
+            <option value="custom">Indicators: Custom</option>
+            <option value="intraday">Preset: Intraday</option>
+            <option value="swing">Preset: Swing</option>
+            <option value="trend">Preset: Trend</option>
+        </select>
+    </div>
+    <div class="chart-controls draw-controls" style="margin-top:8px;">
+        <span class="muted-text">Draw:</span>
+        <button class="tf-btn" id="draw-trendline" onclick="setDrawMode('trendline')">Trendline</button>
+        <button class="tf-btn" id="draw-support" onclick="setDrawMode('support')">Support</button>
+        <button class="tf-btn" id="draw-resistance" onclick="setDrawMode('resistance')">Resistance</button>
+        <button class="tf-btn" onclick="clearDrawings()">Clear Drawings</button>
+        <span class="muted-text" id="draw-status">Click chart to draw.</span>
     </div>
 
     <!-- Price chart -->
@@ -116,6 +174,7 @@
     <!-- Performance stats (Groww-style) -->
     <div class="performance-section">
         <h3 class="section-heading">Performance</h3>
+        <p class="section-help-text">Shows intraday range and key quote stats from the live market feed for this ticker.</p>
         <div class="performance-bar">
             <div class="perf-label">Today's Low <span id="today-low">---</span></div>
             <div class="perf-range">
@@ -135,6 +194,7 @@
     <!-- ML Prediction section -->
     <div class="prediction-section" id="prediction-section">
         <h3 class="section-heading">🤖 AI Prediction <span class="pred-timestamp" id="pred-generated-at"></span></h3>
+        <p class="section-help-text">AI model output at request time: return %, target price, confidence, and model agreement with full feature breakdown.</p>
         <div class="prediction-loading" id="pred-loading">
             <div class="spinner"></div>
             <p>Running ML models...</p>
@@ -152,17 +212,17 @@
                     <span class="pred-value" id="pred-price">---</span>
                 </div>
                 <div class="pred-card">
-                    <span class="pred-label">Confidence</span>
+                    <span class="pred-label explainable-label" id="pred-confidence-label">Confidence ℹ️</span>
                     <span class="pred-value" id="pred-confidence">---</span>
                 </div>
                 <div class="pred-card">
-                    <span class="pred-label">Model Agreement</span>
+                    <span class="pred-label explainable-label" id="pred-agreement-label">Model Agreement ℹ️</span>
                     <span class="pred-value" id="pred-agreement">---</span>
                 </div>
             </div>
 
             <!-- Individual model predictions -->
-            <h4 class="sub-heading">Model Breakdown <span class="ensemble-strategy-badge" id="ensemble-strategy"></span></h4>
+            <h4 class="sub-heading">Model Breakdown <span class="ensemble-strategy-badge" id="ensemble-strategy"></span> <span class="clickable-hint">(click any model to explain)</span></h4>
             <div class="model-breakdown" id="model-breakdown"></div>
 
             <!-- Entry/Exit levels -->
@@ -197,11 +257,12 @@
     <!-- Strategy Section -->
     <div class="strategy-section" id="strategy-section">
         <h3 class="section-heading">🧠 Strategy Analysis</h3>
+        <p class="section-help-text">Rule-based strategy view plus Groq narrative. Strategy values are derived from current indicators, fundamentals, and greeks.</p>
         <div class="strategy-content" id="strategy-content">
             <div class="strategy-card">
                 <div class="strategy-header prediction-strategy">
                     <span class="strategy-icon">📊</span>
-                    <span>ML Prediction Strategy</span>
+                    <span>Strategy Prediction</span>
                 </div>
                 <div class="strategy-body" id="ml-strategy">
                     <p class="muted-text">Loading prediction analysis...</p>
@@ -231,6 +292,7 @@
     <!-- Prediction Hit/Miss Tracking -->
     <div class="tracking-section" id="tracking-section">
         <h3 class="section-heading">🎯 Prediction Tracking</h3>
+        <p class="section-help-text">Daily scorecard: how many predictions were made, evaluated, and how often strategy direction matched actual market direction.</p>
         <div class="tracking-summary" id="tracking-summary">
             <p class="muted-text">Loading prediction outcomes...</p>
         </div>
@@ -240,6 +302,7 @@
     <!-- Expected vs Actual for this stock -->
     <div class="eva-stock-section">
         <h3 class="section-heading">📊 Expected vs Actual</h3>
+        <p class="section-help-text">Compares market-open price and strategy-at-open target against live/close price, then reports direction correctness and alpha.</p>
         <div id="stock-eva-content">
             <p class="muted-text">Prediction will be compared with actual close at end of day.</p>
         </div>
@@ -248,17 +311,37 @@
     <!-- Features Affecting Price -->
     <div class="feature-importance-section" id="feature-importance-section">
         <h3 class="section-heading">🔬 What's Affecting This Stock's Price</h3>
+        <p class="section-help-text">Top drivers behind the prediction ranked by feature influence from the ensemble models.</p>
         <p class="section-subtitle-sm">Key factors from ML models that influence the prediction</p>
         <div class="feature-list" id="feature-list">
             <div class="loading-spinner"><div class="spinner"></div><p>Analyzing key factors...</p></div>
         </div>
     </div>
 
+    <!-- Stock Assistant -->
+    <div class="strategy-section" id="stock-chat-section">
+        <h3 class="section-heading">💬 Stock Assistant</h3>
+        <p class="section-help-text">Ask ticker-specific questions; responses use live prediction context, indicators, and current sentiment.</p>
+        <div class="strategy-card">
+            <div class="strategy-body">
+                <textarea id="stock-chat-input" placeholder="Ask: what does current RSI + MACD indicate?" style="width:100%;min-height:72px;background:var(--bg-secondary);color:var(--text-primary);border:1px solid var(--border);border-radius:8px;padding:10px;"></textarea>
+                <div style="margin-top:8px;display:flex;gap:8px;">
+                    <button class="portfolio-add-btn" onclick="askStockAssistant()">Ask Groq</button>
+                </div>
+                <div id="stock-chat-output" class="muted-text" style="margin-top:10px;">Ask a question to get contextual interpretation.</div>
+            </div>
+        </div>
+    </div>
+
     <!-- Real World News Section -->
     <div class="news-section" id="news-section">
         <h3 class="section-heading">📰 Real-World News & Sentiment</h3>
+        <p class="section-help-text">News and sentiment impact layer used to contextualize strategy and AI targets during the trading day.</p>
         <div class="news-content" id="news-content">
             <div class="loading-spinner"><div class="spinner"></div><p>Fetching latest news...</p></div>
+        </div>
+        <div class="news-content" id="groq-forecast-content" style="margin-top:12px;">
+            <div class="loading-spinner"><div class="spinner"></div><p>Loading Groq AI market impact forecast...</p></div>
         </div>
     </div>
 
@@ -275,6 +358,17 @@
                 <p>Getting AI explanation...</p>
             </div>
         </div>
+    </div>
+    <div
+        class="risk-tooltip groq-popover explain-popover hidden"
+        id="metric-tooltip"
+        role="dialog"
+        aria-live="polite"
+        aria-hidden="true"
+        tabindex="0"
+    >
+        <div class="risk-tooltip-title" id="metric-tooltip-title">Loading...</div>
+        <div class="risk-tooltip-body" id="metric-tooltip-body">Loading explanation...</div>
     </div>
 
     <!-- Disclaimer footer -->

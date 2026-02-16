@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    paths:
+      - 'masters_trading_ai/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'masters_trading_ai/**'
+      - '.github/workflows/ci.yml'
+
+jobs:
+  test-lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: masters_trading_ai
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest black flake8 mypy
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Black check
+        run: |
+          black --check \
+            src/backtest/metrics.py \
+            webapp/server.py \
+            webapp/prediction_tracker.py \
+            webapp/groq_explainer.py \
+            tests/test_premarket_outlook.py \
+            tests/test_expected_vs_actual.py \
+            tests/test_premarket_snapshot.py \
+            tests/test_risk_monte_carlo.py \
+            tests/test_tooltip_popover.py \
+            tests/test_artifact_cleanup.py
+
+      - name: Flake8
+        run: |
+          flake8 \
+            tests/test_premarket_outlook.py \
+            tests/test_expected_vs_actual.py \
+            tests/test_premarket_snapshot.py \
+            tests/test_risk_monte_carlo.py \
+            tests/test_tooltip_popover.py \
+            tests/test_artifact_cleanup.py \
+            --max-line-length=120 --extend-ignore=E203,W503
+
+      - name: Mypy
+        run: |
+          mypy \
+            src/backtest/metrics.py \
+            tests/test_premarket_snapshot.py \
+            tests/test_risk_monte_carlo.py \
+            --ignore-missing-imports --follow-imports=silent
