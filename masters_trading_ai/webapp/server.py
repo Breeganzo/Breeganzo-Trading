@@ -1631,12 +1631,54 @@ def api_advisor_open_buy_list():
     try:
         grouped = predictor.predict_top_picks_grouped(sectors=sectors, top_n=50)
         raw_buys = grouped.get("top_buy", []) if isinstance(grouped, dict) else []
+        raw_holds = grouped.get("top_hold", []) if isinstance(grouped, dict) else []
         buy_candidates = [
             p
             for p in raw_buys
             if _safe_float(p.get("current_price")) > 0
             and _safe_float(p.get("predicted_return")) > 0
         ]
+        if len(buy_candidates) < n:
+            seen = {str(p.get("ticker", "")).upper() for p in buy_candidates}
+            for p in raw_holds:
+                ticker = str(p.get("ticker", "")).upper()
+                if not ticker or ticker in seen:
+                    continue
+                if (
+                    _safe_float(p.get("current_price")) > 0
+                    and _safe_float(p.get("predicted_return")) > 0
+                ):
+                    enriched = dict(p)
+                    enriched["signal"] = "BUY_CANDIDATE"
+                    buy_candidates.append(enriched)
+                    seen.add(ticker)
+                if len(buy_candidates) >= 50:
+                    break
+            if len(buy_candidates) < n:
+                try:
+                    scan_universe = predictor._resolve_top_pick_tickers(sectors=sectors)
+                except Exception:
+                    scan_universe = []
+                for ticker in scan_universe:
+                    t = str(ticker or "").upper()
+                    if not t or t in seen:
+                        continue
+                    try:
+                        pred = predictor.predict_single(t, use_cache=True)
+                    except Exception:
+                        pred = None
+                    if not pred:
+                        continue
+                    if (
+                        _safe_float(pred.get("current_price")) > 0
+                        and _safe_float(pred.get("predicted_return")) > 0
+                    ):
+                        enriched = dict(pred)
+                        enriched["signal"] = enriched.get("signal") or "BUY_CANDIDATE"
+                        buy_candidates.append(enriched)
+                        seen.add(t)
+                    if len(buy_candidates) >= 50:
+                        break
         if not buy_candidates:
             return jsonify(
                 {
