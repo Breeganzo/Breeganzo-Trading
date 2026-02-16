@@ -5,6 +5,7 @@ from webapp import groq_explainer as ge
 
 def _reset_groq_state():
     ge._groq_keys = ["key-1", "key-2"]
+    ge._groq_models = ["model-primary", "model-fallback"]
     ge._active_key_index = 0
     ge._key_last_429_at = {}
     ge._degraded_until = 0.0
@@ -81,6 +82,37 @@ def test_groq_round_robin_across_calls(monkeypatch):
     out2 = ge._call_groq("rotation-2")
     assert out1 == "ok-key-1"
     assert out2 == "ok-key-2"
+
+
+def test_groq_falls_back_to_secondary_model_on_same_key(monkeypatch):
+    _reset_groq_state()
+    ge._groq_keys = ["only-key"]
+    ge._groq_models = ["model-primary", "model-fallback"]
+
+    monkeypatch.setattr(ge, "_get_cached", lambda _key: None)
+    monkeypatch.setattr(ge, "_set_cache", lambda _key, _text: None)
+    monkeypatch.setattr(ge, "_reserve_rate_slot", lambda *_args, **_kwargs: True)
+
+    def _client_for_key(_api_key: str):
+        class _Client:
+            def __init__(self):
+                self.chat = SimpleNamespace(
+                    completions=SimpleNamespace(create=self._create)
+                )
+
+            @staticmethod
+            def _create(**kwargs):
+                model = kwargs.get("model")
+                if model == "model-primary":
+                    raise RuntimeError("temporary model overload")
+                return _fake_response("ok-from-fallback-model")
+
+        return _Client()
+
+    monkeypatch.setattr(ge, "_get_client_for_key", _client_for_key)
+
+    out = ge._call_groq("model-fallback-test")
+    assert out == "ok-from-fallback-model"
 
 
 def test_groq_enters_degraded_mode_when_all_keys_429(monkeypatch):

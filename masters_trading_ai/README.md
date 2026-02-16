@@ -29,6 +29,9 @@ Optional Groq failover keys:
 GROQ_API_KEY_2=...
 GROQ_API_KEY_3=...
 GROQ_KEY_ROTATION_ENABLED=1
+GROQ_MODEL=llama-3.3-70b-versatile
+# Optional fallback model chain:
+GROQ_MODELS=llama-3.3-70b-versatile,llama-3.1-8b-instant
 ```
 
 ## 2) Run locally
@@ -265,6 +268,7 @@ This codebase uses caching and hard limits to avoid Groq overuse:
 - strict limits: `GROQ_GLOBAL_MAX_PER_MIN` and `GROQ_ENDPOINT_MAX_PER_MIN`
 - multi-key failover: `GROQ_API_KEY` -> `GROQ_API_KEY_2` -> `GROQ_API_KEY_3` (or `GROQ_API_KEYS`)
 - round-robin controls: `GROQ_KEY_ROTATION_ENABLED` (no key cooldown blocking)
+- model fallback chain: `GROQ_MODELS` (tries next model on same key before failing over key)
 - AI forecast cache (`webapp/server.py`): `GROQ_FORECAST_TTL=900s`
 - News-sentiment scoring cache (`src/inference/predictor.py`): `SENTIMENT_CACHE_TTL_SECONDS` (default 1800s)
 - News-sentiment call budget: `GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE` (default 8)
@@ -282,6 +286,8 @@ GROQ_API_KEY=...
 GROQ_API_KEY_2=
 GROQ_API_KEY_3=
 GROQ_KEY_ROTATION_ENABLED=1
+GROQ_MODEL=llama-3.3-70b-versatile
+GROQ_MODELS=llama-3.3-70b-versatile,llama-3.1-8b-instant
 ENABLE_GROQ_NEWS_SENTIMENT=1
 GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE=8
 SENTIMENT_CACHE_TTL_SECONDS=1800

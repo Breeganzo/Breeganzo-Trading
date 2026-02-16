@@ -36,6 +36,8 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_API_KEY_2 = os.environ.get("GROQ_API_KEY_2", "")
 GROQ_API_KEY_3 = os.environ.get("GROQ_API_KEY_3", "")
 GROQ_API_KEYS = os.environ.get("GROQ_API_KEYS", "")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+GROQ_MODELS = os.environ.get("GROQ_MODELS", "")
 GROQ_KEY_ROTATION_ENABLED = os.environ.get(
     "GROQ_KEY_ROTATION_ENABLED", "1"
 ).lower() not in (
@@ -73,7 +75,32 @@ if not _groq_keys:
         "Set GROQ_API_KEY (and optional GROQ_API_KEY_2/GROQ_API_KEY_3).",
         stacklevel=2,
     )
-GROQ_MODEL = "llama-3.3-70b-versatile"
+
+
+def _load_groq_models() -> list[str]:
+    candidates: list[str] = []
+    if GROQ_MODELS:
+        for raw in re.split(r"[,\n;]+", str(GROQ_MODELS)):
+            v = str(raw or "").strip()
+            if v:
+                candidates.append(v)
+    if GROQ_MODEL:
+        candidates.insert(0, GROQ_MODEL)
+
+    # Always keep one smaller fallback unless user explicitly provided it.
+    candidates.append("llama-3.1-8b-instant")
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for model in candidates:
+        if model in seen:
+            continue
+        seen.add(model)
+        out.append(model)
+    return out
+
+
+_groq_models: list[str] = _load_groq_models()
 CACHE_DIR = Path(__file__).parent.parent / "cache" / "groq_explanations"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -278,6 +305,7 @@ def get_groq_system_status() -> dict:
         "key_rotation_enabled": bool(GROQ_KEY_ROTATION_ENABLED),
         "key_pool_size": len(_groq_keys),
         "active_key_slot": active_slot,
+        "model_pool": list(_groq_models),
         "key_last_429": key_last_429,
     }
 
@@ -318,48 +346,50 @@ def _call_groq(prompt: str, max_tokens: int = 500) -> str:
             client = _get_client_for_key(_groq_keys[idx])
             if client is None:
                 continue
-            try:
-                resp = client.chat.completions.create(
-                    model=GROQ_MODEL,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a concise financial analyst assistant for an Indian stock trading app. "
-                                "Give clear, actionable explanations in 3-5 sentences. "
-                                "Always mention what the current value suggests the investor should consider. "
-                                "Use simple language. Be specific about implications. "
-                                "Never give definitive buy/sell advice — always say 'suggests' or 'indicates'. "
-                                "Format: start with a one-line definition, then explain current value implications."
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    max_tokens=max_tokens,
-                    temperature=0.3,
-                )
-                _last_call_time = time.time()
-                _last_success_at = _last_call_time
-                _degraded_until = 0.0
-                _degraded_reason = ""
-                _set_active_key((idx + 1) % len(_groq_keys))
-                text = resp.choices[0].message.content.strip()
-                _set_cache(key, text)
-                return text
-            except Exception as e:
-                err = str(e)
-                last_err = err
-                lower_err = err.lower()
-                is_429 = "429" in err or "rate limit" in lower_err
-                if is_429:
-                    saw_429 = True
-                    _record_key_429(idx, time.time())
-                    if GROQ_KEY_ROTATION_ENABLED and len(_groq_keys) > 1:
-                        continue
-                # Non-429 errors can still fail over to another key.
-                if GROQ_KEY_ROTATION_ENABLED and len(_groq_keys) > 1:
+            key_rate_limited = False
+            for model_name in _groq_models:
+                try:
+                    resp = client.chat.completions.create(
+                        model=model_name,
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are a concise financial analyst assistant for an Indian stock trading app. "
+                                    "Give clear, actionable explanations in 3-5 sentences. "
+                                    "Always mention what the current value suggests the investor should consider. "
+                                    "Use simple language. Be specific about implications. "
+                                    "Never give definitive buy/sell advice — always say 'suggests' or 'indicates'. "
+                                    "Format: start with a one-line definition, then explain current value implications."
+                                ),
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        max_tokens=max_tokens,
+                        temperature=0.3,
+                    )
+                    _last_call_time = time.time()
+                    _last_success_at = _last_call_time
+                    _degraded_until = 0.0
+                    _degraded_reason = ""
+                    _set_active_key((idx + 1) % len(_groq_keys))
+                    text = resp.choices[0].message.content.strip()
+                    _set_cache(key, text)
+                    return text
+                except Exception as e:
+                    err = str(e)
+                    last_err = err
+                    lower_err = err.lower()
+                    is_429 = "429" in err or "rate limit" in lower_err
+                    if is_429:
+                        saw_429 = True
+                        _record_key_429(idx, time.time())
+                        key_rate_limited = True
+                        break
+                    # Try next model for the same key before failing over keys.
                     continue
-                break
+            if key_rate_limited and GROQ_KEY_ROTATION_ENABLED and len(_groq_keys) > 1:
+                continue
 
         if saw_429:
             _mark_degraded("upstream_429", error=last_err, is_429=True)
