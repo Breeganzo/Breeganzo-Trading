@@ -815,7 +815,9 @@ def monte_carlo_backtest(
         derived_returns = eq.pct_change().dropna()
         clean = derived_returns.values
         simulation_source = "equity_curve"
-        base_initial_capital = float(eq.iloc[0])
+        base_initial_capital = (
+            float(initial_capital) if float(initial_capital) > 0 else float(eq.iloc[0])
+        )
     else:
         if returns is None:
             return {"error": "Returns or equity_curve is required for Monte Carlo"}

@@ -1978,6 +1978,29 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
         return {}
     out = dict(snapshot)
     snap_date = out.get("date") or datetime.now(IST).strftime("%Y-%m-%d")
+    snapshot_type = str(out.get("snapshot_type", "")).strip().lower()
+    allowed_types = {
+        "pending_market_open",
+        "premarket_preview",
+        "market_open",
+        "near_open_fallback",
+        "market_open_live",
+        "market_open_backfilled",
+    }
+    if snapshot_type not in allowed_types:
+        snapshot_type = ""
+    out["snapshot_type"] = snapshot_type or "market_open"
+
+    if snapshot_type == "pending_market_open":
+        out["date"] = snap_date
+        out.setdefault("captured_at", None)
+        out["captured_at_actual"] = out.get("captured_at_actual")
+        out["items"] = []
+        out.setdefault("buffer_minutes", PREMARKET_MAX_BUFFER_MINUTES)
+        out.setdefault("captured_within_buffer", None)
+        out.setdefault("capture_note", "Waiting for market open snapshot window")
+        return out
+
     snap_captured_actual = out.get("captured_at_actual") or out.get("captured_at")
     snap_captured = _normalize_open_window_timestamp(
         out.get("captured_at") or snap_captured_actual,
@@ -1992,8 +2015,7 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
     )
 
     parsed_actual = _parse_iso_datetime(out["captured_at_actual"])
-    snapshot_type = str(out.get("snapshot_type", "")).strip()
-    if snapshot_type not in {"market_open_live", "market_open_backfilled"}:
+    if snapshot_type in {"", "market_open"}:
         if parsed_actual is not None:
             open_start, open_end = _open_window_bounds(parsed_actual.date())
             snapshot_type = (
@@ -2006,6 +2028,13 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
             ).isoformat()
         else:
             snapshot_type = "market_open"
+    elif snapshot_type not in {
+        "near_open_fallback",
+        "premarket_preview",
+        "market_open_live",
+        "market_open_backfilled",
+    }:
+        snapshot_type = "market_open"
     out["snapshot_type"] = snapshot_type
 
     if out.get("captured_within_buffer") not in (True, False):
@@ -2039,6 +2068,7 @@ def _normalize_premarket_snapshot(snapshot: dict) -> dict:
         )
         row["captured_at"] = row_captured
         row["captured_at_actual"] = row_captured_actual or out["captured_at_actual"]
+        row["snapshot_type"] = row.get("snapshot_type") or out["snapshot_type"]
         row["strategy_predicted_at_open"] = (
             _normalize_open_window_timestamp(
                 row.get("strategy_predicted_at_open") or row_captured,
@@ -2174,6 +2204,7 @@ def _build_premarket_snapshot(
             ),
             "strategy_source": "ensemble_models",
             "ai_source": ai_meta.get("source", "none"),
+            "snapshot_type": snapshot_type,
         }
         rows.append(row)
 
@@ -2213,7 +2244,7 @@ def _build_premarket_snapshot(
             "date": today,
             "captured_at": captured_at_open_window,
             "captured_at_actual": captured_at_actual,
-            "snapshot_type": "market_open",
+            "snapshot_type": snapshot_type,
             "items": rows,
         }
     )
@@ -2234,44 +2265,53 @@ def _capture_premarket_snapshot_if_due(force: bool = False) -> dict:
     open_start, open_end = _open_window_bounds(now.date())
     fallback_deadline = open_end + timedelta(minutes=PREMARKET_MAX_BUFFER_MINUTES)
 
+    open_types = {
+        "market_open",
+        "near_open_fallback",
+        "market_open_live",
+        "market_open_backfilled",
+    }
+
     with _premarket_snapshot_lock:
-        if (
-            _premarket_snapshot
-            and _premarket_snapshot.get("date") == today
-            and _premarket_snapshot.get("items")
-        ):
+        if _premarket_snapshot and _premarket_snapshot.get("date") == today:
             cached = _normalize_premarket_snapshot(dict(_premarket_snapshot))
             cached_type = str(cached.get("snapshot_type") or "").lower()
-            has_open_snapshot = cached_type in {"market_open", "near_open_fallback"}
-            if not force and (has_open_snapshot or now < open_start):
+            if not force and (
+                (cached.get("items") and cached_type in open_types)
+                or (now < open_start and cached_type == "pending_market_open")
+            ):
                 return cached
 
         disk_snapshot = _load_premarket_snapshot_from_disk()
-        if (
-            disk_snapshot
-            and disk_snapshot.get("date") == today
-            and disk_snapshot.get("items")
-        ):
+        if disk_snapshot and disk_snapshot.get("date") == today:
             normalized = _normalize_premarket_snapshot(dict(disk_snapshot))
             disk_type = str(normalized.get("snapshot_type") or "").lower()
-            has_open_snapshot = disk_type in {"market_open", "near_open_fallback"}
-            if not force and (has_open_snapshot or now < open_start):
+            if not force and (
+                (normalized.get("items") and disk_type in open_types)
+                or (now < open_start and disk_type == "pending_market_open")
+            ):
                 _premarket_snapshot = normalized
                 return dict(_premarket_snapshot)
 
     if now < open_start and not force:
-        return _normalize_premarket_snapshot(
+        pending = _normalize_premarket_snapshot(
             {
                 "date": today,
                 "captured_at": None,
+                "captured_at_actual": None,
                 "snapshot_type": "pending_market_open",
                 "schema_version": 2,
                 "capture_cutoff": open_start.isoformat(),
                 "buffer_minutes": PREMARKET_MAX_BUFFER_MINUTES,
                 "captured_within_buffer": None,
+                "capture_note": "Waiting for market open snapshot window",
                 "items": [],
             }
         )
+        with _premarket_snapshot_lock:
+            _premarket_snapshot = pending
+            _save_premarket_snapshot_to_disk(pending)
+            return dict(_premarket_snapshot)
 
     if now < open_start and force:
         snapshot_type = "premarket_preview"
@@ -2288,43 +2328,35 @@ def _capture_premarket_snapshot_if_due(force: bool = False) -> dict:
             fallback_deadline.isoformat(),
         )
 
-    # Build outside lock (may call network/model inference).
-    snapshot = _normalize_premarket_snapshot(_build_premarket_snapshot())
-    open_window_end = _market_open_dt(now) + timedelta(minutes=15)
-    captured_actual = snapshot.get("captured_at_actual") or now.isoformat()
-    if _parse_iso_datetime(snapshot.get("captured_at")) is None:
-        snapshot["captured_at"] = _normalize_open_window_timestamp(
-            captured_actual,
-            date_hint=today,
-            default_offset_minutes=20,
+    snapshot = _normalize_premarket_snapshot(
+        _build_premarket_snapshot(
+            snapshot_type=snapshot_type,
+            captured_at=now.isoformat(),
         )
-    snapshot["captured_at_actual"] = captured_actual
-    snapshot["capture_cutoff"] = cutoff.isoformat()
-    snapshot["buffer_minutes"] = PREMARKET_MAX_BUFFER_MINUTES
-    snapshot["captured_within_buffer"] = now <= cutoff
-    snapshot["snapshot_type"] = (
-        "market_open_live"
-        if now <= open_window_end
-        else "market_open_backfilled"
     )
-    snapshot["capture_note"] = (
-        "Captured in pre-open buffer"
-        if now <= cutoff
-        else "Backfilled from later session using market-open window timestamps"
-    )
-    if not snapshot["captured_within_buffer"]:
-        log.warning(
-            "Premarket snapshot captured after cutoff. now=%s cutoff=%s buffer=%sm",
-            now.isoformat(),
-            cutoff.isoformat(),
-            PREMARKET_MAX_BUFFER_MINUTES,
-        )
+    snapshot["snapshot_type"] = snapshot_type
+    snapshot["captured_at_actual"] = snapshot.get("captured_at_actual") or now.isoformat()
+    snapshot["captured_at"] = _normalize_open_window_timestamp(
+        snapshot.get("captured_at") or snapshot["captured_at_actual"],
+        date_hint=today,
+        default_offset_minutes=20,
     )
     snapshot["capture_cutoff"] = open_start.isoformat()
     snapshot["buffer_minutes"] = PREMARKET_MAX_BUFFER_MINUTES
     snapshot["captured_within_buffer"] = now <= fallback_deadline
     snapshot["open_window_end"] = open_end.isoformat()
     snapshot["market_open_time"] = open_start.isoformat()
+    if not snapshot["captured_within_buffer"]:
+        log.warning(
+            "Premarket snapshot captured after fallback buffer. now=%s deadline=%s buffer=%sm",
+            now.isoformat(),
+            fallback_deadline.isoformat(),
+            PREMARKET_MAX_BUFFER_MINUTES,
+        )
+
+    for row in snapshot.get("items", []):
+        if isinstance(row, dict):
+            row["snapshot_type"] = snapshot_type
 
     with _premarket_snapshot_lock:
         _premarket_snapshot = snapshot
@@ -4171,6 +4203,7 @@ def api_risk_analytics():
             port_returns,
             n_simulations=500,
             initial_capital=initial_capital,
+            equity_curve=port_equity,
         )
 
         # --- Equity Curve (for chart) ---
