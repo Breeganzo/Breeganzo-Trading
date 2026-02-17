@@ -17,7 +17,7 @@ import smtplib
 import logging
 import threading
 from email.message import EmailMessage
-from collections import deque
+from collections import deque, defaultdict
 from uuid import uuid4
 from io import StringIO
 from pathlib import Path
@@ -1127,6 +1127,227 @@ def _build_transaction_summary(date_str: str | None = None) -> dict:
         "csv_ledger_file": str(SIMULATED_TRADE_CSV_FILE),
         "in_memory_cache_rows": len(cache_rows),
         "events": trade_rows[-100:],
+    }
+
+
+def _minutes_between(start_iso: str | None, end_iso: str | None) -> int | None:
+    try:
+        if not start_iso or not end_iso:
+            return None
+        start_dt = datetime.fromisoformat(str(start_iso))
+        end_dt = datetime.fromisoformat(str(end_iso))
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=IST)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=IST)
+        return max(0, int((end_dt - start_dt).total_seconds() // 60))
+    except Exception:
+        return None
+
+
+def _build_sim_trade_ledger(
+    date_str: str | None = None,
+    *,
+    limit: int = 500,
+) -> dict:
+    """
+    Build human-readable trade ledger rows from BUY/SELL events.
+    Rows are either:
+    - SOLD: buy lot matched against sell execution (FIFO)
+    - HOLD: buy lot still open
+    """
+    target_date = str(date_str or datetime.now(IST).strftime("%Y-%m-%d"))
+    events = _read_sim_trade_events(target_date)
+    trade_events = [
+        e
+        for e in events
+        if str(e.get("action", "")).upper() in {"BUY", "SELL"}
+        and str(e.get("ticker", "")).strip()
+        and _safe_float(e.get("quantity")) > 0
+    ]
+
+    buy_lots: dict[str, list[dict]] = defaultdict(list)
+    ledger_rows: list[dict] = []
+    eps = 1e-9
+
+    for ev in trade_events:
+        action = str(ev.get("action", "")).upper()
+        ticker = str(ev.get("ticker", "")).upper()
+        qty = _safe_float(ev.get("quantity"))
+        price = _safe_float(ev.get("price"))
+        fee = max(0.0, _safe_float(ev.get("fee")))
+        if qty <= 0 or price <= 0:
+            continue
+
+        if action == "BUY":
+            buy_lots[ticker].append(
+                {
+                    "id": ev.get("id"),
+                    "timestamp": ev.get("timestamp"),
+                    "date_ist": ev.get("date_ist"),
+                    "time_ist": ev.get("time_ist"),
+                    "quantity": qty,
+                    "remaining_qty": qty,
+                    "price": price,
+                    "fee_total": fee,
+                    "reason": str(ev.get("reason", "buy")),
+                    "source": str(ev.get("source", "strategy_simulation")),
+                }
+            )
+            continue
+
+        # SELL (FIFO match against open buy lots)
+        sell_qty_total = qty
+        sell_qty_remaining = qty
+        sell_realized_total = _safe_float(ev.get("realized_pnl"))
+        lots = buy_lots.get(ticker, [])
+
+        while sell_qty_remaining > eps and lots:
+            lot = lots[0]
+            lot_rem = _safe_float(lot.get("remaining_qty"))
+            if lot_rem <= eps:
+                lots.pop(0)
+                continue
+            matched_qty = min(lot_rem, sell_qty_remaining)
+            if matched_qty <= eps:
+                break
+
+            buy_fee_alloc = _safe_float(lot.get("fee_total")) * (
+                matched_qty / max(_safe_float(lot.get("quantity")), eps)
+            )
+            sell_fee_alloc = fee * (matched_qty / max(sell_qty_total, eps))
+            buy_notional = matched_qty * _safe_float(lot.get("price"))
+            sell_notional = matched_qty * price
+
+            realized_alloc = sell_realized_total * (
+                matched_qty / max(sell_qty_total, eps)
+            )
+            if abs(realized_alloc) <= eps:
+                realized_alloc = (
+                    (price - _safe_float(lot.get("price"))) * matched_qty
+                    - buy_fee_alloc
+                    - sell_fee_alloc
+                )
+
+            buy_ts = lot.get("timestamp")
+            sell_ts = ev.get("timestamp")
+            hold_minutes = _minutes_between(buy_ts, sell_ts)
+
+            ledger_rows.append(
+                {
+                    "ticker": ticker,
+                    "name": ticker_names.get(ticker, _clean_name(ticker)),
+                    "status": "SOLD",
+                    "quantity": round(matched_qty, 4),
+                    "buy_trade_id": lot.get("id"),
+                    "buy_timestamp": buy_ts,
+                    "buy_date_ist": lot.get("date_ist"),
+                    "buy_time_ist": lot.get("time_ist"),
+                    "buy_price": round(_safe_float(lot.get("price")), 2),
+                    "buy_fee": round(buy_fee_alloc, 2),
+                    "buy_total_paid": round(buy_notional + buy_fee_alloc, 2),
+                    "sell_trade_id": ev.get("id"),
+                    "sell_timestamp": sell_ts,
+                    "sell_date_ist": ev.get("date_ist"),
+                    "sell_time_ist": ev.get("time_ist"),
+                    "sell_price": round(price, 2),
+                    "sell_fee": round(sell_fee_alloc, 2),
+                    "sell_total_received": round(max(0.0, sell_notional - sell_fee_alloc), 2),
+                    "realized_pnl": round(realized_alloc, 2),
+                    "unrealized_pnl": None,
+                    "hold_minutes": hold_minutes,
+                    "sell_reason": str(ev.get("reason", "")),
+                    "source": str(ev.get("source", lot.get("source", "strategy_simulation"))),
+                }
+            )
+
+            lot["remaining_qty"] = round(lot_rem - matched_qty, 6)
+            sell_qty_remaining = round(sell_qty_remaining - matched_qty, 6)
+            if lot["remaining_qty"] <= eps:
+                lots.pop(0)
+
+    # Remaining lots are HOLD rows (still open)
+    state = _read_portfolio_sim_state()
+    open_positions_state = {
+        str(t).upper(): dict(v or {})
+        for t, v in dict(state.get("open_positions", {})).items()
+    }
+    now_iso = datetime.now(IST).isoformat()
+
+    for ticker, lots in buy_lots.items():
+        pos = open_positions_state.get(ticker, {})
+        current_price = _safe_float(pos.get("last_price"))
+        if current_price <= 0:
+            current_price = _safe_float(pos.get("avg_entry_price"))
+        for lot in lots:
+            rem_qty = _safe_float(lot.get("remaining_qty"))
+            if rem_qty <= eps:
+                continue
+            lot_qty = max(_safe_float(lot.get("quantity")), eps)
+            lot_price = _safe_float(lot.get("price"))
+            buy_fee_alloc = _safe_float(lot.get("fee_total")) * (rem_qty / lot_qty)
+            notional = rem_qty * lot_price
+            unrealized = None
+            if current_price > 0:
+                unrealized = (current_price - lot_price) * rem_qty - buy_fee_alloc
+
+            ledger_rows.append(
+                {
+                    "ticker": ticker,
+                    "name": ticker_names.get(ticker, _clean_name(ticker)),
+                    "status": "HOLD",
+                    "quantity": round(rem_qty, 4),
+                    "buy_trade_id": lot.get("id"),
+                    "buy_timestamp": lot.get("timestamp"),
+                    "buy_date_ist": lot.get("date_ist"),
+                    "buy_time_ist": lot.get("time_ist"),
+                    "buy_price": round(lot_price, 2),
+                    "buy_fee": round(buy_fee_alloc, 2),
+                    "buy_total_paid": round(notional + buy_fee_alloc, 2),
+                    "sell_trade_id": None,
+                    "sell_timestamp": None,
+                    "sell_date_ist": None,
+                    "sell_time_ist": None,
+                    "sell_price": None,
+                    "sell_fee": None,
+                    "sell_total_received": None,
+                    "realized_pnl": None,
+                    "unrealized_pnl": round(unrealized, 2) if unrealized is not None else None,
+                    "hold_minutes": _minutes_between(lot.get("timestamp"), now_iso),
+                    "sell_reason": None,
+                    "source": str(lot.get("source", "strategy_simulation")),
+                    "current_price": round(current_price, 2) if current_price > 0 else None,
+                }
+            )
+
+    ledger_rows.sort(
+        key=lambda row: str(row.get("buy_timestamp") or ""),
+        reverse=True,
+    )
+    if limit > 0:
+        ledger_rows = ledger_rows[: max(1, min(limit, 1000))]
+
+    sold_count = sum(1 for r in ledger_rows if r.get("status") == "SOLD")
+    hold_count = sum(1 for r in ledger_rows if r.get("status") == "HOLD")
+    realized_total = sum(
+        _safe_float(r.get("realized_pnl"))
+        for r in ledger_rows
+        if r.get("status") == "SOLD"
+    )
+    unrealized_total = sum(
+        _safe_float(r.get("unrealized_pnl"))
+        for r in ledger_rows
+        if r.get("status") == "HOLD"
+    )
+
+    return {
+        "date": target_date,
+        "count": len(ledger_rows),
+        "sold_count": sold_count,
+        "hold_count": hold_count,
+        "realized_pnl_total": round(realized_total, 2),
+        "unrealized_pnl_total": round(unrealized_total, 2),
+        "rows": ledger_rows,
     }
 
 
@@ -3167,6 +3388,20 @@ def api_simulate_transactions_summary():
     target_date = date_str or datetime.now(IST).strftime("%Y-%m-%d")
     summary = _build_transaction_summary(target_date)
     return jsonify(summary)
+
+
+@app.route("/api/simulate/trade-ledger")
+def api_simulate_trade_ledger():
+    """Return BUY/SELL paired ledger rows with HOLD/SOLD status."""
+    date_str = request.args.get("date", "").strip()
+    target_date = date_str or datetime.now(IST).strftime("%Y-%m-%d")
+    try:
+        limit = int(request.args.get("limit", 300))
+    except Exception:
+        limit = 300
+    limit = max(1, min(limit, 1000))
+    payload = _build_sim_trade_ledger(target_date, limit=limit)
+    return jsonify(payload)
 
 
 @app.route("/api/simulate/daily-report")

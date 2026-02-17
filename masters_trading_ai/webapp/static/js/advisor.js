@@ -11,6 +11,29 @@ function advisorFormatPrice(value) {
     return `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 }
 
+function advisorFormatSignedPrice(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '—';
+    const sign = n > 0 ? '+' : '';
+    return `${sign}₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+}
+
+function advisorFormatTimestamp(value) {
+    if (!value) return '—';
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return '—';
+    return d.toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true,
+    });
+}
+
 function advisorBudgetValue() {
     const el = document.getElementById('advisor-budget');
     const n = Number(el?.value || 0);
@@ -56,6 +79,47 @@ async function refreshAdvisorTransactions() {
     }
 }
 
+function renderAdvisorTradeLedger(payload) {
+    const body = document.getElementById('advisor-trade-ledger-body');
+    if (!body) return;
+    const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+    if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="9" class="muted-text">No simulated transactions yet.</td></tr>';
+        return;
+    }
+    body.innerHTML = rows.map((row) => {
+        const status = String(row.status || 'HOLD').toUpperCase();
+        const qty = Number(row.quantity || 0);
+        const pnl = status === 'SOLD' ? Number(row.realized_pnl || 0) : Number(row.unrealized_pnl || 0);
+        const pnlStyle = pnl > 0 ? 'color: var(--green);' : (pnl < 0 ? 'color: var(--red);' : '');
+        const reason = status === 'SOLD' ? (row.sell_reason || 'sold') : 'hold_open';
+        return `
+            <tr>
+                <td><strong>${row.name || (row.ticker || '').replace('.NS', '')}</strong><br><span class="muted-text">${row.ticker || '—'}</span></td>
+                <td>${status}</td>
+                <td>${Number.isFinite(qty) ? qty : '—'}</td>
+                <td>${advisorFormatPrice(row.buy_price)}</td>
+                <td>${advisorFormatTimestamp(row.buy_timestamp)}</td>
+                <td>${advisorFormatPrice(row.sell_price)}</td>
+                <td>${advisorFormatTimestamp(row.sell_timestamp)}</td>
+                <td style="${pnlStyle}">${advisorFormatSignedPrice(pnl)}</td>
+                <td>${reason}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+async function refreshAdvisorTradeLedger() {
+    try {
+        const res = await fetch('/api/simulate/trade-ledger?limit=200');
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Trade ledger unavailable');
+        renderAdvisorTradeLedger(data);
+    } catch (_) {
+        renderAdvisorTradeLedger(null);
+    }
+}
+
 async function refreshAdvisorSummary() {
     try {
         const res = await fetch('/api/simulate/portfolio');
@@ -68,10 +132,12 @@ async function refreshAdvisorSummary() {
         if (openEl) openEl.textContent = String(data.open_positions_count || 0);
         if (eqEl) eqEl.textContent = advisorFormatPrice(data.equity_value);
         renderTransactionSummary(data.transaction_summary || null);
+        await refreshAdvisorTradeLedger();
     } catch (e) {
         const status = document.getElementById('advisor-status');
         if (status) status.textContent = `Simulation summary error: ${e.message}`;
         await refreshAdvisorTransactions();
+        await refreshAdvisorTradeLedger();
     }
 }
 
@@ -222,3 +288,4 @@ window.runAdvisorAutoCheck = runAdvisorAutoCheck;
 window.resetAdvisorSimulation = resetAdvisorSimulation;
 window.refreshAdvisorSummary = refreshAdvisorSummary;
 window.refreshAdvisorTransactions = refreshAdvisorTransactions;
+window.refreshAdvisorTradeLedger = refreshAdvisorTradeLedger;
