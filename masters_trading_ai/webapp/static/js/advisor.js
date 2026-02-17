@@ -22,6 +22,15 @@ function advisorFormatSignedPrice(value) {
     return `${sign}₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 }
 
+function advisorFormatPriceRange(low, high) {
+    const lo = Number(low);
+    const hi = Number(high);
+    if (!Number.isFinite(lo) || lo <= 0 || !Number.isFinite(hi) || hi <= 0) return '—';
+    const min = Math.min(lo, hi);
+    const max = Math.max(lo, hi);
+    return `${advisorFormatPrice(min)} - ${advisorFormatPrice(max)}`;
+}
+
 function advisorFormatTimestamp(value) {
     if (!value) return '—';
     const d = new Date(value);
@@ -114,7 +123,7 @@ function renderAdvisorTradeLedgerRows(rows) {
         return true;
     });
     if (!filtered.length) {
-        body.innerHTML = '<tr><td colspan="9" class="muted-text">No simulated transactions yet.</td></tr>';
+        body.innerHTML = '<tr><td colspan="13" class="muted-text">No simulated transactions yet.</td></tr>';
         return;
     }
     body.innerHTML = filtered.map((row) => {
@@ -130,6 +139,10 @@ function renderAdvisorTradeLedgerRows(rows) {
                 <td>${Number.isFinite(qty) ? qty : '—'}</td>
                 <td>${advisorFormatPrice(row.buy_price)}</td>
                 <td>${advisorFormatTimestamp(row.buy_timestamp)}</td>
+                <td>${advisorFormatPrice(row.current_price || row.sell_price)}</td>
+                <td>${advisorFormatPriceRange(row.entry_range_low, row.entry_range_high)}</td>
+                <td>${advisorFormatPrice(row.stop_loss_price)}</td>
+                <td>${advisorFormatPrice(row.target_price)}</td>
                 <td>${advisorFormatPrice(row.sell_price)}</td>
                 <td>${advisorFormatTimestamp(row.sell_timestamp)}</td>
                 <td style="${pnlStyle}">${advisorFormatSignedPrice(pnl)}</td>
@@ -180,7 +193,7 @@ function renderAdvisorOpenList(rows) {
     const body = document.getElementById('advisor-open-buy-body');
     if (!body) return;
     if (!rows || !rows.length) {
-        body.innerHTML = '<tr><td colspan="8" class="muted-text">No advisor picks available right now.</td></tr>';
+        body.innerHTML = '<tr><td colspan="11" class="muted-text">No advisor picks available right now.</td></tr>';
         return;
     }
     body.innerHTML = rows.map((row) => `
@@ -188,9 +201,12 @@ function renderAdvisorOpenList(rows) {
             <td><strong>${row.name || row.ticker.replace('.NS', '')}</strong><br><span class="muted-text">${row.ticker}</span></td>
             <td>${String(row.sector || 'other').replaceAll('_', ' ')}</td>
             <td>${advisorFormatPrice(row.strategy_price_at_open)}</td>
+            <td>${advisorFormatPrice(row.current_price)}</td>
+            <td>${advisorFormatPriceRange(row.entry_range_low, row.entry_range_high)}</td>
             <td>${Number(row.suggested_qty || 0)}</td>
             <td>${advisorFormatPrice(row.est_trade_cost)}</td>
             <td>${advisorFormatPrice(row.stop_loss_price)}</td>
+            <td>${advisorFormatPrice(row.target_price)}</td>
             <td>${Number(row.risk_reward || 0).toFixed(2)}</td>
             <td>
                 <button type="button" class="tf-btn" onclick="simulateAdvisorBuy('${row.ticker}')">Sim BUY</button>
@@ -233,6 +249,24 @@ async function loadAdvisorOpenBuyList() {
     }
 }
 
+async function refreshAdvisorOpenListLivePrices() {
+    if (!advisorOpenList.length) return;
+    const tickers = [...new Set(advisorOpenList.map((r) => String(r?.ticker || '').toUpperCase()).filter(Boolean))];
+    if (!tickers.length) return;
+    const res = await fetch(`/api/prices?tickers=${tickers.join(',')}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    advisorOpenList = advisorOpenList.map((row) => {
+        const ticker = String(row?.ticker || '').toUpperCase();
+        const px = Number(data?.[ticker]?.price || 0);
+        if (!Number.isFinite(px) || px <= 0) return row;
+        return { ...row, current_price: px };
+    });
+    if (advisorViewFilter === 'buy') {
+        renderAdvisorOpenList(advisorOpenList);
+    }
+}
+
 async function simulateAdvisorBuy(ticker) {
     if (advisorBusy) return;
     const row = advisorOpenList.find((r) => r.ticker === ticker);
@@ -251,8 +285,10 @@ async function simulateAdvisorBuy(ticker) {
                 action: 'BUY',
                 ticker: row.ticker,
                 quantity: Number(row.suggested_qty || 0),
-                price: Number(row.strategy_price_at_open || row.current_price || 0),
+                price: Number(row.current_price || row.strategy_price_at_open || 0),
                 strategy_entry_price: Number(row.strategy_price_at_open || 0),
+                entry_range_low: Number(row.entry_range_low || 0),
+                entry_range_high: Number(row.entry_range_high || 0),
                 stop_loss_price: Number(row.stop_loss_price || 0),
                 target_price: Number(row.target_price || row.current_price || row.strategy_price_at_open || 0),
                 risk_reward: Number(row.risk_reward || 1.2),
@@ -264,7 +300,9 @@ async function simulateAdvisorBuy(ticker) {
         });
         const data = await res.json();
         if (!res.ok || data.error) throw new Error(data.error || 'Simulated BUY failed');
-        if (status) status.textContent = `Simulated BUY: ${row.ticker} x ${row.suggested_qty} at ${advisorFormatPrice(row.strategy_price_at_open)}.`;
+        if (status) {
+            status.textContent = `Simulated BUY: ${row.ticker} x ${row.suggested_qty} at ${advisorFormatPrice(data?.event?.price || row.current_price || row.strategy_price_at_open)} within ${advisorFormatPriceRange(row.entry_range_low, row.entry_range_high)}.`;
+        }
         await refreshAdvisorSummary();
     } catch (e) {
         if (status) status.textContent = `Simulated BUY error: ${e.message}`;
@@ -310,11 +348,19 @@ async function resetAdvisorSimulation() {
         const res = await fetch('/api/simulate/trade', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'RESET', budget }),
+            body: JSON.stringify({
+                action: 'RESET',
+                budget,
+                clear_history: true,
+                clear_portfolio_sim_trades: true,
+            }),
         });
         const data = await res.json();
         if (!res.ok || data.error) throw new Error(data.error || 'Reset failed');
-        if (status) status.textContent = `Simulation reset to ₹${budget.toLocaleString('en-IN')}.`;
+        if (status) {
+            const cleaned = Number(data?.cleanup?.removed_portfolio_sim_trades || 0);
+            status.textContent = `Simulation reset to ₹${budget.toLocaleString('en-IN')} (cleared ${cleaned} old simulation portfolio trades).`;
+        }
         await refreshAdvisorSummary();
         setAdvisorBusy(false);
         await loadAdvisorOpenBuyList();
@@ -332,6 +378,7 @@ async function advisorRealtimeTick() {
     if (!panel) return;
     advisorRealtimeBusy = true;
     try {
+        await refreshAdvisorOpenListLivePrices();
         await refreshAdvisorSummary();
     } catch (_) {
         // best effort polling

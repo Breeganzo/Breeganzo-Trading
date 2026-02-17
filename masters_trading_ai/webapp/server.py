@@ -226,11 +226,23 @@ ADVISOR_MAX_PORTFOLIO_RISK = float(
 )
 ADVISOR_MAX_PER_SECTOR = max(1, int(os.environ.get("ADVISOR_MAX_PER_SECTOR", "3")))
 ADVISOR_BUY_TRIGGER_BUFFER = float(os.environ.get("ADVISOR_BUY_TRIGGER_BUFFER", "0.002"))
+ADVISOR_ENTRY_RANGE_PCT = float(os.environ.get("ADVISOR_ENTRY_RANGE_PCT", "0.003"))
+ADVISOR_ENTRY_RANGE_MIN_PCT = float(os.environ.get("ADVISOR_ENTRY_RANGE_MIN_PCT", "0.001"))
+ADVISOR_TARGET_STEP_MULTIPLIER = float(
+    os.environ.get("ADVISOR_TARGET_STEP_MULTIPLIER", "1.0")
+)
+ADVISOR_TARGET_STEP_MIN_PCT = float(
+    os.environ.get("ADVISOR_TARGET_STEP_MIN_PCT", "0.005")
+)
 SIM_MAX_PRICE_DEVIATION_FROM_STRATEGY = float(
     os.environ.get("SIM_MAX_PRICE_DEVIATION_FROM_STRATEGY", "0.35")
 )
 SIM_MAX_PRICE_DEVIATION_FROM_ENTRY = float(
     os.environ.get("SIM_MAX_PRICE_DEVIATION_FROM_ENTRY", "0.35")
+)
+PORTFOLIO_MAX_TRADE_QTY = int(os.environ.get("PORTFOLIO_MAX_TRADE_QTY", "25000"))
+PORTFOLIO_MAX_TRADE_PRICE = float(
+    os.environ.get("PORTFOLIO_MAX_TRADE_PRICE", "200000")
 )
 SIM_PRICE_HARD_MAX = float(os.environ.get("SIM_PRICE_HARD_MAX", "1000000"))
 SIM_QTY_HARD_MAX = int(os.environ.get("SIM_QTY_HARD_MAX", "100000"))
@@ -1370,6 +1382,10 @@ def _build_sim_trade_ledger(
                     "fee_total": fee,
                     "reason": str(ev.get("reason", "buy")),
                     "source": str(ev.get("source", "strategy_simulation")),
+                    "stop_loss_price": _safe_float(ev.get("stop_loss_price")),
+                    "target_price": _safe_float(ev.get("target_price")),
+                    "entry_range_low": _safe_float(ev.get("entry_range_low")),
+                    "entry_range_high": _safe_float(ev.get("entry_range_high")),
                 }
             )
             continue
@@ -1436,6 +1452,16 @@ def _build_sim_trade_ledger(
                     "hold_minutes": hold_minutes,
                     "sell_reason": str(ev.get("reason", "")),
                     "source": str(ev.get("source", lot.get("source", "strategy_simulation"))),
+                    "stop_loss_price": round(
+                        _safe_float(ev.get("stop_loss_price") or lot.get("stop_loss_price")),
+                        2,
+                    ),
+                    "target_price": round(
+                        _safe_float(ev.get("target_price") or lot.get("target_price")),
+                        2,
+                    ),
+                    "entry_range_low": round(_safe_float(lot.get("entry_range_low")), 2),
+                    "entry_range_high": round(_safe_float(lot.get("entry_range_high")), 2),
                 }
             )
 
@@ -1452,9 +1478,18 @@ def _build_sim_trade_ledger(
     }
     now_iso = datetime.now(IST).isoformat()
 
+    hold_tickers = [
+        t
+        for t, lots in buy_lots.items()
+        if any(_safe_float(lot.get("remaining_qty")) > eps for lot in lots)
+    ]
+    live_hold = _get_live_prices_batch(hold_tickers) if hold_tickers else {}
+
     for ticker, lots in buy_lots.items():
         pos = open_positions_state.get(ticker, {})
-        current_price = _safe_float(pos.get("last_price"))
+        current_price = _safe_float(live_hold.get(ticker, {}).get("price"))
+        if current_price <= 0:
+            current_price = _safe_float(pos.get("last_price"))
         if current_price <= 0:
             current_price = _safe_float(pos.get("avg_entry_price"))
         for lot in lots:
@@ -1495,6 +1530,22 @@ def _build_sim_trade_ledger(
                     "sell_reason": None,
                     "source": str(lot.get("source", "strategy_simulation")),
                     "current_price": round(current_price, 2) if current_price > 0 else None,
+                    "stop_loss_price": round(
+                        _safe_float(pos.get("stop_loss_price") or lot.get("stop_loss_price")),
+                        2,
+                    ),
+                    "target_price": round(
+                        _safe_float(pos.get("target_price") or lot.get("target_price")),
+                        2,
+                    ),
+                    "entry_range_low": round(
+                        _safe_float(pos.get("entry_range_low") or lot.get("entry_range_low")),
+                        2,
+                    ),
+                    "entry_range_high": round(
+                        _safe_float(pos.get("entry_range_high") or lot.get("entry_range_high")),
+                        2,
+                    ),
                 }
             )
 
@@ -1575,7 +1626,20 @@ def _sync_portfolio_from_simulated_trade(event: dict) -> None:
     ticker = str(event.get("ticker", "")).strip().upper()
     qty = _safe_float(event.get("quantity"))
     price = _safe_float(event.get("price"))
-    if not ticker or qty <= 0 or price <= 0:
+    if (
+        not ticker
+        or qty <= 0
+        or price <= 0
+        or qty > PORTFOLIO_MAX_TRADE_QTY
+        or price > PORTFOLIO_MAX_TRADE_PRICE
+    ):
+        if ticker and (qty > PORTFOLIO_MAX_TRADE_QTY or price > PORTFOLIO_MAX_TRADE_PRICE):
+            log.warning(
+                "Skipping portfolio sync for %s due extreme qty/price (qty=%s price=%s)",
+                ticker,
+                qty,
+                price,
+            )
         return
 
     try:
@@ -1623,6 +1687,61 @@ def _sync_portfolio_from_simulated_trade(event: dict) -> None:
         )
     except Exception as exc:
         log.warning("Failed portfolio sync from simulated trade: %s", exc)
+
+
+def _is_simulation_portfolio_trade(tr: dict) -> bool:
+    src = str(tr.get("source", "")).strip().lower()
+    if src.startswith("strategy_simulation"):
+        return True
+    if str(tr.get("sim_trade_id", "")).strip():
+        return True
+    return False
+
+
+def _clear_simulation_history(*, clear_portfolio_sim_trades: bool = True) -> dict:
+    removed_files: list[str] = []
+    with _log_lock:
+        for path in (SIMULATED_TRADE_LOG_FILE, SIMULATED_TRADE_CSV_FILE, SIMULATED_TRADE_EXCEL_FILE):
+            try:
+                if path.exists():
+                    path.unlink()
+                    removed_files.append(str(path))
+            except Exception as exc:
+                log.warning("Failed removing simulation ledger file %s: %s", path, exc)
+
+    with _sim_trade_cache_lock:
+        removed_cache = len(_sim_trade_event_cache)
+        _sim_trade_event_cache.clear()
+
+    removed_portfolio_trades = 0
+    if clear_portfolio_sim_trades:
+        try:
+            trades = _read_portfolio_trades()
+            kept = [tr for tr in trades if not _is_simulation_portfolio_trade(tr)]
+            removed_portfolio_trades = max(0, len(trades) - len(kept))
+            if removed_portfolio_trades > 0:
+                _write_portfolio_trades(kept)
+                summary = _portfolio_summary_from_trades(kept, include_live_prices=False)
+                _write_portfolio(
+                    [
+                        {
+                            "ticker": row["ticker"],
+                            "name": row["name"],
+                            "quantity": row["quantity"],
+                            "entry_price": row["avg_buy_price"],
+                            "updated_at": datetime.now(IST).isoformat(),
+                        }
+                        for row in summary["positions"]
+                    ]
+                )
+        except Exception as exc:
+            log.warning("Failed pruning portfolio simulation trades: %s", exc)
+
+    return {
+        "removed_files": removed_files,
+        "removed_cache_rows": removed_cache,
+        "removed_portfolio_sim_trades": removed_portfolio_trades,
+    }
 
 
 def _infer_trade_type_for_exit(entry_ts: str, exit_ts: str) -> str:
@@ -1673,6 +1792,31 @@ def _round_to_tick(price: float, tick: float = 0.05) -> float:
     if p <= 0:
         return 0.0
     return round(round(p / tick) * tick, 2)
+
+
+def _entry_price_range(strategy_price: float) -> tuple[float, float]:
+    sp = max(0.0, float(strategy_price or 0))
+    if sp <= 0:
+        return 0.0, 0.0
+    tol_pct = max(ADVISOR_ENTRY_RANGE_MIN_PCT, ADVISOR_ENTRY_RANGE_PCT)
+    low = _round_to_tick(sp * (1 - tol_pct))
+    high = _round_to_tick(sp * (1 + tol_pct))
+    if low <= 0:
+        low = _round_to_tick(sp)
+    if high < low:
+        high = low
+    return low, high
+
+
+def _within_entry_range(price: float, low: float, high: float) -> bool:
+    px = float(price or 0)
+    lo = float(low or 0)
+    hi = float(high or 0)
+    if px <= 0 or lo <= 0 or hi <= 0:
+        return False
+    if hi < lo:
+        lo, hi = hi, lo
+    return lo - 1e-9 <= px <= hi + 1e-9
 
 
 def _compute_dynamic_stop_loss_pct(
@@ -1872,6 +2016,7 @@ def _build_strategy_buy_candidates(
     *,
     live_prices: dict[str, dict] | None = None,
     exclude_tickers: set[str] | None = None,
+    allow_soft_buy: bool = False,
 ) -> tuple[list[dict], list[str]]:
     """
     Build strategy-driven BUY candidates with sentiment adjustment metadata.
@@ -1921,10 +2066,18 @@ def _build_strategy_buy_candidates(
             strategy_signal,
             raw,
         )
-        if effective_action != "BUY":
-            continue
-
         confidence_pct = float(np.clip(_safe_float(raw.get("confidence", 0)), 0, 100))
+        soft_candidate = False
+        if effective_action != "BUY":
+            if (
+                not allow_soft_buy
+                or effective_action == "SELL"
+                or pred_ret_pct <= 0
+                or confidence_pct < 50
+            ):
+                continue
+            soft_candidate = True
+
         model_agreement = float(
             np.clip(_safe_float(raw.get("model_agreement", 0)), 0, 100)
         )
@@ -1958,6 +2111,7 @@ def _build_strategy_buy_candidates(
             strategy_price * max(pred_ret_pct / 100.0, 0.008),
         )
         target_price = _round_to_tick(strategy_price + target_delta)
+        entry_low, entry_high = _entry_price_range(strategy_price)
 
         predicted_edge = max(0.0, pred_ret_pct) / 100.0
         sentiment_edge = float(np.clip(_safe_float(raw.get("weighted_sentiment_raw")), -1, 1))
@@ -1965,10 +2119,12 @@ def _build_strategy_buy_candidates(
             predicted_edge * (confidence_pct / 100.0) * (model_agreement / 100.0) * liq_factor
             + 0.03 * sentiment_edge
         )
+        if soft_candidate:
+            expected_edge *= 0.85
         risk_metric = max(stop_loss_pct, atr_pct / 100.0, 0.01)
         utility = expected_edge - ADVISOR_RISK_AVERSION * risk_metric
 
-        if utility <= -0.01:
+        if utility <= (-0.03 if soft_candidate else -0.01):
             continue
 
         if abs(pred_ret_pct) > 4.5:
@@ -1994,6 +2150,8 @@ def _build_strategy_buy_candidates(
                 "stop_loss_pct": round(stop_loss_pct, 6),
                 "stop_loss_price": round(stop_loss, 2),
                 "target_price": round(target_price, 2),
+                "entry_range_low": round(entry_low, 2),
+                "entry_range_high": round(entry_high, 2),
                 "expected_edge": float(expected_edge),
                 "risk_metric": float(risk_metric),
                 "objective_utility": float(utility),
@@ -2001,6 +2159,7 @@ def _build_strategy_buy_candidates(
                 "strategy_action": strategy_signal,
                 "effective_action": effective_action,
                 "action_source": action_source,
+                "soft_candidate": bool(soft_candidate),
                 "weighted_sentiment_raw": round(
                     _safe_float(raw.get("weighted_sentiment_raw")),
                     4,
@@ -2146,6 +2305,50 @@ def _optimize_candidate_allocations(
         )
         sector_counts[sector_key] = sector_counts.get(sector_key, 0) + 1
 
+    # If optimizer is too sparse, fill remaining slots with minimum 1-qty positions.
+    picked_tickers = {str(r.get("ticker", "")).upper() for r in picks}
+    if len(picks) < max_positions and remaining > 0:
+        for idx in order:
+            if len(picks) >= max_positions or remaining <= 0:
+                break
+            c = candidates[idx]
+            ticker = str(c.get("ticker", "")).upper()
+            if not ticker or ticker in picked_tickers:
+                continue
+            sector_key = str(c.get("sector") or "other")
+            if sector_counts.get(sector_key, 0) >= sector_cap:
+                continue
+            px = float(c["strategy_price_at_open"])
+            if not _is_realistic_price(px):
+                continue
+            qty_cash = _max_affordable_qty(remaining, px, trade_type=trade_type)
+            qty = 1 if qty_cash >= 1 else 0
+            if qty <= 0:
+                continue
+            notional = round(qty * px, 2)
+            fee = round(_estimate_entry_fee(notional, trade_type=trade_type), 2)
+            est_trade_cost = round(notional + fee, 2)
+            if est_trade_cost <= 0 or est_trade_cost > remaining + 1e-9:
+                continue
+            remaining = round(remaining - est_trade_cost, 2)
+            picks.append(
+                {
+                    **c,
+                    "suggested_qty": int(qty),
+                    "estimated_notional": round(notional, 2),
+                    "estimated_fee": round(fee, 2),
+                    "est_trade_cost": round(est_trade_cost, 2),
+                    "next_recommended_sell_time": _next_recommended_sell_time(
+                        c["current_price"],
+                        c["stop_loss_price"],
+                        c["target_price"],
+                    ),
+                    "edge_score": round(c["objective_utility"], 6),
+                }
+            )
+            picked_tickers.add(ticker)
+            sector_counts[sector_key] = sector_counts.get(sector_key, 0) + 1
+
     return picks
 
 
@@ -2252,6 +2455,34 @@ def _run_sim_auto_check(
         elif effective_action == "SELL":
             reason = "auto_strategy_sell_signal"
         elif target > 0 and cp >= target:
+            # Step target forward and lift stop-loss to preserve gains.
+            base_step = max(
+                target - max(stop_loss, 0.0),
+                entry * max(ADVISOR_TARGET_STEP_MIN_PCT, 0.001),
+                0.05,
+            )
+            step = base_step * max(0.5, ADVISOR_TARGET_STEP_MULTIPLIER)
+            new_stop = _round_to_tick(max(stop_loss, target))
+            new_target = _round_to_tick(target + step)
+            if new_target > target and new_stop >= target:
+                pos["stop_loss_price"] = round(new_stop, 2)
+                pos["trail_stop_price"] = round(
+                    max(_safe_float(pos.get("trail_stop_price")), new_stop), 2
+                )
+                pos["target_price"] = round(new_target, 2)
+                pos["highest_price"] = round(max(_safe_float(pos.get("highest_price")), cp), 2)
+                open_positions[ticker] = pos
+                state.setdefault("open_positions", {})[ticker] = pos
+                trailing_updates.append(
+                    {
+                        "ticker": ticker,
+                        "new_stop_loss": round(new_stop, 2),
+                        "new_target_price": round(new_target, 2),
+                        "price": round(cp, 2),
+                        "event": "target_step_up",
+                    }
+                )
+                continue
             reason = "auto_target_hit"
         if not reason:
             continue
@@ -2342,7 +2573,11 @@ def _run_sim_auto_check(
                         strategy_entry,
                     )
                     continue
-                trigger = cp <= strategy_entry * (1.0 + max(0.0, ADVISOR_BUY_TRIGGER_BUFFER))
+                entry_low = _safe_float(row.get("entry_range_low"))
+                entry_high = _safe_float(row.get("entry_range_high"))
+                if entry_low <= 0 or entry_high <= 0:
+                    entry_low, entry_high = _entry_price_range(strategy_entry)
+                trigger = _within_entry_range(cp, entry_low, entry_high)
                 if not trigger:
                     continue
                 qty_suggested = int(_safe_float(row.get("suggested_qty")))
@@ -2357,19 +2592,24 @@ def _run_sim_auto_check(
                 stop_loss = _safe_float(row.get("stop_loss_price"))
                 target = _safe_float(row.get("target_price"))
                 rr = max(1.0, _safe_float(row.get("risk_reward")) or 1.5)
+                strategy_rec = str(
+                    row.get("effective_action") or row.get("strategy_action") or "HOLD"
+                ).upper()
                 state, buy_event, buy_err = _execute_sim_buy(
                     state,
                     ticker=ticker,
                     quantity=qty,
                     price=cp,
                     strategy_entry_price=strategy_entry,
+                    entry_range_low=entry_low,
+                    entry_range_high=entry_high,
                     stop_loss_price=stop_loss,
                     target_price=target,
                     risk_reward=rr,
                     trade_type="equity_delivery",
                     timestamp=now_iso,
                     reason="auto_strategy_entry",
-                    strategy_recommendation="HOLD",
+                    strategy_recommendation=strategy_rec,
                 )
                 if buy_err or not buy_event:
                     continue
@@ -2497,6 +2737,10 @@ def _execute_sim_sell(
         "fee": round(sell_fee, 2),
         "realized_pnl": round(realized_pnl, 2),
         "cash_after": round(state["cash"], 2),
+        "stop_loss_price": round(_safe_float(pos.get("stop_loss_price")), 2),
+        "target_price": round(_safe_float(pos.get("target_price")), 2),
+        "entry_range_low": round(_safe_float(pos.get("entry_range_low")), 2),
+        "entry_range_high": round(_safe_float(pos.get("entry_range_high")), 2),
     }
     state.setdefault("trade_history", []).append(event)
     return state, event, None
@@ -2509,6 +2753,8 @@ def _execute_sim_buy(
     quantity: float,
     price: float,
     strategy_entry_price: float,
+    entry_range_low: float = 0.0,
+    entry_range_high: float = 0.0,
     stop_loss_price: float,
     target_price: float,
     risk_reward: float,
@@ -2527,6 +2773,20 @@ def _execute_sim_buy(
         return state, None, f"quantity exceeds hard cap ({SIM_QTY_HARD_MAX})"
     if not _is_realistic_price(px):
         return state, None, "price is outside allowed simulation bounds"
+
+    strategy_entry = float(strategy_entry_price or 0)
+    if strategy_entry <= 0:
+        strategy_entry = px
+    lo = float(entry_range_low or 0)
+    hi = float(entry_range_high or 0)
+    if lo <= 0 or hi <= 0:
+        lo, hi = _entry_price_range(strategy_entry)
+    if not _within_entry_range(px, lo, hi):
+        return (
+            state,
+            None,
+            f"price {px:.2f} is outside strategy entry range [{lo:.2f}, {hi:.2f}]",
+        )
 
     tracker = _daily_tracker_for_state(state, now_ts=ts)
     if tracker.get("trading_paused"):
@@ -2580,9 +2840,14 @@ def _execute_sim_buy(
             "quantity": round(new_qty, 4),
             "avg_entry_price": round(avg_entry, 2),
             "total_entry_fees": round(prev_fees + entry_fee, 2),
-            "strategy_entry_price": round(float(strategy_entry_price or px), 2),
+            "strategy_entry_price": round(strategy_entry, 2),
+            "entry_range_low": round(lo, 2),
+            "entry_range_high": round(hi, 2),
             "stop_loss_price": round(sl_price, 2),
             "target_price": round(tgt_price, 2),
+            "initial_target_price": round(
+                _safe_float(pos.get("initial_target_price")) or tgt_price, 2
+            ),
             "trade_type_hint": trade_type,
             "opened_at": pos.get("opened_at") or ts,
             "last_buy_at": ts,
@@ -2609,6 +2874,11 @@ def _execute_sim_buy(
         "notional": round(notional, 2),
         "fee": round(entry_fee, 2),
         "cash_after": round(state["cash"], 2),
+        "strategy_entry_price": round(strategy_entry, 2),
+        "entry_range_low": round(lo, 2),
+        "entry_range_high": round(hi, 2),
+        "stop_loss_price": round(sl_price, 2),
+        "target_price": round(tgt_price, 2),
         "source": "strategy_simulation",
     }
     state.setdefault("trade_history", []).append(event)
@@ -2640,6 +2910,8 @@ def _sanitize_portfolio_storage() -> dict:
             or side not in {"BUY", "SELL"}
             or qty <= 0
             or price <= 0
+            or qty > PORTFOLIO_MAX_TRADE_QTY
+            or price > PORTFOLIO_MAX_TRADE_PRICE
         ):
             removed_trade_rows += 1
             changed = True
@@ -3388,6 +3660,11 @@ def api_advisor_open_buy_list():
     if trade_type not in {"equity_delivery", "equity_intraday"}:
         trade_type = "equity_delivery"
     force_fresh = request.args.get("force_fresh", "").lower() in ("1", "true", "yes")
+    use_live_prices = request.args.get("live_prices", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     allow_warming = request.args.get("allow_warming", "").lower() in (
         "1",
         "true",
@@ -3533,7 +3810,17 @@ def api_advisor_open_buy_list():
                 if str(r.get("ticker", "")).strip()
             }
         )
-        live_prices = _get_live_prices_batch(candidate_tickers) if candidate_tickers else {}
+        live_prices: dict[str, dict] = {}
+        if candidate_tickers:
+            cached_map = _price_cache or {}
+            for ticker in candidate_tickers:
+                cached_row = cached_map.get(ticker) if isinstance(cached_map, dict) else None
+                if isinstance(cached_row, dict) and _safe_float(cached_row.get("price")) > 0:
+                    live_prices[ticker] = dict(cached_row)
+            if use_live_prices:
+                missing = [t for t in candidate_tickers if t not in live_prices]
+                if missing:
+                    live_prices.update(_get_live_prices_batch(missing))
         open_now = {
             str(t).upper()
             for t in dict(state.get("open_positions", {})).keys()
@@ -3545,6 +3832,22 @@ def api_advisor_open_buy_list():
             exclude_tickers=open_now,
         )
         warnings.extend(build_warnings)
+        if len(strategy_candidates) < n:
+            soft_candidates, soft_warnings = _build_strategy_buy_candidates(
+                filtered_rows,
+                live_prices=live_prices,
+                exclude_tickers=open_now,
+                allow_soft_buy=True,
+            )
+            warnings.extend(soft_warnings)
+            seen_soft = {str(r.get("ticker", "")).upper() for r in strategy_candidates}
+            for row in soft_candidates:
+                ticker = str(row.get("ticker", "")).upper()
+                if ticker and ticker not in seen_soft:
+                    strategy_candidates.append(row)
+                    seen_soft.add(ticker)
+                if len(strategy_candidates) >= 50:
+                    break
         if not strategy_candidates:
             return jsonify(
                 {
@@ -3640,6 +3943,12 @@ def api_simulate_portfolio():
                     round(strategy_target, 2) if strategy_target > 0 else None
                 ),
                 "stop_loss_price": round(stop_loss, 2) if stop_loss > 0 else None,
+                "entry_range_low": round(_safe_float(pos.get("entry_range_low")), 2)
+                if _safe_float(pos.get("entry_range_low")) > 0
+                else None,
+                "entry_range_high": round(_safe_float(pos.get("entry_range_high")), 2)
+                if _safe_float(pos.get("entry_range_high")) > 0
+                else None,
                 "unrealized_pnl": round(mark - entry_value, 2),
                 "next_recommended_sell_time": _next_recommended_sell_time(
                     live if live > 0 else entry, stop_loss, strategy_target
@@ -3750,21 +4059,34 @@ def api_simulate_trade():
             budget = SIMULATION_DEFAULT_CASH
         if budget <= 0:
             budget = SIMULATION_DEFAULT_CASH
+        clear_history = bool(payload.get("clear_history", True))
+        clear_portfolio_sim_trades = bool(
+            payload.get("clear_portfolio_sim_trades", True)
+        )
+        cleanup = (
+            _clear_simulation_history(
+                clear_portfolio_sim_trades=clear_portfolio_sim_trades
+            )
+            if clear_history
+            else {}
+        )
         state = _simulation_state_template(cash=budget)
         _write_portfolio_sim_state(state)
-        _log_simulated_trade(
-            {
-                "timestamp": now_iso,
-                "action": "RESET",
-                "budget": round(budget, 2),
-                "source": "strategy_simulation",
-            }
-        )
+        if not clear_history:
+            _log_simulated_trade(
+                {
+                    "timestamp": now_iso,
+                    "action": "RESET",
+                    "budget": round(budget, 2),
+                    "source": "strategy_simulation",
+                }
+            )
         return jsonify(
             {
                 "ok": True,
                 "message": "Simulation portfolio reset.",
                 "state": state,
+                "cleanup": cleanup,
             }
         )
 
@@ -3862,6 +4184,10 @@ def api_simulate_trade():
         strategy_entry = _safe_float(payload.get("strategy_entry_price"))
         if strategy_entry <= 0:
             strategy_entry = price
+        entry_low = _safe_float(payload.get("entry_range_low"))
+        entry_high = _safe_float(payload.get("entry_range_high"))
+        if entry_low <= 0 or entry_high <= 0:
+            entry_low, entry_high = _entry_price_range(strategy_entry)
         confidence_pct = _safe_float(payload.get("confidence"))
         atr_pct = abs(_safe_float(payload.get("atr_pct")))
         uses_sentiment = bool(payload.get("uses_sentiment", False))
@@ -3905,6 +4231,8 @@ def api_simulate_trade():
             quantity=quantity,
             price=price,
             strategy_entry_price=strategy_entry,
+            entry_range_low=entry_low,
+            entry_range_high=entry_high,
             stop_loss_price=stop_loss,
             target_price=target_price,
             risk_reward=rr_ratio,
