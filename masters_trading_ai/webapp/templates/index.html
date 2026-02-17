@@ -85,13 +85,18 @@
         <!-- Top Picks section (hidden by default) -->
         <div class="top-picks-section hidden" id="top-picks-section">
             <h2 class="section-title">🎯 AI Top Picks</h2>
-            <p class="section-subtitle">Top Picks is the actionable signal list (up to 50): ranked by strategy confidence first, then composite score = |predicted_return_decimal| × confidence × agreement × liquidity.</p>
+            <p class="section-subtitle" id="top-picks-subtitle">Top 10 AI picks by AI-predicted return with confidence, agreement, and live strategy target context.</p>
             <div class="top-picks-controls">
+                <label for="top-picks-source" class="pick-filter-label">Source:</label>
+                <select id="top-picks-source" class="pick-filter-select" onchange="setTopPickSource(this.value)">
+                    <option value="ai">AI Top 10</option>
+                    <option value="strategy">Strategy Top 10</option>
+                </select>
                 <label for="top-picks-filter" class="pick-filter-label">Show:</label>
                 <select id="top-picks-filter" class="pick-filter-select" onchange="setTopPickFilter(this.value)">
                     <option value="top_buy">BUY Candidates</option>
-                    <option value="top_sell">Portfolio SELL</option>
-                    <option value="top_hold">Portfolio HOLD</option>
+                    <option value="top_sell">SELL Candidates</option>
+                    <option value="top_hold">HOLD Candidates</option>
                 </select>
                 <button type="button" class="tf-btn" onclick="refreshTopPicksAndSnapshots()">Refresh</button>
                 <a href="/advisor" class="tf-btn">Open DailyAdvisor</a>

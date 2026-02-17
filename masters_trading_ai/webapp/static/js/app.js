@@ -9,6 +9,7 @@ let currentSector = 'all';
 let sectorsData = {};
 let sectorTickerOrder = {};
 let autoRefreshTimer = null;
+let topPickSource = 'ai';
 let topPickFilter = 'top_buy';
 let groupedTopPicks = { top_buy: [], top_sell: [], top_hold: [] };
 let metricExplainCache = {};
@@ -750,6 +751,12 @@ async function showTopPicks(evt = null) {
     const section = document.getElementById('top-picks-section');
     section.classList.remove('hidden');
     updateTopPickFilterButtons();
+    const subtitle = document.getElementById('top-picks-subtitle');
+    if (subtitle) {
+        subtitle.textContent = topPickSource === 'ai'
+            ? 'Top 10 AI picks by AI-predicted return with confidence, agreement, and strategy target context.'
+            : 'Top 10 strategy picks grouped by strategy signal. Prices and R:R are strategy-led.';
+    }
 
     const grid = document.getElementById('picks-grid');
     grid.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>Loading Top Picks (cache-first)...</p></div>';
@@ -758,8 +765,9 @@ async function showTopPicks(evt = null) {
     try {
         const controller = new AbortController();
         timeoutId = setTimeout(() => controller.abort(), 45000);
+        const refreshAi = topPickSource === 'ai' ? 'true' : 'false';
         const res = await fetch(
-            '/api/top-picks?sectors=large_cap&sectors=banking&sectors=mid_cap&sectors=high_volatility&sectors=commodities&n=50&grouped=true&use_cached_analysis=true',
+            `/api/top-picks?sectors=large_cap&sectors=banking&sectors=mid_cap&sectors=high_volatility&sectors=commodities&n=10&grouped=true&mode=${encodeURIComponent(topPickSource)}&refresh_ai=${refreshAi}&use_cached_analysis=true`,
             { signal: controller.signal }
         );
         const data = await res.json();
@@ -816,6 +824,13 @@ function setTopPickFilter(filterKey) {
     renderPremarketOutlookTable();
 }
 
+function setTopPickSource(sourceKey) {
+    const normalized = String(sourceKey || 'ai').toLowerCase();
+    topPickSource = (normalized === 'strategy') ? 'strategy' : 'ai';
+    updateTopPickFilterButtons();
+    showTopPicks();
+}
+
 function togglePremarketStored(checked) {
     useLatestStoredPredictions = Boolean(checked);
     loadPremarketOutlook();
@@ -824,6 +839,8 @@ function togglePremarketStored(checked) {
 function updateTopPickFilterButtons() {
     const filterEl = document.getElementById('top-picks-filter');
     if (filterEl) filterEl.value = topPickFilter;
+    const sourceEl = document.getElementById('top-picks-source');
+    if (sourceEl) sourceEl.value = topPickSource;
 }
 
 function renderTopPicks() {
@@ -841,10 +858,12 @@ function renderTopPicks() {
         const predictedReturn = Number(pick.predicted_return);
         const hasPredictedReturn = Number.isFinite(predictedReturn);
         const isUp = hasPredictedReturn ? predictedReturn >= 0 : true;
-        const signalLower = String(pick.signal || '').toLowerCase();
+        const rawSignal = topPickSource === 'ai' ? (pick.ai_signal || pick.signal) : pick.signal;
+        const signalLower = String(rawSignal || '').toLowerCase();
         const signalClass = signalLower.includes('buy') ? 'buy' : signalLower.includes('sell') ? 'sell' : 'hold';
         const returnSign = isUp ? '+' : '';
         const strategyTarget = Number(pick.target_price || pick.predicted_price || 0);
+        const returnLabel = topPickSource === 'ai' ? 'AI Predicted Return' : 'Predicted Return';
         const scoreVal = Number(pick._score || 0);
         const liqVal = Number(pick.liquidity_factor || 0);
 
@@ -855,7 +874,7 @@ function renderTopPicks() {
                     <h4>${pick.name || pick.ticker.replace('.NS', '')}</h4>
                     <span class="muted-text">${pick.ticker}</span>
                 </div>
-                <span class="pick-signal ${signalClass}">${pick.signal || 'HOLD'}</span>
+                <span class="pick-signal ${signalClass}">${rawSignal || 'HOLD'}</span>
             </div>
             <div class="pick-details">
                 <div class="pick-detail">
@@ -863,7 +882,7 @@ function renderTopPicks() {
                     <span class="value">${formatPrice(pick.current_price)}</span>
                 </div>
                 <div class="pick-detail">
-                    <span class="label">Predicted Return</span>
+                    <span class="label">${returnLabel}</span>
                     <span class="value ${hasPredictedReturn ? (isUp ? 'up-color' : 'down-color') : ''}">${hasPredictedReturn ? `${returnSign}${predictedReturn.toFixed(3)}%` : '—'}</span>
                 </div>
                 <div class="pick-detail">

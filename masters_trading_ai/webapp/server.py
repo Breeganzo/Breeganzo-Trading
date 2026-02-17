@@ -3040,6 +3040,11 @@ def _portfolio_summary_from_trades(
     realized_cost_total = 0.0
     realized_intraday_cost_total = 0.0
     realized_delivery_cost_total = 0.0
+    open_entry_fee_total = 0.0
+    open_exit_fee_total = 0.0
+    unrealized_after_cost_total = 0.0
+    invested_total = 0.0
+    current_after_cost_total = 0.0
 
     def _trade_day(ts: str) -> date | None:
         try:
@@ -3109,18 +3114,42 @@ def _portfolio_summary_from_trades(
                 if lot["qty"] <= 1e-9:
                     lots[ticker].pop(0)
 
+    now_ist = datetime.now(IST)
+    today_ist = now_ist.date()
+    now_iso = now_ist.isoformat()
     for ticker, ticker_lots in lots.items():
         qty = sum(l["qty"] for l in ticker_lots)
         if qty <= 1e-9:
             continue
         cost = sum(l["qty"] * l["price"] for l in ticker_lots)
         avg_price = cost / qty
+        intraday_hint = bool(ticker_lots) and all(
+            l.get("trade_date") == today_ist for l in ticker_lots
+        )
+        trade_type_hint = "equity_intraday" if intraday_hint else "equity_delivery"
+        entry_fee_estimate = 0.0
+        for lot in ticker_lots:
+            lot_qty = float(lot.get("qty", 0) or 0)
+            lot_px = float(lot.get("price", 0) or 0)
+            lot_value = lot_qty * lot_px
+            if lot_value <= 0:
+                continue
+            lot_ts = str(lot.get("timestamp", "") or now_iso)
+            lot_trade_type = _infer_trade_type_for_exit(lot_ts, now_iso)
+            if lot_trade_type not in {"equity_intraday", "equity_delivery"}:
+                lot_trade_type = trade_type_hint
+            entry_fee_estimate += _estimate_entry_fee(
+                lot_value,
+                trade_type=lot_trade_type,
+            )
         positions[ticker] = {
             "ticker": ticker,
             "name": ticker_names.get(ticker, _clean_name(ticker)),
             "quantity": round(qty, 4),
             "avg_buy_price": round(avg_price, 2),
             "cost_value": round(cost, 2),
+            "entry_fee_estimate": round(entry_fee_estimate, 2),
+            "trade_type_hint": trade_type_hint,
         }
 
     if include_live_prices and positions:
@@ -3134,14 +3163,39 @@ def _portfolio_summary_from_trades(
         curr = float(l.get("price", 0) or 0)
         row["current_price"] = round(curr, 2)
         m2m = curr * row["quantity"] if curr > 0 else 0.0
+        entry_fee_estimate = _safe_float(row.get("entry_fee_estimate"))
+        trade_type_hint = str(row.get("trade_type_hint") or "equity_delivery")
+        exit_fee_estimate = (
+            _estimate_exit_fee(m2m, trade_type=trade_type_hint) if m2m > 0 else 0.0
+        )
+        cost_eaten_open = entry_fee_estimate + exit_fee_estimate
+        current_after_cost = max(0.0, m2m - exit_fee_estimate)
+        invested_with_cost = row["cost_value"] + entry_fee_estimate
+        unrealized_after_cost = current_after_cost - invested_with_cost
+
         row["market_value"] = round(m2m, 2)
+        row["invested_value_after_cost"] = round(invested_with_cost, 2)
+        row["current_value_after_cost"] = round(current_after_cost, 2)
+        row["transaction_cost_eaten"] = round(cost_eaten_open, 2)
+        row["exit_fee_estimate"] = round(exit_fee_estimate, 2)
         row["unrealized_pnl"] = round(m2m - row["cost_value"], 2)
+        row["unrealized_pnl_after_cost"] = round(unrealized_after_cost, 2)
         row["unrealized_pnl_pct"] = (
             round(((m2m - row["cost_value"]) / row["cost_value"] * 100), 3)
             if row["cost_value"] > 0 and m2m > 0
             else 0.0
         )
+        row["unrealized_pnl_after_cost_pct"] = (
+            round((unrealized_after_cost / invested_with_cost * 100), 3)
+            if invested_with_cost > 0 and m2m > 0
+            else 0.0
+        )
         unrealized_total += m2m - row["cost_value"]
+        unrealized_after_cost_total += unrealized_after_cost
+        invested_total += row["cost_value"]
+        current_after_cost_total += current_after_cost
+        open_entry_fee_total += entry_fee_estimate
+        open_exit_fee_total += exit_fee_estimate
 
     realized_net_total = realized_gross_total - realized_cost_total
     return {
@@ -3149,13 +3203,28 @@ def _portfolio_summary_from_trades(
             positions.values(), key=lambda x: x["cost_value"], reverse=True
         ),
         "position_count": len(positions),
+        "invested_value": round(invested_total, 2),
+        "current_value_after_cost": round(current_after_cost_total, 2),
         "realized_pnl": round(realized_net_total, 2),
         "realized_pnl_before_cost": round(realized_gross_total, 2),
         "transaction_costs_total": round(realized_cost_total, 2),
         "transaction_costs_intraday": round(realized_intraday_cost_total, 2),
         "transaction_costs_delivery": round(realized_delivery_cost_total, 2),
+        "transaction_costs_open_entry_estimate": round(open_entry_fee_total, 2),
+        "transaction_costs_open_exit_estimate": round(open_exit_fee_total, 2),
+        "transaction_costs_open_total_estimate": round(
+            open_entry_fee_total + open_exit_fee_total, 2
+        ),
+        "transaction_costs_total_including_open_estimate": round(
+            realized_cost_total + open_entry_fee_total + open_exit_fee_total,
+            2,
+        ),
         "unrealized_pnl": round(unrealized_total, 2),
+        "unrealized_pnl_after_cost": round(unrealized_after_cost_total, 2),
         "total_pnl": round(realized_net_total + unrealized_total, 2),
+        "total_pnl_after_cost": round(
+            realized_net_total + unrealized_after_cost_total, 2
+        ),
     }
 
 
@@ -3690,7 +3759,7 @@ def api_strategy_price(ticker: str):
 def api_advisor_open_buy_list():
     """
     Trading-desk advisor picks for market-open simulation.
-    Returns strategy-driven buy ideas constrained by budget + estimated fees.
+    Returns strategy-driven BUY/HOLD ideas constrained by budget + estimated fees.
     """
     if not models_loaded or predictor is None:
         return jsonify({"error": "Models still loading..."}), 503
@@ -3702,6 +3771,10 @@ def api_advisor_open_buy_list():
     except Exception:
         n = 10
     n = max(1, min(n, 10))
+
+    advisor_view = str(request.args.get("view", "buy")).strip().lower()
+    if advisor_view not in {"buy", "hold"}:
+        advisor_view = "buy"
 
     try:
         budget = (
@@ -3744,7 +3817,8 @@ def api_advisor_open_buy_list():
         }
         with _daily_analysis_lock:
             cached_rows = list((_daily_analysis_cache or {}).get("all_stocks", []))
-        buy_candidates: list[dict] = []
+
+        candidate_rows: list[dict] = []
         if cached_rows:
             for row in cached_rows:
                 if not isinstance(row, dict):
@@ -3754,19 +3828,13 @@ def api_advisor_open_buy_list():
                     continue
                 if _safe_float(row.get("current_price")) <= 0:
                     continue
-                pred_ret = _safe_float(row.get("predicted_return"))
-                if pred_ret > 0:
-                    buy_candidates.append(dict(row))
-                if len(buy_candidates) >= 50:
+                candidate_rows.append(dict(row))
+                if len(candidate_rows) >= 200:
                     break
 
         raw_holds: list[dict] = []
-        if (
-            len(buy_candidates) < n
-            and allow_warming
-            and not cached_rows
-            and not force_fresh
-        ):
+        raw_buys: list[dict] = []
+        if not candidate_rows and allow_warming and not cached_rows and not force_fresh:
             return (
                 jsonify(
                     {
@@ -3777,78 +3845,78 @@ def api_advisor_open_buy_list():
                         "picks": [],
                         "warnings": [],
                         "source": "strategy_advisor",
+                        "view": advisor_view,
                     }
                 ),
                 202,
             )
-        if len(buy_candidates) < n and (force_fresh or not cached_rows):
+
+        if force_fresh or not cached_rows:
             grouped = predictor.predict_top_picks_grouped(sectors=sectors, top_n=50)
             raw_buys = grouped.get("top_buy", []) if isinstance(grouped, dict) else []
             raw_holds = grouped.get("top_hold", []) if isinstance(grouped, dict) else []
-            buy_candidates = [
-                p
-                for p in raw_buys
-                if _safe_float(p.get("current_price")) > 0
-                and _safe_float(p.get("predicted_return")) > 0
-            ]
-        if len(buy_candidates) < n:
-            seen = {str(p.get("ticker", "")).upper() for p in buy_candidates}
-            for p in raw_holds:
-                ticker = str(p.get("ticker", "")).upper()
-                if not ticker or ticker in seen:
+            raw_pool = (
+                list(raw_buys) + list(raw_holds)
+                if advisor_view == "buy"
+                else list(raw_holds) + list(raw_buys)
+            )
+            seen_raw = {str(r.get("ticker", "")).upper() for r in candidate_rows}
+            for row in raw_pool:
+                ticker = str(row.get("ticker", "")).upper()
+                if not ticker or ticker in seen_raw:
                     continue
-                if (
-                    _safe_float(p.get("current_price")) > 0
-                    and _safe_float(p.get("predicted_return")) > 0
-                ):
-                    enriched = dict(p)
-                    enriched["signal"] = enriched.get("signal") or "HOLD"
-                    buy_candidates.append(enriched)
-                    seen.add(ticker)
-                if len(buy_candidates) >= 50:
+                if _safe_float(row.get("current_price")) <= 0:
+                    continue
+                candidate_rows.append(dict(row))
+                seen_raw.add(ticker)
+                if len(candidate_rows) >= 200:
                     break
-            if len(buy_candidates) < n:
+
+        if len(candidate_rows) < max(30, n * 5):
+            seen = {str(p.get("ticker", "")).upper() for p in candidate_rows}
+            try:
+                scan_universe = predictor._resolve_top_pick_tickers(sectors=sectors)
+            except Exception:
+                scan_universe = []
+            for ticker in scan_universe:
+                t = str(ticker or "").upper()
+                if not t or t in seen:
+                    continue
                 try:
-                    scan_universe = predictor._resolve_top_pick_tickers(sectors=sectors)
+                    pred = predictor.predict_single(t, use_cache=True)
                 except Exception:
-                    scan_universe = []
-                for ticker in scan_universe:
-                    t = str(ticker or "").upper()
-                    if not t or t in seen:
-                        continue
-                    try:
-                        pred = predictor.predict_single(t, use_cache=True)
-                    except Exception:
-                        pred = None
-                    if not pred:
-                        continue
-                    if (
-                        _safe_float(pred.get("current_price")) > 0
-                        and _safe_float(pred.get("predicted_return")) > 0
-                    ):
-                        enriched = dict(pred)
-                        enriched["signal"] = enriched.get("signal") or "HOLD"
-                        buy_candidates.append(enriched)
-                        seen.add(t)
-                    if len(buy_candidates) >= 50:
-                        break
-        if not buy_candidates:
+                    pred = None
+                if not pred:
+                    continue
+                if _safe_float(pred.get("current_price")) <= 0:
+                    continue
+                candidate_rows.append(dict(pred))
+                seen.add(t)
+                if len(candidate_rows) >= 200:
+                    break
+
+        if not candidate_rows:
             return jsonify(
                 {
                     "source": "strategy",
                     "generated_at": datetime.now(IST).isoformat(),
                     "budget": round(budget, 2),
+                    "view": advisor_view,
                     "count": 0,
                     "picks": [],
                     "estimated_total_cost": 0.0,
                     "remaining_budget": round(budget, 2),
-                    "error": "No strategy BUY candidates available right now.",
+                    "error": (
+                        "No strategy HOLD watchlist candidates available right now."
+                        if advisor_view == "hold"
+                        else "No strategy BUY candidates available right now."
+                    ),
                 }
             )
 
         warnings: list[str] = []
         filtered_rows: list[dict] = []
-        for row in buy_candidates:
+        for row in candidate_rows:
             ticker = str(row.get("ticker", "")).upper()
             strategy_price = _safe_float(
                 row.get("strategy_price_at_open")
@@ -3895,18 +3963,22 @@ def api_advisor_open_buy_list():
                 missing = [t for t in candidate_tickers if t not in live_prices]
                 if missing:
                     live_prices.update(_get_live_prices_batch(missing))
+
         open_now = {
             str(t).upper()
             for t in dict(state.get("open_positions", {})).keys()
             if str(t).strip()
         }
+        allow_soft_candidates = advisor_view == "hold"
         strategy_candidates, build_warnings = _build_strategy_buy_candidates(
             filtered_rows,
             live_prices=live_prices,
             exclude_tickers=open_now,
+            allow_soft_buy=allow_soft_candidates,
         )
         warnings.extend(build_warnings)
-        if len(strategy_candidates) < n:
+
+        if advisor_view == "buy" and len(strategy_candidates) < n:
             soft_candidates, soft_warnings = _build_strategy_buy_candidates(
                 filtered_rows,
                 live_prices=live_prices,
@@ -3922,28 +3994,221 @@ def api_advisor_open_buy_list():
                     seen_soft.add(ticker)
                 if len(strategy_candidates) >= 50:
                     break
-        if not strategy_candidates:
+
+        candidate_pool = list(strategy_candidates)
+        if advisor_view == "hold":
+            hold_only: list[dict] = []
+            for row in strategy_candidates:
+                eff = str(row.get("effective_action", "")).upper()
+                strat = str(row.get("strategy_action", "")).upper()
+                if eff == "HOLD" or strat == "HOLD" or bool(row.get("soft_candidate")):
+                    hold_only.append(row)
+            candidate_pool = hold_only
+            if len(candidate_pool) < n:
+                existing = {str(r.get("ticker", "")).upper() for r in candidate_pool}
+                for raw in filtered_rows:
+                    ticker = str(raw.get("ticker", "")).upper()
+                    if not ticker or ticker in existing:
+                        continue
+                    pred_ret_pct = _normalize_predicted_return_pct(
+                        raw.get("predicted_return", raw.get("predicted_return_pct", 0))
+                    )
+                    signal = _strategy_action_from_signal(
+                        raw.get("signal"),
+                        predicted_return_pct=pred_ret_pct,
+                    )
+                    if signal != "HOLD":
+                        continue
+                    cp = _safe_float(raw.get("current_price"))
+                    strategy_price = _safe_float(
+                        raw.get("strategy_price_at_open")
+                        or raw.get("target_price")
+                        or raw.get("predicted_price")
+                    )
+                    if strategy_price <= 0:
+                        strategy_price = cp
+                    if not _is_realistic_price(cp) or not _is_realistic_price(
+                        strategy_price
+                    ):
+                        continue
+                    confidence_pct = float(
+                        np.clip(_safe_float(raw.get("confidence", 0)), 0, 100)
+                    )
+                    atr_pct = float(
+                        np.clip(abs(_safe_float(raw.get("atr_pct", 0))), 0, 25)
+                    )
+                    rr = _safe_float(raw.get("risk_reward"))
+                    rr = float(np.clip(rr if rr > 0 else 1.2, 0.5, 5.0))
+                    stop_loss_pct, _ = _compute_dynamic_stop_loss_pct(
+                        confidence_pct=max(confidence_pct, 45.0),
+                        atr_pct=atr_pct,
+                        uses_sentiment=_has_relevant_today_sentiment(raw),
+                    )
+                    stop_loss = _round_to_tick(strategy_price * (1 - stop_loss_pct))
+                    target_delta = max(
+                        abs(strategy_price - stop_loss) * max(rr, 1.0),
+                        strategy_price * max(pred_ret_pct / 100.0, 0.004),
+                    )
+                    target_price = _round_to_tick(strategy_price + target_delta)
+                    entry_low, entry_high = _entry_price_range(strategy_price)
+                    utility = (max(0.0, pred_ret_pct) / 100.0) * (
+                        confidence_pct / 100.0
+                    ) - ADVISOR_RISK_AVERSION * max(
+                        stop_loss_pct, atr_pct / 100.0, 0.01
+                    )
+                    candidate_pool.append(
+                        {
+                            "ticker": ticker,
+                            "name": ticker_names.get(ticker, _clean_name(ticker)),
+                            "sector": str(ticker_to_sector.get(ticker, "other")),
+                            "source": "strategy",
+                            "current_price": round(cp, 2),
+                            "strategy_price_at_open": round(strategy_price, 2),
+                            "predicted_return_pct": round(pred_ret_pct, 3),
+                            "confidence": round(confidence_pct, 1),
+                            "model_agreement": round(
+                                float(
+                                    np.clip(
+                                        _safe_float(raw.get("model_agreement", 0)),
+                                        0,
+                                        100,
+                                    )
+                                ),
+                                1,
+                            ),
+                            "liquidity_factor": round(
+                                float(
+                                    np.clip(
+                                        _safe_float(raw.get("liquidity_factor")) or 1.0,
+                                        0.5,
+                                        1.5,
+                                    )
+                                ),
+                                3,
+                            ),
+                            "atr_pct": round(atr_pct, 3),
+                            "risk_reward": round(rr, 3),
+                            "stop_loss_pct": round(stop_loss_pct, 6),
+                            "stop_loss_price": round(stop_loss, 2),
+                            "target_price": round(target_price, 2),
+                            "entry_range_low": round(entry_low, 2),
+                            "entry_range_high": round(entry_high, 2),
+                            "expected_edge": round(max(0.0, pred_ret_pct) / 100.0, 6),
+                            "strategy_edge_component": round(
+                                max(0.0, pred_ret_pct) / 100.0,
+                                6,
+                            ),
+                            "sentiment_edge_component": 0.0,
+                            "sentiment_influence": round(
+                                float(np.clip(ADVISOR_SENTIMENT_INFLUENCE, 0.0, 1.0)),
+                                4,
+                            ),
+                            "risk_metric": max(stop_loss_pct, atr_pct / 100.0, 0.01),
+                            "objective_utility": float(utility),
+                            "signal": "HOLD",
+                            "strategy_action": "HOLD",
+                            "effective_action": "HOLD",
+                            "action_source": "strategy_only",
+                            "soft_candidate": True,
+                            "weighted_sentiment_raw": round(
+                                _safe_float(raw.get("weighted_sentiment_raw")),
+                                4,
+                            ),
+                            "sentiment_articles": int(
+                                _safe_float(raw.get("sentiment_articles"))
+                            ),
+                            "sentiment_weight_used": round(
+                                _safe_float(raw.get("sentiment_weight_used")),
+                                4,
+                            ),
+                            "avg_volume_30d": (
+                                round(_safe_float(raw.get("avg_volume_30d")), 2)
+                                if _safe_float(raw.get("avg_volume_30d")) > 0
+                                else None
+                            ),
+                            "strategy_generated_at": raw.get("timestamp")
+                            or raw.get("captured_at")
+                            or datetime.now(IST).isoformat(),
+                        }
+                    )
+                    existing.add(ticker)
+                    if len(candidate_pool) >= 50:
+                        break
+
+        if not candidate_pool:
             return jsonify(
                 {
                     "source": "strategy",
                     "generated_at": datetime.now(IST).isoformat(),
                     "budget": round(budget, 2),
                     "trade_type": trade_type,
+                    "view": advisor_view,
                     "count": 0,
                     "picks": [],
                     "estimated_total_cost": 0.0,
                     "remaining_budget": round(budget, 2),
                     "warnings": sorted(set(warnings)),
-                    "error": "No strategy BUY candidates available under risk constraints.",
+                    "error": (
+                        "No strategy HOLD watchlist candidates available under risk constraints."
+                        if advisor_view == "hold"
+                        else "No strategy BUY candidates available under risk constraints."
+                    ),
                 }
             )
 
-        picks = _optimize_candidate_allocations(
-            strategy_candidates,
-            budget=budget,
-            trade_type=trade_type,
-            max_positions=n,
-        )
+        if advisor_view == "hold":
+            picks = []
+            hold_ranked = sorted(
+                candidate_pool,
+                key=lambda r: (
+                    _safe_float(r.get("objective_utility")),
+                    _safe_float(r.get("confidence")),
+                    _safe_float(r.get("model_agreement")),
+                    _safe_float(r.get("predicted_return_pct")),
+                ),
+                reverse=True,
+            )
+            per_slot_budget = max(1000.0, budget / max(1, n))
+            used = set()
+            for row in hold_ranked:
+                ticker = str(row.get("ticker", "")).upper()
+                if not ticker or ticker in used:
+                    continue
+                price = _safe_float(row.get("current_price")) or _safe_float(
+                    row.get("strategy_price_at_open")
+                )
+                if price <= 0:
+                    continue
+                qty = _max_affordable_qty(per_slot_budget, price, trade_type=trade_type)
+                if (
+                    qty <= 0
+                    and _max_affordable_qty(budget, price, trade_type=trade_type) > 0
+                ):
+                    qty = 1
+                if qty <= 0:
+                    continue
+                notional = round(price * qty, 2)
+                fee = _estimate_entry_fee(notional, trade_type=trade_type)
+                total = round(notional + fee, 2)
+                if total <= 0 or total > budget + 1e-9:
+                    continue
+                enriched = dict(row)
+                enriched["suggested_qty"] = int(qty)
+                enriched["estimated_notional"] = round(notional, 2)
+                enriched["estimated_fee"] = round(fee, 2)
+                enriched["est_trade_cost"] = round(total, 2)
+                picks.append(enriched)
+                used.add(ticker)
+                if len(picks) >= n:
+                    break
+        else:
+            picks = _optimize_candidate_allocations(
+                candidate_pool,
+                budget=budget,
+                trade_type=trade_type,
+                max_positions=n,
+            )
+
         for row in picks:
             row["volatility_atr_pct"] = round(abs(_safe_float(row.get("atr_pct"))), 2)
             row["sentiment_weighted_score"] = round(
@@ -3969,6 +4234,8 @@ def api_advisor_open_buy_list():
             row["est_trade_cost"] = _display_price_or_none(row.get("est_trade_cost"))
             qty_display = _display_qty_or_none(row.get("suggested_qty"), digits=0)
             row["suggested_qty"] = int(qty_display) if qty_display is not None else None
+            row["advisor_view"] = advisor_view
+            row["advisor_action"] = "WATCH" if advisor_view == "hold" else "BUY"
             if _safe_float(row.get("liquidity_factor")) < 0.8:
                 warnings.append(
                     f"{row.get('ticker')} has lower liquidity "
@@ -3992,6 +4259,7 @@ def api_advisor_open_buy_list():
                 "generated_at": datetime.now(IST).isoformat(),
                 "budget": round(budget, 2),
                 "trade_type": trade_type,
+                "view": advisor_view,
                 "count": len(picks),
                 "picks": picks,
                 "estimated_total_cost": round(total_cost, 2),
@@ -4018,6 +4286,9 @@ def api_simulate_portfolio():
     holdings = []
     invested = 0.0
     mtm_value = 0.0
+    invested_after_cost = 0.0
+    current_after_cost = 0.0
+    open_txn_cost_eaten = 0.0
     for ticker in tickers:
         pos = dict(open_positions.get(ticker, {}))
         qty = _safe_float(pos.get("quantity"))
@@ -4029,8 +4300,19 @@ def api_simulate_portfolio():
         stop_loss = _safe_float(pos.get("stop_loss_price"))
         entry_value = qty * entry
         mark = qty * (live if live > 0 else entry)
+        entry_fee_paid = _safe_float(pos.get("total_entry_fees"))
+        trade_type_hint = str(pos.get("trade_type_hint") or "equity_delivery")
+        exit_fee_estimate = (
+            _estimate_exit_fee(mark, trade_type=trade_type_hint) if mark > 0 else 0.0
+        )
+        tx_cost_eaten = entry_fee_paid + exit_fee_estimate
+        invested_with_cost = entry_value + entry_fee_paid
+        current_value_after_cost = max(0.0, mark - exit_fee_estimate)
         invested += entry_value
         mtm_value += mark
+        invested_after_cost += invested_with_cost
+        current_after_cost += current_value_after_cost
+        open_txn_cost_eaten += tx_cost_eaten
         holdings.append(
             {
                 "ticker": ticker,
@@ -4043,6 +4325,14 @@ def api_simulate_portfolio():
                 "entry_range_low": _display_price_or_none(pos.get("entry_range_low")),
                 "entry_range_high": _display_price_or_none(pos.get("entry_range_high")),
                 "unrealized_pnl": round(mark - entry_value, 2),
+                "transaction_cost_eaten": round(tx_cost_eaten, 2),
+                "entry_fee_paid": round(entry_fee_paid, 2),
+                "exit_fee_estimate": round(exit_fee_estimate, 2),
+                "invested_value_after_cost": round(invested_with_cost, 2),
+                "current_value_after_cost": round(current_value_after_cost, 2),
+                "unrealized_pnl_after_cost": round(
+                    current_value_after_cost - invested_with_cost, 2
+                ),
                 "next_recommended_sell_time": _next_recommended_sell_time(
                     live if live > 0 else entry, stop_loss, strategy_target
                 ),
@@ -4068,8 +4358,12 @@ def api_simulate_portfolio():
             ),
             "cash": round(cash, 2),
             "invested_value": round(invested, 2),
+            "invested_value_after_cost": round(invested_after_cost, 2),
             "mark_to_market_value": round(mtm_value, 2),
+            "current_value_after_cost": round(current_after_cost, 2),
+            "transaction_cost_eaten_open_positions": round(open_txn_cost_eaten, 2),
             "equity_value": round(cash + mtm_value, 2),
+            "equity_value_after_cost": round(cash + current_after_cost, 2),
             "open_positions_count": len(holdings),
             "closed_trades_count": len(state.get("closed_trades", [])),
             "holdings": holdings,
@@ -4371,19 +4665,23 @@ def api_simulate_trade():
 
 @app.route("/api/top-picks")
 def api_top_picks():
-    """Get top ML picks across sectors."""
+    """Get top picks grouped by strategy mode or AI mode."""
     if not models_loaded or predictor is None:
         return jsonify({"error": "Models still loading..."}), 503
 
     sectors = request.args.getlist("sectors") or ["large_cap", "banking"]
     try:
-        top_n = int(request.args.get("n", 20))
+        top_n = int(request.args.get("n", 10))
     except Exception:
-        top_n = 20
+        top_n = 10
     top_n = max(1, min(top_n, 50))
     grouped = request.args.get("grouped", "").lower() in ("1", "true", "yes")
     force = request.args.get("force", "").lower() in ("1", "true", "yes")
     refresh_ai = request.args.get("refresh_ai", "").lower() in ("1", "true", "yes")
+    mode = str(request.args.get("mode", "strategy") or "strategy").strip().lower()
+    if mode not in {"ai", "strategy"}:
+        mode = "strategy"
+
     use_cached_analysis = request.args.get("use_cached_analysis", "false").lower() in (
         "1",
         "true",
@@ -4391,13 +4689,13 @@ def api_top_picks():
     )
     ai_refresh_limit = max(0, int(os.environ.get("TOP_PICKS_AI_REFRESH_LIMIT", "6")))
     ai_refresh_count = 0
-    portfolio_tickers = {
-        str(row.get("ticker", "")).upper()
-        for row in _portfolio_summary_from_trades(
-            _read_portfolio_trades(), include_live_prices=False
-        ).get("positions", [])
-        if str(row.get("ticker", "")).strip()
-    }
+
+    def _ai_signal_from_return(ret_pct: float) -> str:
+        if ret_pct > 0.2:
+            return "BUY"
+        if ret_pct < -0.2:
+            return "SELL"
+        return "HOLD"
 
     def _enrich_pick(pick: dict) -> dict:
         nonlocal ai_refresh_count
@@ -4406,11 +4704,13 @@ def api_top_picks():
         current_price = _safe_float(p.get("current_price"))
         if current_price <= 0:
             return p
+
         p["name"] = ticker_names.get(ticker, _clean_name(ticker))
+        strategy_ret = _normalize_predicted_return_pct(p.get("predicted_return", 0))
         strategy_px = _safe_float(p.get("target_price") or p.get("predicted_price"))
         if strategy_px <= 0 and current_price > 0:
-            pred_ret = _normalize_predicted_return_pct(p.get("predicted_return", 0))
-            strategy_px = round(current_price * (1 + pred_ret / 100.0), 2)
+            strategy_px = round(current_price * (1 + strategy_ret / 100.0), 2)
+
         ai_px_existing = _safe_float(p.get("ai_predicted_price"))
         ai_meta = {"source": str(p.get("ai_source", "none"))}
         should_try_ai = ai_px_existing <= 0 or refresh_ai
@@ -4429,14 +4729,26 @@ def api_top_picks():
             )
             if allow_generate:
                 ai_refresh_count += 1
+
         ai_px = _safe_float(ai_meta.get("price")) if should_try_ai else ai_px_existing
         if ai_px <= 0:
             ai_px = ai_px_existing
+
+        ai_ret = 0.0
+        ai_signal = "HOLD"
+        if ai_px > 0 and current_price > 0:
+            ai_ret = ((ai_px - current_price) / current_price) * 100.0
+            ai_signal = _ai_signal_from_return(ai_ret)
+
         p["target_price"] = round(strategy_px, 2) if strategy_px > 0 else None
+        p["strategy_predicted_return"] = round(strategy_ret, 3)
         p["ai_predicted_price"] = round(ai_px, 2) if ai_px > 0 else None
+        p["ai_predicted_return"] = round(ai_ret, 3) if ai_px > 0 else None
+        p["ai_signal"] = ai_signal
         p["ai_source"] = ai_meta.get("source", p.get("ai_source", "none"))
         p["source"] = "strategy"
         p["ai_value_source"] = "ai"
+        p["ranking_source"] = mode
         return p
 
     def _group_from_cached_analysis() -> dict[str, list[dict]] | None:
@@ -4486,12 +4798,6 @@ def api_top_picks():
             key=_rank_key,
             reverse=True,
         )[:top_n]
-        for r in buys:
-            r["pick_type"] = "BUY"
-        for r in sells:
-            r["pick_type"] = "SELL"
-        for r in holds:
-            r["pick_type"] = "HOLD"
         return {"top_buy": buys, "top_sell": sells, "top_hold": holds}
 
     try:
@@ -4504,6 +4810,7 @@ def api_top_picks():
                             "status": "warming",
                             "message": "Top picks are warming up in background. Please retry shortly.",
                             "retry_after_sec": 5,
+                            "mode": mode,
                         }
                     ),
                     202,
@@ -4512,6 +4819,7 @@ def api_top_picks():
                 groups = predictor.predict_top_picks_grouped(
                     sectors=sectors, top_n=top_n
                 )
+
             cleaned_groups: dict[str, list[dict]] = {
                 "top_buy": [],
                 "top_sell": [],
@@ -4524,21 +4832,92 @@ def api_top_picks():
                     for p in raw_rows
                     if _safe_float(p.get("current_price")) > 0
                 ]
-                if key in {"top_sell", "top_hold"}:
-                    rows = [
-                        r
-                        for r in rows
-                        if str(r.get("ticker", "")).upper() in portfolio_tickers
-                    ]
                 cleaned_groups[key] = rows
-            groups = cleaned_groups
-            return jsonify(groups)
+
+            if mode == "ai":
+                dedup: dict[str, dict] = {}
+                for bucket in ("top_buy", "top_sell", "top_hold"):
+                    for row in cleaned_groups.get(bucket, []):
+                        ticker = str(row.get("ticker", "")).upper()
+                        if not ticker:
+                            continue
+                        dedup[ticker] = row
+                rows = list(dedup.values())
+                for row in rows:
+                    ai_ret = _safe_float(row.get("ai_predicted_return"))
+                    ai_sig = str(row.get("ai_signal", "HOLD")).upper()
+                    row["signal"] = ai_sig
+                    row["predicted_return"] = round(ai_ret, 3)
+                    row["pick_source"] = "ai"
+
+                rows.sort(
+                    key=lambda r: (
+                        abs(_safe_float(r.get("ai_predicted_return"))),
+                        _safe_float(r.get("confidence")),
+                        _safe_float(r.get("model_agreement")),
+                        _safe_float(r.get("_score")),
+                    ),
+                    reverse=True,
+                )
+                ai_buys = [
+                    r for r in rows if str(r.get("signal", "")).upper() == "BUY"
+                ][:top_n]
+                ai_sells = [
+                    r for r in rows if str(r.get("signal", "")).upper() == "SELL"
+                ][:top_n]
+                ai_holds = [
+                    r for r in rows if str(r.get("signal", "")).upper() == "HOLD"
+                ][:top_n]
+                return jsonify(
+                    {
+                        "mode": "ai",
+                        "top_buy": ai_buys,
+                        "top_sell": ai_sells,
+                        "top_hold": ai_holds,
+                    }
+                )
+
+            for bucket, signal in (
+                ("top_buy", "BUY"),
+                ("top_sell", "SELL"),
+                ("top_hold", "HOLD"),
+            ):
+                for row in cleaned_groups.get(bucket, []):
+                    row["signal"] = signal
+                    row["pick_source"] = "strategy"
+            return jsonify({"mode": "strategy", **cleaned_groups})
 
         picks = predictor.predict_top_picks(sectors=sectors, top_n=top_n)
         picks = [
             _enrich_pick(p) for p in picks if _safe_float(p.get("current_price")) > 0
         ]
-        return jsonify(picks)
+        if mode == "ai":
+            for row in picks:
+                row["signal"] = str(row.get("ai_signal", "HOLD")).upper()
+                row["predicted_return"] = round(
+                    _safe_float(row.get("ai_predicted_return")), 3
+                )
+                row["pick_source"] = "ai"
+            picks.sort(
+                key=lambda r: (
+                    abs(_safe_float(r.get("ai_predicted_return"))),
+                    _safe_float(r.get("confidence")),
+                    _safe_float(r.get("model_agreement")),
+                    _safe_float(r.get("_score")),
+                ),
+                reverse=True,
+            )
+        else:
+            for row in picks:
+                row["pick_source"] = "strategy"
+            picks.sort(
+                key=lambda r: (
+                    _safe_float(r.get("confidence")),
+                    _safe_float(r.get("_score")),
+                ),
+                reverse=True,
+            )
+        return jsonify(picks[:top_n])
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

@@ -120,3 +120,56 @@ def test_api_top_picks_large_cap_grouped_path(monkeypatch):
     assert payload["top_buy"]
     assert payload["top_buy"][0]["ticker"] == "RELIANCE.NS"
     assert payload["top_buy"][0]["current_price"] > 0
+
+
+def test_api_top_picks_ai_mode_grouping(monkeypatch):
+    class StubPredictor:
+        def predict_top_picks_grouped(self, sectors=None, top_n=10):
+            return {
+                "top_buy": [
+                    {
+                        "ticker": "AAA.NS",
+                        "predicted_return": 1.0,
+                        "predicted_price": 101.0,
+                        "target_price": 101.0,
+                        "current_price": 100.0,
+                        "signal": "BUY",
+                        "confidence": 70.0,
+                        "model_agreement": 80.0,
+                        "risk_reward": 1.5,
+                    }
+                ],
+                "top_sell": [
+                    {
+                        "ticker": "BBB.NS",
+                        "predicted_return": -1.0,
+                        "predicted_price": 99.0,
+                        "target_price": 99.0,
+                        "current_price": 100.0,
+                        "signal": "SELL",
+                        "confidence": 68.0,
+                        "model_agreement": 77.0,
+                        "risk_reward": 1.4,
+                    }
+                ],
+                "top_hold": [],
+            }
+
+    def _fake_ai(ticker, **kwargs):
+        if ticker == "AAA.NS":
+            return {"available": True, "price": 110.0, "source": "cache"}
+        return {"available": True, "price": 90.0, "source": "cache"}
+
+    monkeypatch.setattr(server, "models_loaded", True)
+    monkeypatch.setattr(server, "predictor", StubPredictor())
+    monkeypatch.setattr(server, "ticker_names", {"AAA.NS": "AAA", "BBB.NS": "BBB"})
+    monkeypatch.setattr(server, "_resolve_ai_forecast_price", _fake_ai)
+
+    with server.app.test_client() as client:
+        response = client.get("/api/top-picks?grouped=true&n=10&mode=ai")
+        assert response.status_code == 200
+        payload = response.get_json()
+
+    assert payload["mode"] == "ai"
+    assert any(r["ticker"] == "AAA.NS" for r in payload["top_buy"])
+    assert any(r["ticker"] == "BBB.NS" for r in payload["top_sell"])

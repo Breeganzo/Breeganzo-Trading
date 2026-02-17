@@ -81,9 +81,12 @@ function renderSummary(data) {
     el.innerHTML = `
         <div class="summary-card"><span class="summary-label position-count">Open Positions</span><span class="summary-value">${data.position_count || 0}</span></div>
         <div class="summary-card"><span class="summary-label">Trades</span><span class="summary-value">${data.trade_count || 0}</span></div>
+        <div class="summary-card"><span class="summary-label">Invested</span><span class="summary-value">${formatPrice(data.invested_value)}</span></div>
+        <div class="summary-card"><span class="summary-label">Current After Cost</span><span class="summary-value">${formatPrice(data.current_value_after_cost)}</span></div>
+        <div class="summary-card"><span class="summary-label">Txn Cost Eaten</span><span class="summary-value">${formatPrice(data.transaction_costs_total_including_open_estimate)}</span></div>
         <div class="summary-card"><span class="summary-label">Realized P&L</span><span class="summary-value ${signedClass(data.realized_pnl)}">₹${formatN(data.realized_pnl)}</span></div>
-        <div class="summary-card"><span class="summary-label">Unrealized P&L</span><span class="summary-value ${signedClass(data.unrealized_pnl)}">₹${formatN(data.unrealized_pnl)}</span></div>
-        <div class="summary-card"><span class="summary-label">Total P&L</span><span class="summary-value ${signedClass(data.total_pnl)}">₹${formatN(data.total_pnl)}</span></div>
+        <div class="summary-card"><span class="summary-label">Unrealized P&L (After Cost)</span><span class="summary-value ${signedClass(data.unrealized_pnl_after_cost)}">₹${formatN(data.unrealized_pnl_after_cost)}</span></div>
+        <div class="summary-card"><span class="summary-label">Total P&L (After Cost)</span><span class="summary-value ${signedClass(data.total_pnl_after_cost)}">₹${formatN(data.total_pnl_after_cost)}</span></div>
     `;
 }
 
@@ -99,15 +102,18 @@ function renderHoldings(rows) {
             <td>${r.quantity}</td>
             <td>${formatPrice(r.avg_buy_price || r.entry_price)}</td>
             <td>${formatPrice(r.current_price)}</td>
+            <td>${formatPrice(r.invested_value_after_cost || r.cost_value)}</td>
+            <td>${formatPrice(r.current_value_after_cost || r.market_value)}</td>
+            <td>${formatPrice(r.transaction_cost_eaten)}</td>
             <td class="${signedClass(r.unrealized_pnl)}">${Number.isFinite(Number(r.unrealized_pnl)) ? `₹${formatN(r.unrealized_pnl)}` : '—'}</td>
-            <td class="${signedClass(r.unrealized_pnl_pct)}">${Number(r.unrealized_pnl_pct || 0).toFixed(2)}%</td>
+            <td class="${signedClass(r.unrealized_pnl_after_cost_pct)}">${Number(r.unrealized_pnl_after_cost_pct || 0).toFixed(2)}%</td>
         </tr>
     `).join('');
     el.innerHTML = `
         <table class="eva-table">
             <thead>
                 <tr>
-                    <th>Ticker</th><th>Qty</th><th>Avg Buy</th><th>Current</th><th>Unrealized P&L</th><th>Unrealized %</th>
+                    <th>Ticker</th><th>Qty</th><th>Avg Buy</th><th>Current</th><th>Invested</th><th>Current After Cost</th><th>Txn Cost Eaten</th><th>Unrealized P&L</th><th>Unrealized %</th>
                 </tr>
             </thead>
             <tbody>${body}</tbody>

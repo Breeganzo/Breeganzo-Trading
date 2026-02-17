@@ -6,6 +6,7 @@ let advisorOpenList = [];
 let advisorBusy = false;
 let advisorLedgerRows = [];
 let advisorViewFilter = 'buy';
+let advisorListView = 'buy';
 let advisorRealtimeTimer = null;
 let advisorRealtimeBusy = false;
 
@@ -75,10 +76,15 @@ function setAdvisorViewFilter(value) {
 
     const openWrap = document.getElementById('advisor-open-buy-wrap');
     const ledgerWrap = document.getElementById('advisor-ledger-wrap');
-    if (openWrap) openWrap.style.display = advisorViewFilter === 'buy' ? '' : 'none';
-    if (ledgerWrap) ledgerWrap.style.display = advisorViewFilter === 'buy' ? 'none' : '';
+    const showOpenCandidates = advisorViewFilter === 'buy' || advisorViewFilter === 'hold';
+    if (openWrap) openWrap.style.display = showOpenCandidates ? '' : 'none';
+    if (ledgerWrap) ledgerWrap.style.display = advisorViewFilter === 'sell' ? '' : 'none';
 
-    if (advisorViewFilter === 'buy') {
+    if (showOpenCandidates) {
+        if (advisorListView !== advisorViewFilter) {
+            loadAdvisorOpenBuyList();
+            return;
+        }
         renderAdvisorOpenList(advisorOpenList);
     } else {
         renderAdvisorTradeLedgerRows(advisorLedgerRows);
@@ -119,17 +125,17 @@ function renderAdvisorTradeLedgerRows(rows) {
     const filtered = allRows.filter((row) => {
         const status = String(row?.status || 'HOLD').toUpperCase();
         if (advisorViewFilter === 'sell') return status === 'SOLD';
-        if (advisorViewFilter === 'hold') return status === 'HOLD';
         return true;
     });
     if (!filtered.length) {
-        body.innerHTML = '<tr><td colspan="13" class="muted-text">No simulated transactions yet.</td></tr>';
+        body.innerHTML = '<tr><td colspan="14" class="muted-text">No simulated transactions yet.</td></tr>';
         return;
     }
     body.innerHTML = filtered.map((row) => {
         const status = String(row.status || 'HOLD').toUpperCase();
         const qty = Number(row.quantity || 0);
         const pnl = status === 'SOLD' ? Number(row.realized_pnl || 0) : Number(row.unrealized_pnl || 0);
+        const txnCost = Number(row.buy_fee || 0) + Number(row.sell_fee || 0);
         const pnlStyle = pnl > 0 ? 'color: var(--green);' : (pnl < 0 ? 'color: var(--red);' : '');
         const reason = status === 'SOLD' ? (row.sell_reason || 'sold') : 'hold_open';
         return `
@@ -146,6 +152,7 @@ function renderAdvisorTradeLedgerRows(rows) {
                 <td>${advisorFormatPrice(row.sell_price)}</td>
                 <td>${advisorFormatTimestamp(row.sell_timestamp)}</td>
                 <td style="${pnlStyle}">${advisorFormatSignedPrice(pnl)}</td>
+                <td>${advisorFormatPrice(txnCost)}</td>
                 <td>${reason}</td>
             </tr>
         `;
@@ -176,9 +183,15 @@ async function refreshAdvisorSummary() {
         const cashEl = document.getElementById('advisor-cash');
         const openEl = document.getElementById('advisor-open-count');
         const eqEl = document.getElementById('advisor-equity');
+        const investedEl = document.getElementById('advisor-invested');
+        const currentAfterCostEl = document.getElementById('advisor-current-after-cost');
+        const costEatenEl = document.getElementById('advisor-cost-eaten');
         if (cashEl) cashEl.textContent = advisorFormatPrice(data.cash);
         if (openEl) openEl.textContent = String(data.open_positions_count || 0);
         if (eqEl) eqEl.textContent = advisorFormatPrice(data.equity_value);
+        if (investedEl) investedEl.textContent = advisorFormatPrice(data.invested_value_after_cost || data.invested_value);
+        if (currentAfterCostEl) currentAfterCostEl.textContent = advisorFormatPrice(data.current_value_after_cost || data.mark_to_market_value);
+        if (costEatenEl) costEatenEl.textContent = advisorFormatPrice(data.transaction_cost_eaten_open_positions);
         renderTransactionSummary(data.transaction_summary || null);
         await refreshAdvisorTradeLedger();
     } catch (e) {
@@ -209,7 +222,7 @@ function renderAdvisorOpenList(rows) {
             <td>${advisorFormatPrice(row.target_price)}</td>
             <td>${Number(row.risk_reward || 0).toFixed(2)}</td>
             <td>
-                <button type="button" class="tf-btn" onclick="simulateAdvisorBuy('${row.ticker}')">Sim BUY</button>
+                <button type="button" class="tf-btn" ${advisorViewFilter === 'hold' ? 'disabled' : ''} onclick="simulateAdvisorBuy('${row.ticker}')">${advisorViewFilter === 'hold' ? 'Watch' : 'Sim BUY'}</button>
             </td>
         </tr>
     `).join('');
@@ -217,12 +230,17 @@ function renderAdvisorOpenList(rows) {
 
 async function loadAdvisorOpenBuyList() {
     if (advisorBusy) return;
+    if (advisorViewFilter === 'sell') {
+        await refreshAdvisorSummary();
+        return;
+    }
     const status = document.getElementById('advisor-status');
+    const requestedView = advisorViewFilter === 'hold' ? 'hold' : 'buy';
     const budget = advisorBudgetValue();
-    if (status) status.textContent = 'Loading advisor picks...';
+    if (status) status.textContent = `Loading strategy ${requestedView.toUpperCase()} picks...`;
     setAdvisorBusy(true);
     try {
-        const res = await fetch(`/api/advisor/open-buy-list?n=10&budget=${encodeURIComponent(budget)}&allow_warming=1`);
+        const res = await fetch(`/api/advisor/open-buy-list?n=10&view=${encodeURIComponent(requestedView)}&budget=${encodeURIComponent(budget)}&allow_warming=1`);
         const data = await res.json();
         if (res.status === 202 && data.status === 'warming') {
             if (status) status.textContent = `${data.message || 'Advisor cache warming...'} Retrying in ${Number(data.retry_after_sec || 5)}s.`;
@@ -233,15 +251,17 @@ async function loadAdvisorOpenBuyList() {
         }
         if (!res.ok || data.error) throw new Error(data.error || 'Advisor list unavailable');
         advisorOpenList = data.picks || [];
+        advisorListView = requestedView;
         renderAdvisorOpenList(advisorOpenList);
         const warnings = (data.warnings || []).slice(0, 3);
         if (status) {
             const warnText = warnings.length ? ` | Warnings: ${warnings.join(' ; ')}` : '';
-            status.textContent = `Generated ${data.count || 0} picks. Budget ₹${budget.toLocaleString('en-IN')} | Estimated total ₹${Number(data.estimated_total_cost || 0).toLocaleString('en-IN')}${warnText}`;
+            status.textContent = `Generated ${data.count || 0} ${requestedView.toUpperCase()} picks. Budget ₹${budget.toLocaleString('en-IN')} | Estimated total ₹${Number(data.estimated_total_cost || 0).toLocaleString('en-IN')}${warnText}`;
         }
         await refreshAdvisorSummary();
     } catch (e) {
         advisorOpenList = [];
+        advisorListView = requestedView;
         renderAdvisorOpenList([]);
         if (status) status.textContent = `Advisor error: ${e.message}`;
     } finally {
@@ -262,7 +282,7 @@ async function refreshAdvisorOpenListLivePrices() {
         if (!Number.isFinite(px) || px <= 0) return row;
         return { ...row, current_price: px };
     });
-    if (advisorViewFilter === 'buy') {
+    if (advisorViewFilter === 'buy' || advisorViewFilter === 'hold') {
         renderAdvisorOpenList(advisorOpenList);
     }
 }
@@ -331,6 +351,9 @@ async function runAdvisorAutoCheck() {
             status.textContent = `Auto-check completed. Auto-sell: ${sells}, auto-buy: ${buys}.${note}`;
         }
         await refreshAdvisorSummary();
+        if (advisorViewFilter === 'buy' || advisorViewFilter === 'hold') {
+            await loadAdvisorOpenBuyList();
+        }
     } catch (e) {
         if (status) status.textContent = `Auto-check error: ${e.message}`;
     } finally {

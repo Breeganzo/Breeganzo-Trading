@@ -42,10 +42,10 @@
                         <label for="advisor-view-filter">View</label>
                         <select id="advisor-view-filter" onchange="setAdvisorViewFilter(this.value)">
                             <option value="buy">BUY</option>
-                            <option value="sell">SELL</option>
                             <option value="hold">HOLD</option>
+                            <option value="sell">SELL</option>
                         </select>
-                        <button type="button" class="tf-btn" onclick="loadAdvisorOpenBuyList()">Load 10 Open Buys</button>
+                        <button type="button" class="tf-btn" onclick="loadAdvisorOpenBuyList()">Load Top 10 Signals</button>
                         <button type="button" class="tf-btn" onclick="runAdvisorAutoCheck()">Auto-check SL/Target</button>
                         <button type="button" class="tf-btn" onclick="resetAdvisorSimulation()">Reset Sim</button>
                     </div>
@@ -55,6 +55,9 @@
                     <span class="advisor-kpi"><span class="advisor-kpi-label">Sim Cash</span><strong id="advisor-cash">₹40,000</strong></span>
                     <span class="advisor-kpi"><span class="advisor-kpi-label">Open Positions</span><strong id="advisor-open-count">0</strong></span>
                     <span class="advisor-kpi"><span class="advisor-kpi-label">Sim Equity</span><strong id="advisor-equity">₹40,000</strong></span>
+                    <span class="advisor-kpi"><span class="advisor-kpi-label">Invested</span><strong id="advisor-invested">₹0</strong></span>
+                    <span class="advisor-kpi"><span class="advisor-kpi-label">Current After Cost</span><strong id="advisor-current-after-cost">₹0</strong></span>
+                    <span class="advisor-kpi"><span class="advisor-kpi-label">Txn Cost Eaten</span><strong id="advisor-cost-eaten">₹0</strong></span>
                 </div>
                 <div class="advisor-table-wrap" id="advisor-open-buy-wrap">
                     <table class="premarket-table advisor-table">
@@ -96,11 +99,12 @@
                                 <th>Sell Price</th>
                                 <th>Sell Time</th>
                                 <th>PnL</th>
+                                <th>Txn Cost</th>
                                 <th>Reason</th>
                             </tr>
                         </thead>
                         <tbody id="advisor-trade-ledger-body">
-                            <tr><td colspan="13" class="muted-text">No simulated transactions yet.</td></tr>
+                            <tr><td colspan="14" class="muted-text">No simulated transactions yet.</td></tr>
                         </tbody>
                     </table>
                 </div>
