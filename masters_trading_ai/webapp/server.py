@@ -966,6 +966,113 @@ def _simulation_state_template(cash: float = SIMULATION_DEFAULT_CASH) -> dict:
     }
 
 
+def _latest_sim_prices_from_ledgers() -> dict[str, dict]:
+    """
+    Recover latest known simulated trade prices per ticker from persisted ledgers.
+    Priority:
+      1) JSONL ledger (authoritative event stream)
+      2) Excel ledger (fallback when JSONL is unavailable)
+    """
+    latest: dict[str, dict] = {}
+
+    def _upsert(ticker: str, price: float, ts_value, source: str) -> None:
+        t = str(ticker or "").strip().upper()
+        px = _safe_float(price)
+        if not t or px <= 0:
+            return
+        ts_dt = _parse_iso_with_ist(ts_value if isinstance(ts_value, str) else None)
+        if ts_dt is None:
+            if isinstance(ts_value, datetime):
+                ts_dt = ts_value if ts_value.tzinfo else ts_value.replace(tzinfo=IST)
+                ts_dt = ts_dt.astimezone(IST)
+            else:
+                ts_dt = datetime.now(IST)
+        prev = latest.get(t)
+        prev_ts = _parse_iso_with_ist(prev.get("timestamp")) if prev else None
+        if prev is None or prev_ts is None or ts_dt >= prev_ts:
+            latest[t] = {
+                "price": round(px, 2),
+                "timestamp": ts_dt.isoformat(),
+                "source": source,
+            }
+
+    if SIMULATED_TRADE_LOG_FILE.exists():
+        try:
+            with open(SIMULATED_TRADE_LOG_FILE) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        raw = json.loads(line)
+                    except Exception:
+                        continue
+                    row = _normalize_sim_trade_event(raw)
+                    action = str(row.get("action", "")).upper()
+                    if action not in {"BUY", "SELL"}:
+                        continue
+                    _upsert(
+                        row.get("ticker"),
+                        row.get("price"),
+                        row.get("timestamp"),
+                        "jsonl_ledger",
+                    )
+        except Exception:
+            pass
+
+    if OPENPYXL_AVAILABLE and SIMULATED_TRADE_EXCEL_FILE.exists():
+        try:
+            from openpyxl import load_workbook
+
+            wb = load_workbook(
+                SIMULATED_TRADE_EXCEL_FILE, read_only=True, data_only=True
+            )
+            for sheet in wb.sheetnames:
+                ws = wb[sheet]
+                rows = ws.iter_rows(min_row=1, max_row=1, values_only=True)
+                header_row = next(rows, None)
+                if not header_row:
+                    continue
+                headers = [str(v or "").strip().lower() for v in header_row]
+                try:
+                    i_ticker = headers.index("ticker")
+                    i_price = headers.index("price")
+                except ValueError:
+                    continue
+                i_action = headers.index("action") if "action" in headers else None
+                i_ts = headers.index("timestamp") if "timestamp" in headers else None
+                i_date = headers.index("date_ist") if "date_ist" in headers else None
+                i_time = headers.index("time_ist") if "time_ist" in headers else None
+
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    if not row:
+                        continue
+                    action = (
+                        str(row[i_action]).strip().upper()
+                        if i_action is not None and i_action < len(row)
+                        else ""
+                    )
+                    if action and action not in {"BUY", "SELL"}:
+                        continue
+                    ticker = row[i_ticker] if i_ticker < len(row) else ""
+                    price = row[i_price] if i_price < len(row) else 0
+                    ts_val = row[i_ts] if i_ts is not None and i_ts < len(row) else None
+                    if (
+                        ts_val in (None, "")
+                        and i_date is not None
+                        and i_time is not None
+                    ):
+                        d_val = row[i_date] if i_date < len(row) else ""
+                        t_val = row[i_time] if i_time < len(row) else ""
+                        ts_val = f"{d_val}T{t_val}"
+                    _upsert(ticker, price, ts_val, "excel_ledger")
+            wb.close()
+        except Exception:
+            pass
+
+    return latest
+
+
 def _read_portfolio_sim_state() -> dict:
     with _portfolio_sim_lock:
         if not PORTFOLIO_SIM_FILE.exists():
@@ -989,6 +1096,47 @@ def _read_portfolio_sim_state() -> dict:
                     datetime.now(IST).isoformat(),
                 )
                 state["daily_loss_tracker"] = _daily_tracker_for_state(state)
+                open_positions = dict(state.get("open_positions", {}))
+                cleaned_open: dict[str, dict] = {}
+                need_price_backfill = False
+                for ticker, pos in open_positions.items():
+                    t = str(ticker or "").strip().upper()
+                    if not t or not isinstance(pos, dict):
+                        continue
+                    qty = _safe_float(pos.get("quantity"))
+                    avg = _safe_float(pos.get("avg_entry_price"))
+                    if qty <= 0 or avg <= 0:
+                        continue
+                    if _safe_float(pos.get("last_price")) <= 0:
+                        need_price_backfill = True
+                    cleaned_open[t] = dict(pos)
+                latest_prices = (
+                    _latest_sim_prices_from_ledgers()
+                    if cleaned_open and need_price_backfill
+                    else {}
+                )
+                for t, pos in cleaned_open.items():
+                    avg = _safe_float(pos.get("avg_entry_price"))
+                    lp = _safe_float(pos.get("last_price"))
+                    if lp <= 0:
+                        from_logs = latest_prices.get(t, {})
+                        lp = _safe_float(from_logs.get("price"))
+                        if lp > 0:
+                            pos["last_price_source"] = str(
+                                from_logs.get("source", "ledger")
+                            )
+                            pos["last_price_at"] = str(
+                                from_logs.get("timestamp")
+                                or datetime.now(IST).isoformat()
+                            )
+                    if lp <= 0:
+                        lp = avg
+                        pos.setdefault("last_price_source", "entry_fallback")
+                        pos.setdefault("last_price_at", datetime.now(IST).isoformat())
+                    pos["last_price"] = round(lp, 2)
+                    pos["quantity"] = round(_safe_float(pos.get("quantity")), 4)
+                    pos["avg_entry_price"] = round(avg, 2)
+                state["open_positions"] = cleaned_open
                 return state
         except Exception:
             pass
@@ -1000,6 +1148,26 @@ def _write_portfolio_sim_state(state: dict) -> None:
         payload = dict(state or {})
         payload["daily_loss_tracker"] = _daily_tracker_for_state(payload)
         payload["updated_at"] = datetime.now(IST).isoformat()
+        open_positions = dict(payload.get("open_positions", {}))
+        cleaned_open: dict[str, dict] = {}
+        for ticker, pos in open_positions.items():
+            t = str(ticker or "").strip().upper()
+            if not t or not isinstance(pos, dict):
+                continue
+            qty = _safe_float(pos.get("quantity"))
+            avg = _safe_float(pos.get("avg_entry_price"))
+            if qty <= 0 or avg <= 0:
+                continue
+            row = dict(pos)
+            row["quantity"] = round(qty, 4)
+            row["avg_entry_price"] = round(avg, 2)
+            last_px = _safe_float(row.get("last_price")) or avg
+            row["last_price"] = round(last_px, 2)
+            row["last_price_at"] = str(
+                row.get("last_price_at") or payload["updated_at"]
+            )
+            cleaned_open[t] = row
+        payload["open_positions"] = cleaned_open
         PORTFOLIO_SIM_FILE.parent.mkdir(parents=True, exist_ok=True)
         PORTFOLIO_SIM_FILE.write_text(json.dumps(payload, indent=2, default=str))
 
@@ -2467,6 +2635,11 @@ def _run_sim_auto_check(
         cp = _safe_float(live.get(ticker, {}).get("price"))
         if not _is_realistic_price(cp):
             continue
+        pos["last_price"] = round(cp, 2)
+        pos["last_price_at"] = now_iso
+        pos["last_price_source"] = "live_quote"
+        open_positions[ticker] = pos
+        state.setdefault("open_positions", {})[ticker] = pos
         stop_loss = _safe_float(pos.get("stop_loss_price"))
         target = _safe_float(pos.get("target_price"))
         entry = _safe_float(pos.get("avg_entry_price"))
@@ -2798,7 +2971,9 @@ def _execute_sim_sell(
             max(0.0, entry_fees_total - allocated_entry_fees), 2
         )
         pos["last_price"] = round(px, 2)
+        pos["last_price_at"] = ts
         pos["last_updated"] = ts
+        pos["last_price_source"] = "trade_execution"
         open_positions[t] = pos
 
     state["open_positions"] = open_positions
@@ -2944,6 +3119,9 @@ def _execute_sim_buy(
             "trade_type_hint": trade_type,
             "opened_at": pos.get("opened_at") or ts,
             "last_buy_at": ts,
+            "last_price": round(px, 2),
+            "last_price_at": ts,
+            "last_price_source": "trade_execution",
             "highest_price": round(highest_seen, 2),
             "trail_stop_price": round(max(trail_stop, sl_price), 2),
             "source": "strategy",
@@ -3185,11 +3363,32 @@ def _portfolio_summary_from_trades(
         live = _get_live_prices_batch(list(positions.keys()))
     else:
         live = {}
+    sim_last_prices: dict[str, float] = {}
+    try:
+        sim_open = dict(_read_portfolio_sim_state().get("open_positions", {}))
+        for t, pos in sim_open.items():
+            px = _safe_float((pos or {}).get("last_price"))
+            if px > 0:
+                sim_last_prices[str(t).upper()] = px
+    except Exception:
+        sim_last_prices = {}
+    trade_last_prices: dict[str, float] = {}
+    for tr in ordered_trades:
+        t = str(tr.get("ticker", "")).upper()
+        px = _safe_float(tr.get("price"))
+        if t and px > 0:
+            trade_last_prices[t] = px
 
     unrealized_total = 0.0
     for ticker, row in positions.items():
         l = live.get(ticker, {})
         curr = float(l.get("price", 0) or 0)
+        if curr <= 0:
+            curr = _safe_float(sim_last_prices.get(ticker))
+        if curr <= 0:
+            curr = _safe_float(trade_last_prices.get(ticker))
+        if curr <= 0:
+            curr = _safe_float(row.get("avg_buy_price"))
         row["current_price"] = round(curr, 2)
         m2m = curr * row["quantity"] if curr > 0 else 0.0
         entry_fee_estimate = _safe_float(row.get("entry_fee_estimate"))
@@ -4379,6 +4578,8 @@ def api_simulate_portfolio():
     invested_after_cost = 0.0
     current_after_cost = 0.0
     open_txn_cost_eaten = 0.0
+    state_dirty = False
+    fallback_prices_cache: dict[str, dict] | None = None
     for ticker in tickers:
         pos = dict(open_positions.get(ticker, {}))
         qty = _safe_float(pos.get("quantity"))
@@ -4386,6 +4587,29 @@ def api_simulate_portfolio():
             continue
         entry = _safe_float(pos.get("avg_entry_price"))
         live = _safe_float(live_prices.get(ticker, {}).get("price"))
+        if live <= 0:
+            live = _safe_float(pos.get("last_price"))
+        if live <= 0:
+            if fallback_prices_cache is None:
+                fallback_prices_cache = _latest_sim_prices_from_ledgers()
+            live = _safe_float(fallback_prices_cache.get(ticker, {}).get("price"))
+            if live > 0:
+                pos["last_price"] = round(live, 2)
+                pos["last_price_at"] = str(
+                    fallback_prices_cache.get(ticker, {}).get("timestamp")
+                    or datetime.now(IST).isoformat()
+                )
+                pos["last_price_source"] = str(
+                    fallback_prices_cache.get(ticker, {}).get("source") or "ledger"
+                )
+                open_positions[ticker] = pos
+                state_dirty = True
+        if live > 0 and abs(_safe_float(pos.get("last_price")) - live) > 1e-9:
+            pos["last_price"] = round(live, 2)
+            pos["last_price_at"] = datetime.now(IST).isoformat()
+            pos["last_price_source"] = "live_quote"
+            open_positions[ticker] = pos
+            state_dirty = True
         strategy_target = _safe_float(pos.get("target_price"))
         stop_loss = _safe_float(pos.get("stop_loss_price"))
         entry_value = qty * entry
@@ -4436,6 +4660,9 @@ def api_simulate_portfolio():
                 "opened_at": pos.get("opened_at"),
             }
         )
+    if state_dirty:
+        state["open_positions"] = open_positions
+        _write_portfolio_sim_state(state)
     cash = float(
         state.get("cash", state.get("initial_cash", SIMULATION_DEFAULT_CASH)) or 0
     )
@@ -8818,7 +9045,65 @@ def api_risk_analytics():
 
     try:
         _sanitize_portfolio_storage()
-        portfolio_rows = _read_portfolio()
+        manual_rows = _read_portfolio()
+        sim_rows = []
+        try:
+            sim_state = _read_portfolio_sim_state()
+            for t, pos in dict(sim_state.get("open_positions", {})).items():
+                ticker = str(t or "").strip().upper()
+                qty = _safe_float((pos or {}).get("quantity"))
+                entry = _safe_float((pos or {}).get("avg_entry_price"))
+                if ticker and qty > 0 and entry > 0:
+                    sim_rows.append(
+                        {
+                            "ticker": ticker,
+                            "name": ticker_names.get(ticker, _clean_name(ticker)),
+                            "quantity": qty,
+                            "entry_price": entry,
+                            "source": "simulation",
+                        }
+                    )
+        except Exception:
+            sim_rows = []
+
+        merged_rows: dict[str, dict] = {}
+
+        def _merge_row(row: dict, source: str) -> None:
+            ticker = str(row.get("ticker", "")).strip().upper()
+            qty = _safe_float(row.get("quantity"))
+            entry = _safe_float(row.get("entry_price"))
+            if not ticker or qty <= 0 or entry <= 0:
+                return
+            prev = merged_rows.get(ticker)
+            if not prev:
+                merged_rows[ticker] = {
+                    "ticker": ticker,
+                    "name": row.get("name")
+                    or ticker_names.get(ticker, _clean_name(ticker)),
+                    "quantity": qty,
+                    "entry_price": entry,
+                    "source": source,
+                }
+                return
+            prev_qty = _safe_float(prev.get("quantity"))
+            prev_px = _safe_float(prev.get("entry_price"))
+            total_qty = prev_qty + qty
+            avg_px = (
+                (prev_qty * prev_px + qty * entry) / total_qty
+                if total_qty > 0
+                else max(prev_px, entry)
+            )
+            prev["quantity"] = round(total_qty, 6)
+            prev["entry_price"] = round(avg_px, 6)
+            prev["source"] = "merged"
+            merged_rows[ticker] = prev
+
+        for row in manual_rows:
+            _merge_row(row if isinstance(row, dict) else {}, "manual")
+        for row in sim_rows:
+            _merge_row(row, "simulation")
+
+        portfolio_rows = list(merged_rows.values())
         if not portfolio_rows:
             return (
                 jsonify(
@@ -8907,8 +9192,45 @@ def api_risk_analytics():
         bench_close = close["^NSEI"] if "^NSEI" in close.columns else None
         port_close = close.drop(columns=["^NSEI"], errors="ignore")
 
-        # Drop columns with too many NaNs (50% threshold for wider coverage)
-        port_close = port_close.dropna(axis=1, thresh=int(len(port_close) * 0.5))
+        # Keep ticker history if it has at least a minimum observation count.
+        min_obs = 20
+        if len(port_close) > 0:
+            port_close = port_close.dropna(axis=1, thresh=min_obs)
+
+        # Recover missing symbols via single-ticker pulls (yfinance batch can skip some).
+        missing_tickers = [t for t in portfolio_tickers if t not in port_close.columns]
+        for t in missing_tickers:
+            single = _safe_yf_download(
+                t,
+                period="6mo",
+                interval="1d",
+                auto_adjust=True,
+            )
+            if single is None or single.empty:
+                continue
+            ser = None
+            if isinstance(single.columns, pd.MultiIndex):
+                lvl0 = single.columns.get_level_values(0)
+                if "Close" in lvl0:
+                    obj = single["Close"]
+                    if isinstance(obj, pd.DataFrame):
+                        if t in obj.columns:
+                            ser = obj[t]
+                        elif obj.shape[1] == 1:
+                            ser = obj.iloc[:, 0]
+                    else:
+                        ser = obj
+            else:
+                if "Close" in single.columns:
+                    ser = single["Close"]
+            if ser is None:
+                continue
+            ser = ser.dropna()
+            if len(ser) < min_obs:
+                continue
+            port_close[t] = ser
+
+        port_close = port_close.sort_index().dropna(axis=0, how="all")
         actual_period_days = len(port_close)
 
         # Recombine with benchmark for returns calculation
@@ -8931,17 +9253,37 @@ def api_risk_analytics():
             }
 
         # --- Sector Exposure ---
-        sector_exposure = {}
-        for sec, tickers in tickers_by_sector.items():
-            overlap = [t for t in portfolio_tickers if t in tickers]
-            if overlap:
-                sector_exposure[SECTOR_DISPLAY.get(sec, sec)] = {
-                    "count": len(overlap),
-                    "tickers": overlap,
-                    "weight_pct": round(
-                        len(overlap) / max(len(surviving_tickers), 1) * 100, 1
-                    ),
-                }
+        sector_exposure: dict[str, dict] = {}
+        total_invested_surviving = sum(
+            custom_weights.get(t, 0.0) for t in surviving_tickers
+        )
+        for t in surviving_tickers:
+            sec_key = str(ticker_to_sector.get(t, "other"))
+            sec_label = SECTOR_DISPLAY.get(sec_key, sec_key.replace("_", " ").title())
+            bucket = sector_exposure.setdefault(
+                sec_label,
+                {"count": 0, "tickers": [], "invested_value": 0.0, "weight_pct": 0.0},
+            )
+            bucket["count"] += 1
+            bucket["tickers"].append(t)
+            bucket["invested_value"] += float(custom_weights.get(t, 0.0) or 0.0)
+
+        for sec_label, bucket in sector_exposure.items():
+            invested = float(bucket.get("invested_value", 0.0) or 0.0)
+            if total_invested_surviving > 0:
+                bucket["weight_pct"] = round(
+                    invested / total_invested_surviving * 100.0, 1
+                )
+            else:
+                bucket["weight_pct"] = round(
+                    bucket.get("count", 0) / max(len(surviving_tickers), 1) * 100.0,
+                    1,
+                )
+            bucket["position_pct"] = round(
+                bucket.get("count", 0) / max(len(surviving_tickers), 1) * 100.0,
+                1,
+            )
+            bucket["invested_value"] = round(invested, 2)
 
         # --- Portfolio-level returns (weighted by user holdings if available) ---
         portfolio_cols = [
@@ -9039,6 +9381,11 @@ def api_risk_analytics():
                         for r in portfolio_rows
                         if r.get("ticker") in surviving_tickers
                     ],
+                    "portfolio_source": (
+                        "merged_manual_and_simulation"
+                        if manual_rows and sim_rows
+                        else ("simulation" if sim_rows else "manual")
+                    ),
                     "initial_capital": round(initial_capital, 2),
                     "ignored_tickers": ignored,
                     "n_stocks": len(surviving_tickers),

@@ -178,6 +178,8 @@ function renderSectorExposure(exposure) {
     let i = 0;
     for (const [sector, data] of Object.entries(exposure)) {
         const color = colors[i % colors.length];
+        const pct = Math.max(0, Math.min(100, Number(data.weight_pct || 0)));
+        const positionPct = Number(data.position_pct || 0);
         html += `
         <div class="sector-bar-row">
             <div class="sector-bar-label">
@@ -185,9 +187,9 @@ function renderSectorExposure(exposure) {
                 ${sector}
             </div>
             <div class="sector-bar-track">
-                <div class="sector-bar-fill" style="width:${data.weight_pct}%; background:${color}"></div>
+                <div class="sector-bar-fill" style="width:${pct}%; background:${color}"></div>
             </div>
-            <span class="sector-bar-pct">${data.weight_pct}% (${data.count})</span>
+            <span class="sector-bar-pct">${pct.toFixed(1)}% (${data.count})${Number.isFinite(positionPct) ? ` • Pos ${positionPct.toFixed(1)}%` : ''}</span>
         </div>`;
         i++;
     }
@@ -276,12 +278,12 @@ function renderStatTests(tests) {
         <div class="stat-test-card">
             <div class="test-header">
                 <span class="test-icon">${passed ? '✅' : '⚠️'}</span>
-                <h4>Jarque-Bera Normality Test</h4>
+                <h4 class="risk-term" data-risk-term="Jarque-Bera Normality Test" tabindex="0" role="button">Jarque-Bera Normality Test</h4>
             </div>
-            <p class="test-hypothesis">H₀: Returns are normally distributed</p>
+            <p class="test-hypothesis risk-term" data-risk-term="Jarque-Bera Null Hypothesis" tabindex="0" role="button">H₀: Returns are normally distributed</p>
             <div class="test-results">
-                <div class="test-row"><span>Statistic</span><span>${jb.statistic}</span></div>
-                <div class="test-row"><span>p-value</span><span>${jb.p_value}</span></div>
+                <div class="test-row"><span class="risk-term" data-risk-term="Jarque-Bera Statistic" tabindex="0" role="button">Statistic</span><span>${jb.statistic}</span></div>
+                <div class="test-row"><span class="risk-term" data-risk-term="Jarque-Bera p-value" tabindex="0" role="button">p-value</span><span>${jb.p_value}</span></div>
                 <div class="test-row"><span>Result</span>
                     <span class="${passed ? 'up-color' : 'down-color'}">
                         ${passed ? 'Cannot reject H₀ (returns appear normal)' : 'Reject H₀ (returns are non-normal)'}
