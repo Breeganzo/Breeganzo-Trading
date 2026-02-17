@@ -172,6 +172,17 @@ Simulation risk controls:
 - daily loss circuit breaker (`MAX_DAILY_LOSS`)
 - BUY/SELL triggers are allowed only during `09:30-15:30 IST` on trading days
 - AUTO_CHECK outside market hours returns a safe "skipped" response (no trades fired)
+- auto-sell triggers on:
+  - stop-loss hit,
+  - target hit,
+  - strategy signal turns `SELL` (strategy-first logic)
+- same-cycle reinvestment:
+  - after simulated sell frees cash, auto-buy optimizer can allocate into fresh strategy BUY candidates during market hours.
+- strategy-first with sentiment adjustment:
+  - baseline action comes from strategy signal;
+  - same-day relevant sentiment can downgrade/upgrade action conservatively.
+- portfolio optimizer:
+  - risk-constrained utility optimization (budget cap, concentration cap, risk budget, fee-aware quantity rounding).
 
 Important: this is simulation only; no live brokerage order is sent.
 

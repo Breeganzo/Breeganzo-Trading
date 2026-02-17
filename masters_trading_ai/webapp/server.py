@@ -52,6 +52,10 @@ from flask import Flask, jsonify, render_template, request, make_response
 from flask_cors import CORS
 import numpy as np
 import pandas as pd
+try:
+    from scipy.optimize import linprog
+except Exception:
+    linprog = None
 
 # Add project root to path
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -210,6 +214,13 @@ MEDIUM_CONFIDENCE_THRESHOLD = float(
 )
 AI_STRATEGY_GAP_WARN = float(os.environ.get("AI_STRATEGY_GAP_WARN", "0.10"))
 AI_STRATEGY_GAP_BLOCK = float(os.environ.get("AI_STRATEGY_GAP_BLOCK", "0.50"))
+ADVISOR_RISK_AVERSION = float(os.environ.get("ADVISOR_RISK_AVERSION", "0.35"))
+ADVISOR_MAX_PORTFOLIO_RISK = float(
+    os.environ.get("ADVISOR_MAX_PORTFOLIO_RISK", "0.12")
+)
+ADVISOR_BUY_TRIGGER_BUFFER = float(os.environ.get("ADVISOR_BUY_TRIGGER_BUFFER", "0.002"))
+SIM_PRICE_HARD_MAX = float(os.environ.get("SIM_PRICE_HARD_MAX", "1000000"))
+SIM_QTY_HARD_MAX = int(os.environ.get("SIM_QTY_HARD_MAX", "100000"))
 TRADE_DAILY_REPORT_HOUR_IST = int(
     np.clip(int(os.environ.get("TRADE_DAILY_REPORT_HOUR_IST", "15")), 0, 23)
 )
@@ -1299,6 +1310,377 @@ def _next_recommended_sell_time(
     return (now + timedelta(minutes=45)).isoformat()
 
 
+def _is_realistic_price(price: float) -> bool:
+    p = float(price or 0)
+    return np.isfinite(p) and 0 < p <= SIM_PRICE_HARD_MAX
+
+
+def _strategy_action_from_signal(signal: str, predicted_return_pct: float = 0.0) -> str:
+    sig = str(signal or "").strip().upper()
+    if sig in {"STRONG_BUY", "BUY"}:
+        return "BUY"
+    if sig in {"STRONG_SELL", "SELL"}:
+        return "SELL"
+    if predicted_return_pct > 0.2:
+        return "BUY"
+    if predicted_return_pct < -0.2:
+        return "SELL"
+    return "HOLD"
+
+
+def _has_relevant_today_sentiment(row: dict) -> bool:
+    articles = int(_safe_float(row.get("sentiment_articles")))
+    if articles <= 0:
+        return False
+    weights = row.get("sentiment_decay_weights", {})
+    if isinstance(weights, dict):
+        day0 = _safe_float(weights.get("day0", weights.get("0")))
+        if day0 > 0:
+            return True
+        for k, v in weights.items():
+            key = str(k).strip().lower()
+            if key in {"day0", "0"} and _safe_float(v) > 0:
+                return True
+    ts = _parse_iso_datetime(row.get("timestamp") or row.get("captured_at"))
+    if ts is not None:
+        return ts.astimezone(IST).date() == datetime.now(IST).date()
+    return True
+
+
+def _sentiment_adjusted_action(strategy_action: str, row: dict) -> tuple[str, str]:
+    """
+    Strategy-first decisioning:
+      - use strategy signal as base
+      - only adjust when same-day sentiment is relevant
+    """
+    base = str(strategy_action or "HOLD").upper()
+    if base not in {"BUY", "SELL", "HOLD"}:
+        base = "HOLD"
+
+    if not _has_relevant_today_sentiment(row):
+        return base, "strategy_only"
+
+    sent_raw = _safe_float(row.get("weighted_sentiment_raw"))
+    # Very poor sentiment: block/aggressively reduce long exposure.
+    if sent_raw <= -0.55:
+        if base == "BUY":
+            return "HOLD", "sentiment_blocked_buy"
+        if base == "HOLD":
+            return "SELL", "sentiment_downgrade_to_sell"
+    elif sent_raw <= -0.30:
+        if base == "BUY":
+            return "HOLD", "sentiment_downgrade_to_hold"
+
+    # Strong positive sentiment: soften bearish/neutral decisions.
+    if sent_raw >= 0.45 and base == "SELL":
+        return "HOLD", "sentiment_softened_sell"
+    if sent_raw >= 0.35 and base == "HOLD":
+        return "BUY", "sentiment_upgrade_to_buy"
+
+    return base, "strategy_plus_sentiment"
+
+
+def _max_affordable_qty(
+    available_cash: float,
+    entry_price: float,
+    trade_type: str = "equity_delivery",
+) -> int:
+    cash = max(0.0, float(available_cash or 0))
+    px = max(0.0, float(entry_price or 0))
+    if cash <= 0 or px <= 0:
+        return 0
+    hi = int(min(SIM_QTY_HARD_MAX, cash // px))
+    if hi <= 0:
+        return 0
+    lo, best = 1, 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        notional = mid * px
+        fee = _estimate_entry_fee(notional, trade_type=trade_type)
+        total = notional + fee
+        if total <= cash + 1e-9:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return max(0, min(best, SIM_QTY_HARD_MAX))
+
+
+def _build_strategy_buy_candidates(
+    rows: list[dict],
+    *,
+    live_prices: dict[str, dict] | None = None,
+    exclude_tickers: set[str] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """
+    Build strategy-driven BUY candidates with sentiment adjustment metadata.
+    """
+    candidates: list[dict] = []
+    warnings: list[str] = []
+    live_prices = live_prices or {}
+    exclude = {str(t).upper() for t in (exclude_tickers or set())}
+
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        ticker = str(raw.get("ticker", "")).strip().upper()
+        if not ticker or ticker in exclude:
+            continue
+        if not _is_tradeable_ticker(ticker):
+            continue
+
+        cp = _safe_float(live_prices.get(ticker, {}).get("price"))
+        if cp <= 0:
+            cp = _safe_float(raw.get("current_price"))
+        strategy_price = _safe_float(
+            raw.get("strategy_price_at_open")
+            or raw.get("target_price")
+            or raw.get("predicted_price")
+        )
+        if strategy_price <= 0:
+            strategy_price = cp
+
+        if not _is_realistic_price(cp) or not _is_realistic_price(strategy_price):
+            continue
+
+        pred_ret_pct = _normalize_predicted_return_pct(
+            raw.get(
+                "predicted_return",
+                raw.get(
+                    "predicted_return_pct",
+                    _safe_float(raw.get("predicted_return_decimal")) * 100.0,
+                ),
+            )
+        )
+        strategy_signal = _strategy_action_from_signal(
+            raw.get("signal"),
+            predicted_return_pct=pred_ret_pct,
+        )
+        effective_action, action_source = _sentiment_adjusted_action(
+            strategy_signal,
+            raw,
+        )
+        if effective_action != "BUY":
+            continue
+
+        confidence_pct = float(np.clip(_safe_float(raw.get("confidence", 0)), 0, 100))
+        model_agreement = float(
+            np.clip(_safe_float(raw.get("model_agreement", 0)), 0, 100)
+        )
+        atr_pct = float(np.clip(abs(_safe_float(raw.get("atr_pct", 0))), 0, 25))
+        liq_factor = _safe_float(raw.get("liquidity_factor"))
+        if liq_factor <= 0:
+            liq_factor = 1.0
+        liq_factor = float(np.clip(liq_factor, 0.5, 1.5))
+        rr = _safe_float(raw.get("risk_reward"))
+        rr = float(np.clip(rr if rr > 0 else 1.3, 0.5, 5.0))
+        uses_sentiment = (
+            _has_relevant_today_sentiment(raw)
+            and abs(_safe_float(raw.get("weighted_sentiment_raw"))) > 0.0
+        )
+        stop_loss_pct, skip_trade = _compute_dynamic_stop_loss_pct(
+            confidence_pct=confidence_pct,
+            atr_pct=atr_pct,
+            uses_sentiment=uses_sentiment,
+        )
+        if skip_trade:
+            warnings.append(
+                f"{ticker} skipped: low confidence {confidence_pct:.1f}% under risk policy."
+            )
+            continue
+
+        stop_loss = _round_to_tick(strategy_price * (1 - stop_loss_pct))
+        if stop_loss <= 0 or stop_loss >= strategy_price:
+            stop_loss = _round_to_tick(strategy_price * (1 - STOP_LOSS_MED_CONF))
+        target_delta = max(
+            abs(strategy_price - stop_loss) * max(rr, 1.0),
+            strategy_price * max(pred_ret_pct / 100.0, 0.008),
+        )
+        target_price = _round_to_tick(strategy_price + target_delta)
+
+        predicted_edge = max(0.0, pred_ret_pct) / 100.0
+        sentiment_edge = float(np.clip(_safe_float(raw.get("weighted_sentiment_raw")), -1, 1))
+        expected_edge = (
+            predicted_edge * (confidence_pct / 100.0) * (model_agreement / 100.0) * liq_factor
+            + 0.03 * sentiment_edge
+        )
+        risk_metric = max(stop_loss_pct, atr_pct / 100.0, 0.01)
+        utility = expected_edge - ADVISOR_RISK_AVERSION * risk_metric
+
+        if utility <= -0.01:
+            continue
+
+        if abs(pred_ret_pct) > 4.5:
+            warnings.append(
+                f"{ticker} skipped: projected return {pred_ret_pct:.2f}% above conservative cap."
+            )
+            continue
+
+        candidates.append(
+            {
+                "ticker": ticker,
+                "name": ticker_names.get(ticker, _clean_name(ticker)),
+                "source": "strategy",
+                "current_price": round(cp, 2),
+                "strategy_price_at_open": round(strategy_price, 2),
+                "predicted_return_pct": round(pred_ret_pct, 3),
+                "confidence": round(confidence_pct, 1),
+                "model_agreement": round(model_agreement, 1),
+                "liquidity_factor": round(liq_factor, 3),
+                "atr_pct": round(atr_pct, 3),
+                "risk_reward": round(rr, 3),
+                "stop_loss_pct": round(stop_loss_pct, 6),
+                "stop_loss_price": round(stop_loss, 2),
+                "target_price": round(target_price, 2),
+                "expected_edge": float(expected_edge),
+                "risk_metric": float(risk_metric),
+                "objective_utility": float(utility),
+                "signal": str(raw.get("signal", "") or strategy_signal),
+                "strategy_action": strategy_signal,
+                "effective_action": effective_action,
+                "action_source": action_source,
+                "weighted_sentiment_raw": round(
+                    _safe_float(raw.get("weighted_sentiment_raw")),
+                    4,
+                ),
+                "sentiment_articles": int(_safe_float(raw.get("sentiment_articles"))),
+                "sentiment_weight_used": round(
+                    _safe_float(raw.get("sentiment_weight_used")),
+                    4,
+                ),
+                "avg_volume_30d": (
+                    round(_safe_float(raw.get("avg_volume_30d")), 2)
+                    if _safe_float(raw.get("avg_volume_30d")) > 0
+                    else None
+                ),
+                "strategy_generated_at": raw.get("timestamp")
+                or raw.get("captured_at")
+                or datetime.now(IST).isoformat(),
+            }
+        )
+
+    candidates.sort(
+        key=lambda c: (c["objective_utility"], c["confidence"], c["predicted_return_pct"]),
+        reverse=True,
+    )
+    return candidates, sorted(set(warnings))
+
+
+def _optimize_candidate_allocations(
+    candidates: list[dict],
+    *,
+    budget: float,
+    trade_type: str,
+    max_positions: int,
+) -> list[dict]:
+    """
+    Risk-constrained portfolio optimization over strategy BUY candidates.
+    Objective: maximize expected utility under budget, risk, and concentration caps.
+    """
+    if not candidates:
+        return []
+    budget = max(0.0, float(budget or 0))
+    if budget <= 0:
+        return []
+
+    n = len(candidates)
+    max_positions = max(1, min(max_positions, n))
+    utilities = np.array([max(-1.0, float(c["objective_utility"])) for c in candidates], dtype=float)
+    risks = np.array([max(0.001, float(c["risk_metric"])) for c in candidates], dtype=float)
+    per_name_cap = np.array(
+        [min(budget * max(0.1, min(MAX_POSITION_SIZE, 1.0)), budget) for _ in candidates],
+        dtype=float,
+    )
+    allocations = np.zeros(n, dtype=float)
+
+    positive = utilities > 0
+    if linprog is not None and positive.any():
+        c_vec = -utilities
+        A_ub = np.vstack([np.ones(n, dtype=float), risks])
+        b_ub = np.array(
+            [
+                budget,
+                budget * max(0.02, min(ADVISOR_MAX_PORTFOLIO_RISK, 1.0)),
+            ],
+            dtype=float,
+        )
+        bounds = [(0.0, float(per_name_cap[i])) for i in range(n)]
+        try:
+            res = linprog(c_vec, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
+            if res.success and res.x is not None:
+                allocations = np.maximum(0.0, np.asarray(res.x, dtype=float))
+        except Exception:
+            allocations = np.zeros(n, dtype=float)
+
+    if allocations.sum() <= 0:
+        # Fallback: normalized utility-weighted allocation under concentration cap.
+        util = np.maximum(utilities, 0.0)
+        if util.sum() <= 0:
+            util = np.ones(n, dtype=float)
+        weights = util / util.sum()
+        allocations = np.minimum(weights * budget, per_name_cap)
+
+    order = sorted(
+        range(n),
+        key=lambda i: (utilities[i], candidates[i]["confidence"], candidates[i]["predicted_return_pct"]),
+        reverse=True,
+    )
+    picks: list[dict] = []
+    remaining = budget
+    for idx in order:
+        if len(picks) >= max_positions or remaining <= 0:
+            break
+        c = candidates[idx]
+        px = float(c["strategy_price_at_open"])
+        if not _is_realistic_price(px):
+            continue
+
+        alloc = min(float(allocations[idx]), remaining)
+        qty_by_alloc = int(alloc // px) if alloc > 0 else 0
+        qty_by_cash = _max_affordable_qty(remaining, px, trade_type=trade_type)
+        qty = min(max(qty_by_alloc, 0), qty_by_cash)
+        if qty <= 0 and qty_by_cash > 0 and alloc > 0:
+            qty = 1
+        qty = max(0, min(int(qty), SIM_QTY_HARD_MAX))
+        if qty <= 0:
+            continue
+
+        while qty > 0:
+            notional = qty * px
+            fee = _estimate_entry_fee(notional, trade_type=trade_type)
+            total = notional + fee
+            if total <= remaining + 1e-9:
+                break
+            qty -= 1
+        if qty <= 0:
+            continue
+
+        notional = round(qty * px, 2)
+        fee = round(_estimate_entry_fee(notional, trade_type=trade_type), 2)
+        est_trade_cost = round(notional + fee, 2)
+        if est_trade_cost <= 0 or est_trade_cost > remaining + 1e-9:
+            continue
+
+        remaining = round(remaining - est_trade_cost, 2)
+        picks.append(
+            {
+                **c,
+                "suggested_qty": int(qty),
+                "estimated_notional": round(notional, 2),
+                "estimated_fee": round(fee, 2),
+                "est_trade_cost": round(est_trade_cost, 2),
+                "next_recommended_sell_time": _next_recommended_sell_time(
+                    c["current_price"],
+                    c["stop_loss_price"],
+                    c["target_price"],
+                ),
+                "edge_score": round(c["objective_utility"], 6),
+            }
+        )
+
+    return picks
+
+
 def _run_sim_auto_check(
     state: dict,
     *,
@@ -1319,6 +1701,16 @@ def _run_sim_auto_check(
     state["open_positions"] = dict(open_positions)
     tickers = sorted(open_positions.keys())
     live = _get_live_prices_batch(tickers) if tickers else {}
+    snapshot = _get_prediction_snapshot(use_latest_stored=True)
+    snap_rows = snapshot.get("items", []) if isinstance(snapshot, dict) else []
+    snapshot_by_ticker = {}
+    for row in snap_rows if isinstance(snap_rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        ticker = str(row.get("ticker", "")).strip().upper()
+        if ticker:
+            snapshot_by_ticker[ticker] = row
+
     events = []
     trailing_updates = []
 
@@ -1328,11 +1720,30 @@ def _run_sim_auto_check(
         if qty <= 0:
             continue
         cp = _safe_float(live.get(ticker, {}).get("price"))
-        if cp <= 0:
+        if not _is_realistic_price(cp):
             continue
         stop_loss = _safe_float(pos.get("stop_loss_price"))
         target = _safe_float(pos.get("target_price"))
         entry = _safe_float(pos.get("avg_entry_price"))
+        snap_row = snapshot_by_ticker.get(ticker, {})
+        pred_ret_pct = _normalize_predicted_return_pct(
+            snap_row.get(
+                "predicted_return_pct",
+                _safe_float(snap_row.get("predicted_return_decimal")) * 100.0,
+            )
+        )
+        strategy_signal = _strategy_action_from_signal(
+            snap_row.get("signal"),
+            predicted_return_pct=pred_ret_pct,
+        )
+        effective_action, action_source = _sentiment_adjusted_action(
+            strategy_signal,
+            snap_row,
+        )
+        pos["strategy_signal"] = strategy_signal
+        pos["strategy_recommendation"] = effective_action
+        pos["strategy_recommendation_source"] = action_source
+
         if entry > 0:
             highest = max(_safe_float(pos.get("highest_price")), cp, entry)
             pos["highest_price"] = round(highest, 2)
@@ -1355,13 +1766,17 @@ def _run_sim_auto_check(
                     )
             open_positions[ticker] = pos
             state.setdefault("open_positions", {})[ticker] = pos
+
         reason = None
         if stop_loss > 0 and cp <= stop_loss:
             reason = "auto_stop_loss"
+        elif effective_action == "SELL":
+            reason = "auto_strategy_sell_signal"
         elif target > 0 and cp >= target:
             reason = "auto_target_hit"
         if not reason:
             continue
+
         state, event, err = _execute_sim_sell(
             state,
             ticker=ticker,
@@ -1392,88 +1807,56 @@ def _run_sim_auto_check(
         and predictor is not None
     ):
         try:
-            snapshot = _get_prediction_snapshot(use_latest_stored=True)
-            snap_rows = snapshot.get("items", []) if isinstance(snapshot, dict) else []
-            candidates = []
-            for row in snap_rows:
-                if not isinstance(row, dict):
-                    continue
-                ticker = str(row.get("ticker", "")).upper()
-                strategy_price = _safe_float(
-                    row.get("strategy_price_at_open") or row.get("predicted_price")
-                )
-                pred_ret_dec = _safe_float(row.get("predicted_return_decimal"))
-                if not ticker or strategy_price <= 0:
-                    continue
-                if pred_ret_dec <= 0:
-                    continue
-                candidates.append(
-                    {
-                        "ticker": ticker,
-                        "target_price": strategy_price,
-                        "predicted_price": strategy_price,
-                        "predicted_return": pred_ret_dec * 100.0,
-                        "confidence": _safe_float(row.get("confidence")),
-                        "atr_pct": abs(_safe_float(row.get("atr_pct"))),
-                        "risk_reward": _safe_float(row.get("risk_reward")),
-                        "sentiment_articles": 0,
-                        "sentiment_weight_used": 0,
-                    }
-                )
-            candidates.sort(
-                key=lambda r: (
-                    _safe_float(r.get("confidence")),
-                    _safe_float(r.get("predicted_return")),
-                ),
-                reverse=True,
-            )
-            candidates = candidates[:10]
-            cand_tickers = [
+            open_now = {
+                str(t).upper()
+                for t in dict(state.get("open_positions", {})).keys()
+                if str(t).strip()
+            }
+            snap_tickers = [
                 str(r.get("ticker", "")).upper()
-                for r in candidates
-                if str(r.get("ticker", "")).strip()
+                for r in snap_rows
+                if isinstance(r, dict) and str(r.get("ticker", "")).strip()
             ]
-            cand_live = _get_live_prices_batch(cand_tickers) if cand_tickers else {}
-            for row in candidates:
+            cand_live = _get_live_prices_batch(snap_tickers) if snap_tickers else {}
+            candidates, _warnings = _build_strategy_buy_candidates(
+                [r for r in snap_rows if isinstance(r, dict)],
+                live_prices=cand_live,
+                exclude_tickers=open_now,
+            )
+            max_new_positions = max(1, 10 - len(open_now))
+            optimized = _optimize_candidate_allocations(
+                candidates,
+                budget=_safe_float(state.get("cash")),
+                trade_type="equity_delivery",
+                max_positions=max_new_positions,
+            )
+            for row in optimized:
                 ticker = str(row.get("ticker", "")).upper()
                 if not ticker or ticker in state.get("open_positions", {}):
                     continue
                 cp = _safe_float(cand_live.get(ticker, {}).get("price"))
-                strategy_entry = _safe_float(
-                    row.get("target_price") or row.get("predicted_price")
-                )
-                if cp <= 0 or strategy_entry <= 0:
+                strategy_entry = _safe_float(row.get("strategy_price_at_open"))
+                if not _is_realistic_price(cp) or not _is_realistic_price(strategy_entry):
                     continue
-                trigger = cp <= strategy_entry * 1.002
+                trigger = cp <= strategy_entry * (1.0 + max(0.0, ADVISOR_BUY_TRIGGER_BUFFER))
                 if not trigger:
                     continue
-                conf = _safe_float(row.get("confidence"))
-                atr_pct = abs(_safe_float(row.get("atr_pct")))
-                uses_sentiment = (
-                    int(_safe_float(row.get("sentiment_articles"))) > 0
-                    and _safe_float(row.get("sentiment_weight_used")) > 0
+                qty_suggested = int(_safe_float(row.get("suggested_qty")))
+                qty_cash = _max_affordable_qty(
+                    _safe_float(state.get("cash")),
+                    cp,
+                    trade_type="equity_delivery",
                 )
-                sl_pct, skip = _compute_dynamic_stop_loss_pct(
-                    confidence_pct=conf,
-                    atr_pct=atr_pct,
-                    uses_sentiment=uses_sentiment,
-                )
-                if skip:
+                qty = max(0, min(qty_suggested, qty_cash, SIM_QTY_HARD_MAX))
+                if qty <= 0:
                     continue
-                qty_risk = _position_size_for_risk(
-                    account_balance=_safe_float(state.get("cash")),
-                    entry_price=cp,
-                    stop_loss_pct=sl_pct,
-                )
-                if qty_risk <= 0:
-                    continue
+                stop_loss = _safe_float(row.get("stop_loss_price"))
+                target = _safe_float(row.get("target_price"))
                 rr = max(1.0, _safe_float(row.get("risk_reward")) or 1.5)
-                stop_loss = _round_to_tick(cp * (1 - sl_pct))
-                target = _round_to_tick(cp + max((cp - stop_loss) * rr, cp * 0.01))
                 state, buy_event, buy_err = _execute_sim_buy(
                     state,
                     ticker=ticker,
-                    quantity=qty_risk,
+                    quantity=qty,
                     price=cp,
                     strategy_entry_price=strategy_entry,
                     stop_loss_price=stop_loss,
@@ -1482,6 +1865,7 @@ def _run_sim_auto_check(
                     trade_type="equity_delivery",
                     timestamp=now_iso,
                     reason="auto_strategy_entry",
+                    strategy_recommendation="HOLD",
                 )
                 if buy_err or not buy_event:
                     continue
@@ -1519,6 +1903,10 @@ def _execute_sim_sell(
     ts = timestamp or datetime.now(IST).isoformat()
     if qty <= 0 or px <= 0:
         return state, None, "quantity and price must be > 0"
+    if qty > SIM_QTY_HARD_MAX:
+        return state, None, f"quantity exceeds hard cap ({SIM_QTY_HARD_MAX})"
+    if not _is_realistic_price(px):
+        return state, None, "price is outside allowed simulation bounds"
     open_positions = dict(state.get("open_positions", {}))
     pos = dict(open_positions.get(t, {}))
     if not pos:
@@ -1623,6 +2011,7 @@ def _execute_sim_buy(
     trade_type: str,
     timestamp: str,
     reason: str = "manual_buy",
+    strategy_recommendation: str = "HOLD",
 ) -> tuple[dict, dict | None, str | None]:
     t = str(ticker or "").strip().upper()
     qty = float(quantity or 0)
@@ -1630,6 +2019,10 @@ def _execute_sim_buy(
     ts = str(timestamp or datetime.now(IST).isoformat())
     if qty <= 0 or px <= 0:
         return state, None, "quantity and price must be > 0"
+    if qty > SIM_QTY_HARD_MAX:
+        return state, None, f"quantity exceeds hard cap ({SIM_QTY_HARD_MAX})"
+    if not _is_realistic_price(px):
+        return state, None, "price is outside allowed simulation bounds"
 
     tracker = _daily_tracker_for_state(state, now_ts=ts)
     if tracker.get("trading_paused"):
@@ -1673,6 +2066,9 @@ def _execute_sim_buy(
     avg_entry = ((prev_avg * prev_qty) + (px * qty)) / new_qty if new_qty > 0 else px
     highest_seen = max(_safe_float(pos.get("highest_price", 0)), px, avg_entry)
     trail_stop = _safe_float(pos.get("trail_stop_price", 0))
+    strategy_rec = str(strategy_recommendation or "HOLD").strip().upper()
+    if strategy_rec not in {"BUY", "SELL", "HOLD"}:
+        strategy_rec = "HOLD"
     pos.update(
         {
             "ticker": t,
@@ -1689,6 +2085,8 @@ def _execute_sim_buy(
             "highest_price": round(highest_seen, 2),
             "trail_stop_price": round(max(trail_stop, sl_price), 2),
             "source": "strategy",
+            "strategy_recommendation": strategy_rec,
+            "strategy_recommendation_source": "strategy_signal",
         }
     )
     open_positions[t] = pos
@@ -2490,17 +2888,44 @@ def api_advisor_open_buy_list():
     trade_type = str(request.args.get("trade_type", "equity_delivery")).strip().lower()
     if trade_type not in {"equity_delivery", "equity_intraday"}:
         trade_type = "equity_delivery"
+    force_fresh = request.args.get("force_fresh", "").lower() in ("1", "true", "yes")
 
     try:
-        grouped = predictor.predict_top_picks_grouped(sectors=sectors, top_n=50)
-        raw_buys = grouped.get("top_buy", []) if isinstance(grouped, dict) else []
-        raw_holds = grouped.get("top_hold", []) if isinstance(grouped, dict) else []
-        buy_candidates = [
-            p
-            for p in raw_buys
-            if _safe_float(p.get("current_price")) > 0
-            and _safe_float(p.get("predicted_return")) > 0
-        ]
+        allowed_tickers = {
+            t
+            for sec in sectors
+            for t in tickers_by_sector.get(sec, [])
+            if str(t).strip()
+        }
+        with _daily_analysis_lock:
+            cached_rows = list((_daily_analysis_cache or {}).get("all_stocks", []))
+        buy_candidates: list[dict] = []
+        if cached_rows:
+            for row in cached_rows:
+                if not isinstance(row, dict):
+                    continue
+                ticker = str(row.get("ticker", "")).upper()
+                if allowed_tickers and ticker not in allowed_tickers:
+                    continue
+                if _safe_float(row.get("current_price")) <= 0:
+                    continue
+                pred_ret = _safe_float(row.get("predicted_return"))
+                if pred_ret > 0:
+                    buy_candidates.append(dict(row))
+                if len(buy_candidates) >= 50:
+                    break
+
+        raw_holds: list[dict] = []
+        if len(buy_candidates) < n and (force_fresh or not cached_rows):
+            grouped = predictor.predict_top_picks_grouped(sectors=sectors, top_n=50)
+            raw_buys = grouped.get("top_buy", []) if isinstance(grouped, dict) else []
+            raw_holds = grouped.get("top_hold", []) if isinstance(grouped, dict) else []
+            buy_candidates = [
+                p
+                for p in raw_buys
+                if _safe_float(p.get("current_price")) > 0
+                and _safe_float(p.get("predicted_return")) > 0
+            ]
         if len(buy_candidates) < n:
             seen = {str(p.get("ticker", "")).upper() for p in buy_candidates}
             for p in raw_holds:
@@ -2512,7 +2937,7 @@ def api_advisor_open_buy_list():
                     and _safe_float(p.get("predicted_return")) > 0
                 ):
                     enriched = dict(p)
-                    enriched["signal"] = "BUY_CANDIDATE"
+                    enriched["signal"] = enriched.get("signal") or "HOLD"
                     buy_candidates.append(enriched)
                     seen.add(ticker)
                 if len(buy_candidates) >= 50:
@@ -2537,7 +2962,7 @@ def api_advisor_open_buy_list():
                         and _safe_float(pred.get("predicted_return")) > 0
                     ):
                         enriched = dict(pred)
-                        enriched["signal"] = enriched.get("signal") or "BUY_CANDIDATE"
+                        enriched["signal"] = enriched.get("signal") or "HOLD"
                         buy_candidates.append(enriched)
                         seen.add(t)
                     if len(buy_candidates) >= 50:
@@ -2556,76 +2981,18 @@ def api_advisor_open_buy_list():
                 }
             )
 
-        # Rank by strategy edge with volatility control and liquidity preference.
-        ranked: list[dict] = []
-        for row in buy_candidates:
-            conf = max(0.0, min(100.0, _safe_float(row.get("confidence")))) / 100.0
-            agree = (
-                max(0.0, min(100.0, _safe_float(row.get("model_agreement")))) / 100.0
-            )
-            pred_ret_dec = abs(_safe_float(row.get("predicted_return"))) / 100.0
-            atr_pct = abs(_safe_float(row.get("atr_pct")))
-            liq_raw = _safe_float(row.get("liquidity_factor"))
-            liq = max(0.5, min(1.5, liq_raw if liq_raw > 0 else 1.0))
-            sent_raw = _safe_float(row.get("weighted_sentiment_raw"))
-            sent_penalty = 1.0
-            if sent_raw < -0.35:
-                sent_penalty = 0.6
-            elif sent_raw < -0.15:
-                sent_penalty = 0.8
-            if atr_pct >= 8:
-                volatility_factor = 0.65
-            elif atr_pct >= 5:
-                volatility_factor = 0.8
-            elif atr_pct <= 1:
-                volatility_factor = 0.9
-            else:
-                volatility_factor = 1.05
-            edge_score = (
-                pred_ret_dec * conf * agree * liq * volatility_factor * sent_penalty
-            )
-            ranked.append(
-                {
-                    **row,
-                    "_edge_score": edge_score,
-                    "_volatility_factor": volatility_factor,
-                    "_sentiment_penalty": sent_penalty,
-                }
-            )
-        ranked.sort(
-            key=lambda x: (
-                _safe_float(x.get("confidence")),
-                _safe_float(x.get("_edge_score")),
-            ),
-            reverse=True,
-        )
-
-        picks: list[dict] = []
-        remaining_budget = float(budget)
-        total_cost = 0.0
         warnings: list[str] = []
-
-        for row in ranked:
-            if len(picks) >= n or remaining_budget <= 0:
-                break
+        filtered_rows: list[dict] = []
+        for row in buy_candidates:
             ticker = str(row.get("ticker", "")).upper()
-            current_price = _safe_float(row.get("current_price"))
-            if current_price <= 0:
-                continue
-            pred_ret_pct = _safe_float(row.get("predicted_return"))
-            # Keep expected alpha in a realistic band for conservative advisor picks.
-            if abs(pred_ret_pct) > 4.0:
-                warnings.append(
-                    f"{ticker} skipped: projected alpha/return {pred_ret_pct:.2f}% is above conservative cap."
-                )
-                continue
             strategy_price = _safe_float(
-                row.get("target_price") or row.get("predicted_price")
+                row.get("strategy_price_at_open")
+                or row.get("target_price")
+                or row.get("predicted_price")
             )
+            current_price = _safe_float(row.get("current_price"))
             if strategy_price <= 0:
                 strategy_price = current_price
-            if strategy_price <= 0:
-                continue
             ai_price = _safe_float(row.get("ai_predicted_price"))
             if ai_price > 0 and strategy_price > 0:
                 ai_gap = abs(ai_price - strategy_price) / max(strategy_price, 1e-9)
@@ -2638,109 +3005,64 @@ def api_advisor_open_buy_list():
                         f"{ticker} skipped: AI/strategy gap exceeded block threshold ({AI_STRATEGY_GAP_BLOCK*100:.0f}%)."
                     )
                     continue
-            rr_raw = _safe_float(row.get("risk_reward"))
-            rr = max(0.1, rr_raw if rr_raw > 0 else 1.2)
-            confidence_pct = _safe_float(row.get("confidence"))
-            atr_pct = abs(_safe_float(row.get("atr_pct")))
-            uses_sentiment = (
-                int(_safe_float(row.get("sentiment_articles"))) > 0
-                and _safe_float(row.get("sentiment_weight_used")) > 0
-            )
-            stop_loss_pct, skip_trade = _compute_dynamic_stop_loss_pct(
-                confidence_pct=confidence_pct,
-                atr_pct=atr_pct,
-                uses_sentiment=uses_sentiment,
-            )
-            if skip_trade:
-                warnings.append(
-                    f"{ticker} skipped: low confidence {confidence_pct:.1f}% under stop-loss policy."
-                )
-                continue
-            stop_loss = _round_to_tick(strategy_price * (1 - stop_loss_pct))
-            if stop_loss <= 0 or stop_loss >= strategy_price:
-                stop_loss = _round_to_tick(strategy_price * (1 - STOP_LOSS_MED_CONF))
-            target_delta = max(
-                abs(strategy_price - stop_loss) * max(rr, 1.0),
-                strategy_price * max(pred_ret_pct / 100.0, 0.01),
-            )
-            target_price = _round_to_tick(strategy_price + target_delta)
+            filtered_rows.append(row)
 
-            slots_left = max(1, n - len(picks))
-            per_pick_budget = min(remaining_budget, remaining_budget / slots_left)
-            budget_qty = int(per_pick_budget // strategy_price)
-            risk_qty = _position_size_for_risk(
-                account_balance=budget,
-                entry_price=strategy_price,
-                stop_loss_pct=stop_loss_pct,
-            )
-            qty = risk_qty if risk_qty > 0 else budget_qty
-            qty = min(qty, budget_qty)
-            while qty > 0:
-                notional = qty * strategy_price
-                fee = _estimate_entry_fee(notional, trade_type=trade_type)
-                total_trade = notional + fee
-                if total_trade <= remaining_budget + 1e-9:
-                    break
-                qty -= 1
-            if qty <= 0:
-                continue
-
-            notional = round(qty * strategy_price, 2)
-            fee = _estimate_entry_fee(notional, trade_type=trade_type)
-            est_trade_cost = round(notional + fee, 2)
-            if est_trade_cost > remaining_budget + 1e-9:
-                continue
-
-            liq_factor = _safe_float(row.get("liquidity_factor"))
-            if liq_factor <= 0:
-                liq_factor = 1.0
-            avg_volume_30d = _safe_float(row.get("avg_volume_30d"))
-            if liq_factor < 0.8:
-                warnings.append(
-                    f"{ticker} has lower liquidity (factor={liq_factor:.2f}, avg_volume_30d={avg_volume_30d:.0f})."
-                )
-
-            remaining_budget = round(remaining_budget - est_trade_cost, 2)
-            total_cost = round(total_cost + est_trade_cost, 2)
-            picks.append(
+        candidate_tickers = sorted(
+            {
+                str(r.get("ticker", "")).upper()
+                for r in filtered_rows
+                if str(r.get("ticker", "")).strip()
+            }
+        )
+        live_prices = _get_live_prices_batch(candidate_tickers) if candidate_tickers else {}
+        open_now = {
+            str(t).upper()
+            for t in dict(state.get("open_positions", {})).keys()
+            if str(t).strip()
+        }
+        strategy_candidates, build_warnings = _build_strategy_buy_candidates(
+            filtered_rows,
+            live_prices=live_prices,
+            exclude_tickers=open_now,
+        )
+        warnings.extend(build_warnings)
+        if not strategy_candidates:
+            return jsonify(
                 {
-                    "ticker": ticker,
-                    "name": ticker_names.get(ticker, _clean_name(ticker)),
                     "source": "strategy",
-                    "strategy_price_at_open": round(strategy_price, 2),
-                    "current_price": round(current_price, 2),
-                    "suggested_qty": int(qty),
-                    "estimated_notional": round(notional, 2),
-                    "estimated_fee": round(fee, 2),
-                    "est_trade_cost": est_trade_cost,
-                    "stop_loss_price": round(stop_loss, 2),
-                    "stop_loss_pct": round(stop_loss_pct * 100.0, 3),
-                    "target_price": round(target_price, 2),
-                    "risk_reward": round(rr, 2),
-                    "predicted_return_pct": round(pred_ret_pct, 3),
-                    "confidence": round(_safe_float(row.get("confidence")), 1),
-                    "model_agreement": round(
-                        _safe_float(row.get("model_agreement")), 1
-                    ),
-                    "liquidity_factor": round(liq_factor, 3),
-                    "avg_volume_30d": (
-                        round(avg_volume_30d, 2) if avg_volume_30d > 0 else None
-                    ),
-                    "volatility_atr_pct": round(
-                        abs(_safe_float(row.get("atr_pct"))), 2
-                    ),
-                    "edge_score": round(_safe_float(row.get("_edge_score")), 6),
-                    "sentiment_weighted_score": round(
-                        _safe_float(row.get("weighted_sentiment_raw")),
-                        4,
-                    ),
-                    "next_recommended_sell_time": _next_recommended_sell_time(
-                        current_price, stop_loss, target_price
-                    ),
-                    "strategy_generated_at": row.get("timestamp")
-                    or datetime.now(IST).isoformat(),
+                    "generated_at": datetime.now(IST).isoformat(),
+                    "budget": round(budget, 2),
+                    "trade_type": trade_type,
+                    "count": 0,
+                    "picks": [],
+                    "estimated_total_cost": 0.0,
+                    "remaining_budget": round(budget, 2),
+                    "warnings": sorted(set(warnings)),
+                    "error": "No strategy BUY candidates available under risk constraints.",
                 }
             )
+
+        picks = _optimize_candidate_allocations(
+            strategy_candidates,
+            budget=budget,
+            trade_type=trade_type,
+            max_positions=n,
+        )
+        for row in picks:
+            row["volatility_atr_pct"] = round(abs(_safe_float(row.get("atr_pct"))), 2)
+            row["sentiment_weighted_score"] = round(
+                _safe_float(row.get("weighted_sentiment_raw")), 4
+            )
+            row["stop_loss_pct"] = round(_safe_float(row.get("stop_loss_pct")) * 100.0, 3)
+            if _safe_float(row.get("liquidity_factor")) < 0.8:
+                warnings.append(
+                    f"{row.get('ticker')} has lower liquidity "
+                    f"(factor={_safe_float(row.get('liquidity_factor')):.2f}, "
+                    f"avg_volume_30d={_safe_float(row.get('avg_volume_30d')):.0f})."
+                )
+
+        total_cost = round(sum(_safe_float(r.get("est_trade_cost")) for r in picks), 2)
+        remaining_budget = round(max(0.0, budget - total_cost), 2)
 
         return jsonify(
             {
@@ -2802,6 +3124,12 @@ def api_simulate_portfolio():
                 "unrealized_pnl": round(mark - entry_value, 2),
                 "next_recommended_sell_time": _next_recommended_sell_time(
                     live if live > 0 else entry, stop_loss, strategy_target
+                ),
+                "strategy_recommendation": str(
+                    pos.get("strategy_recommendation", "HOLD")
+                ).upper(),
+                "strategy_recommendation_source": str(
+                    pos.get("strategy_recommendation_source", "strategy_signal")
                 ),
                 "source": "strategy",
                 "opened_at": pos.get("opened_at"),
@@ -2966,6 +3294,11 @@ def api_simulate_trade():
         quantity = 0.0
     if quantity <= 0:
         return jsonify({"error": "quantity must be > 0"}), 400
+    if quantity > SIM_QTY_HARD_MAX:
+        return (
+            jsonify({"error": f"quantity exceeds hard cap ({SIM_QTY_HARD_MAX})"}),
+            400,
+        )
 
     price = _safe_float(payload.get("price"))
     if price <= 0:
@@ -2974,6 +3307,8 @@ def api_simulate_trade():
         )
     if price <= 0:
         return jsonify({"error": f"price not available for {ticker}"}), 400
+    if not _is_realistic_price(price):
+        return jsonify({"error": "price is outside allowed simulation bounds"}), 400
 
     trade_type = str(payload.get("trade_type", "equity_delivery")).strip().lower()
     if trade_type not in {"equity_delivery", "equity_intraday"}:
@@ -3009,6 +3344,16 @@ def api_simulate_trade():
             target_price = _round_to_tick(
                 price + max(abs(price - stop_loss) * max(rr_ratio, 1.0), price * 0.01)
             )
+        strategy_recommendation = str(
+            payload.get("strategy_recommendation")
+            or _strategy_action_from_signal(
+                str(payload.get("signal", "")).strip().upper(),
+                predicted_return_pct=_safe_float(payload.get("predicted_return")),
+            )
+            or "HOLD"
+        ).strip().upper()
+        if strategy_recommendation not in {"BUY", "SELL", "HOLD"}:
+            strategy_recommendation = "HOLD"
 
         state, event, err = _execute_sim_buy(
             state,
@@ -3022,6 +3367,7 @@ def api_simulate_trade():
             trade_type=trade_type,
             timestamp=now_iso,
             reason="manual_buy",
+            strategy_recommendation=strategy_recommendation,
         )
         if err:
             return jsonify({"error": err}), 400
@@ -4510,9 +4856,23 @@ def _build_premarket_snapshot(tickers: list[str] | None = None) -> dict:
             "strategy_direction": strategy_direction,
             "ai_direction": ai_direction,
             "predicted_return_pct": round(predicted_return_pct, 4),
+            "predicted_return_decimal": round(predicted_return_pct / 100.0, 6),
+            "signal": str(pred.get("signal", "HOLD")),
             "risk_reward": round(float(pred.get("risk_reward", 0) or 0), 3),
             "confidence": round(float(pred.get("confidence", 0) or 0), 2),
             "model_agreement": round(float(pred.get("model_agreement", 0) or 0), 2),
+            "atr_pct": round(float(pred.get("atr_pct", 0) or 0), 3),
+            "liquidity_factor": round(float(pred.get("liquidity_factor", 1.0) or 1.0), 3),
+            "weighted_sentiment_raw": round(
+                float(pred.get("weighted_sentiment_raw", 0) or 0),
+                4,
+            ),
+            "sentiment_articles": int(float(pred.get("sentiment_articles", 0) or 0)),
+            "sentiment_weight_used": round(
+                float(pred.get("sentiment_weight_used", 0) or 0),
+                4,
+            ),
+            "sentiment_decay_weights": pred.get("sentiment_decay_weights", {}),
             "captured_at": captured_at_open_window,
             "captured_at_actual": captured_at_actual,
             "strategy_predicted_at_open": _normalize_open_window_timestamp(
