@@ -2140,6 +2140,14 @@ def _build_strategy_buy_candidates(
         )
         target_price = _round_to_tick(strategy_price + target_delta)
         entry_low, entry_high = _entry_price_range(strategy_price)
+        # Keep strategy entry anchored inside its configured range for UI/API consistency.
+        strategy_px_rounded = round(strategy_price, 2)
+        if entry_low <= 0 or entry_low > strategy_px_rounded:
+            entry_low = _round_to_tick(strategy_px_rounded)
+        if entry_high <= 0 or entry_high < strategy_px_rounded:
+            entry_high = _round_to_tick(strategy_px_rounded)
+        if entry_high < entry_low:
+            entry_high = entry_low
 
         predicted_edge = max(0.0, pred_ret_pct) / 100.0
         sentiment_edge = (
@@ -4669,6 +4677,52 @@ def api_simulate_trade():
         quantity=quantity,
         price=price,
         reason="manual_sell",
+        timestamp=now_iso,
+    )
+    if err:
+        return jsonify({"error": err}), 400
+    if event:
+        event["source"] = "strategy_simulation"
+        _log_simulated_trade(event)
+    _write_portfolio_sim_state(state)
+    return jsonify({"ok": True, "event": event, "state": state})
+
+
+@app.route("/api/simulate/position/<ticker>", methods=["DELETE"])
+def api_simulate_position_delete(ticker: str):
+    """
+    Close/remove one simulated open position by ticker.
+    Uses live price when available, otherwise falls back to avg entry.
+    """
+    t = str(ticker or "").strip().upper()
+    if not t:
+        return jsonify({"error": "ticker is required"}), 400
+
+    state = _read_portfolio_sim_state()
+    pos = dict(dict(state.get("open_positions", {})).get(t, {}) or {})
+    if not pos:
+        return jsonify({"error": f"No open simulated position for {t}"}), 404
+
+    qty = _safe_float(pos.get("quantity"))
+    if qty <= 0:
+        return jsonify({"error": f"Invalid simulated quantity for {t}"}), 400
+
+    price = _safe_float(request.args.get("price"))
+    if price <= 0:
+        live = _get_live_prices_batch([t]).get(t, {})
+        price = _safe_float(live.get("price"))
+    if price <= 0:
+        price = _safe_float(pos.get("avg_entry_price"))
+    if price <= 0:
+        return jsonify({"error": f"Price unavailable to close {t}"}), 400
+
+    now_iso = datetime.now(IST).isoformat()
+    state, event, err = _execute_sim_sell(
+        state,
+        ticker=t,
+        quantity=qty,
+        price=price,
+        reason="manual_portfolio_remove",
         timestamp=now_iso,
     )
     if err:

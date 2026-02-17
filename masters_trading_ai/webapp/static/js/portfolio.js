@@ -9,6 +9,8 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 let portfolioBusy = false;
+let portfolioUsingSimulation = false;
+let portfolioSimInitialCash = 40000;
 
 async function checkStatus() {
     try {
@@ -63,10 +65,13 @@ async function refreshPortfolioPage() {
         let summary = data.summary || {};
         let holdings = data.holdings || [];
         let trades = data.trades || [];
+        portfolioUsingSimulation = false;
 
         const simHoldings = Array.isArray(simData?.holdings) ? simData.holdings : [];
         const simTrades = Array.isArray(simData?.trade_history) ? simData.trade_history : [];
         if (!holdings.length && simHoldings.length) {
+            portfolioUsingSimulation = true;
+            portfolioSimInitialCash = Number(simData?.initial_cash || 40000) || 40000;
             holdings = simHoldings.map((row) => {
                 const invested = Number(row.invested_value_after_cost || 0);
                 const currentAfterCost = Number(row.current_value_after_cost || 0);
@@ -166,13 +171,17 @@ function renderHoldings(rows) {
             <td>${formatPrice(r.transaction_cost_eaten)}</td>
             <td class="${signedClass(r.unrealized_pnl)}">${Number.isFinite(Number(r.unrealized_pnl)) ? `₹${formatN(r.unrealized_pnl)}` : '—'}</td>
             <td class="${signedClass(r.unrealized_pnl_after_cost_pct)}">${Number(r.unrealized_pnl_after_cost_pct || 0).toFixed(2)}%</td>
+            <td>${portfolioUsingSimulation
+                ? `<button class="tf-btn" onclick="closeSimPosition('${r.ticker}')">Close Position</button>`
+                : `<button class="tf-btn" onclick="removeHolding('${r.ticker}')">Delete Holding</button>`}
+            </td>
         </tr>
     `).join('');
     el.innerHTML = `
         <table class="eva-table">
             <thead>
                 <tr>
-                    <th>Ticker</th><th>Qty</th><th>Avg Buy</th><th>Current</th><th>Invested</th><th>Current After Cost</th><th>Txn Cost Eaten</th><th>Unrealized P&L</th><th>Unrealized %</th>
+                    <th>Ticker</th><th>Qty</th><th>Avg Buy</th><th>Current</th><th>Invested</th><th>Current After Cost</th><th>Txn Cost Eaten</th><th>Unrealized P&L</th><th>Unrealized %</th><th>Action</th>
                 </tr>
             </thead>
             <tbody>${body}</tbody>
@@ -199,9 +208,10 @@ function renderTrades(rows) {
                 <td>${qty}</td>
                 <td>${formatPrice(price)}</td>
                 <td>${formatPrice(notional)}</td>
-                <td>
-                    <button class="tf-btn" onclick="editTrade('${r.id}')">Edit</button>
-                    <button class="tf-btn" onclick="deleteTrade('${r.id}')">Delete</button>
+                <td>${portfolioUsingSimulation
+                    ? '<span class="muted-text">Auto-sim ledger</span>'
+                    : `<button class="tf-btn" onclick="editTrade('${r.id}')">Edit</button>
+                       <button class="tf-btn" onclick="deleteTrade('${r.id}')">Delete</button>`}
                 </td>
             </tr>
         `;
@@ -224,10 +234,52 @@ async function clearEntirePortfolio() {
         const res = await fetch('/api/portfolio', { method: 'DELETE' });
         const data = await res.json();
         if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+        if (portfolioUsingSimulation) {
+            const simRes = await fetch('/api/simulate/trade', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    action: 'RESET',
+                    budget: portfolioSimInitialCash > 0 ? portfolioSimInitialCash : 40000,
+                    clear_history: true,
+                    clear_portfolio_sim_trades: true,
+                }),
+            });
+            const simData = await simRes.json();
+            if (!simRes.ok || simData.error) throw new Error(simData.error || `HTTP ${simRes.status}`);
+        }
         setToolbarStatus('Portfolio cleared.');
         await refreshPortfolioPage();
     } catch (e) {
         setToolbarStatus(`Failed to clear portfolio: ${e.message}`);
+    }
+}
+
+async function removeHolding(ticker) {
+    const t = String(ticker || '').trim().toUpperCase();
+    if (!t || !confirm(`Delete holding for ${t}?`)) return;
+    try {
+        const res = await fetch(`/api/portfolio?ticker=${encodeURIComponent(t)}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+        setToolbarStatus(`Removed holding ${t}.`);
+        await refreshPortfolioPage();
+    } catch (e) {
+        setToolbarStatus(`Holding delete failed: ${e.message}`);
+    }
+}
+
+async function closeSimPosition(ticker) {
+    const t = String(ticker || '').trim().toUpperCase();
+    if (!t || !confirm(`Close simulated position for ${t}?`)) return;
+    try {
+        const res = await fetch(`/api/simulate/position/${encodeURIComponent(t)}`, { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+        setToolbarStatus(`Closed simulated position ${t}.`);
+        await refreshPortfolioPage();
+    } catch (e) {
+        setToolbarStatus(`Sim position close failed: ${e.message}`);
     }
 }
 

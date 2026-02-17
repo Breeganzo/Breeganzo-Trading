@@ -63,6 +63,12 @@ def test_build_strategy_buy_candidates_strategy_first_no_positive_upgrade(monkey
     # HOLD should not be upgraded to BUY purely by positive sentiment.
     assert "BBB.NS" not in tickers
     assert "CCC.NS" in tickers
+    ccc = next(r for r in candidates if r["ticker"] == "CCC.NS")
+    assert (
+        ccc["entry_range_low"]
+        <= ccc["strategy_price_at_open"]
+        <= ccc["entry_range_high"]
+    )
 
 
 def test_sentiment_influence_is_small_vs_strategy_edge(monkeypatch):

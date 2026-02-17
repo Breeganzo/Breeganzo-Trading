@@ -55,6 +55,10 @@ def test_simulated_trade_flow_stop_loss_autosell(monkeypatch, tmp_path):
             },
         )
         assert buy.status_code == 200
+        assert sim_log.exists()
+        assert sim_csv.exists()
+        if server.OPENPYXL_AVAILABLE:
+            assert sim_xlsx.exists()
 
         auto = client.post("/api/simulate/trade", json={"action": "AUTO_CHECK"})
         assert auto.status_code == 200
@@ -72,6 +76,68 @@ def test_simulated_trade_flow_stop_loss_autosell(monkeypatch, tmp_path):
         assert tx_data["total_transactions"] >= 2
         assert tx_data["buy_transactions"] >= 1
         assert tx_data["sell_transactions"] >= 1
+
+
+def test_simulated_position_delete_closes_open_lot(monkeypatch, tmp_path):
+    sim_file = tmp_path / "portfolio_sim.json"
+    sim_log = tmp_path / "simulated_trades.jsonl"
+    sim_csv = tmp_path / "simulated_trades.csv"
+    sim_xlsx = tmp_path / "simulated_trades.xlsx"
+    report_dir = tmp_path / "daily_reports"
+
+    monkeypatch.setattr(server, "PORTFOLIO_SIM_FILE", sim_file)
+    monkeypatch.setattr(server, "SIMULATED_TRADE_LOG_FILE", sim_log)
+    monkeypatch.setattr(server, "SIMULATED_TRADE_CSV_FILE", sim_csv)
+    monkeypatch.setattr(server, "SIMULATED_TRADE_EXCEL_FILE", sim_xlsx)
+    monkeypatch.setattr(server, "DAILY_TRADE_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "_is_tradeable_ticker", lambda ticker: True)
+    monkeypatch.setattr(server, "_is_market_trade_window", lambda *_: True)
+    monkeypatch.setattr(
+        server,
+        "_estimate_entry_fee",
+        lambda notional, trade_type="equity_delivery": 0.0,
+    )
+    monkeypatch.setattr(
+        server,
+        "_estimate_exit_fee",
+        lambda notional, trade_type="equity_delivery": 0.0,
+    )
+    monkeypatch.setattr(
+        server,
+        "_get_live_prices_batch",
+        lambda tickers: {t: {"price": 102.0} for t in tickers},
+    )
+
+    with server.app.test_client() as client:
+        reset = client.post(
+            "/api/simulate/trade", json={"action": "RESET", "budget": 40000}
+        )
+        assert reset.status_code == 200
+
+        buy = client.post(
+            "/api/simulate/trade",
+            json={
+                "action": "BUY",
+                "ticker": "INFY.NS",
+                "quantity": 5,
+                "price": 100.0,
+                "stop_loss_price": 95.0,
+                "target_price": 110.0,
+            },
+        )
+        assert buy.status_code == 200
+
+        close_resp = client.delete("/api/simulate/position/INFY.NS")
+        assert close_resp.status_code == 200
+        payload = close_resp.get_json()
+        assert payload.get("ok") is True
+        assert payload.get("event", {}).get("action") == "SELL"
+        assert payload.get("event", {}).get("reason") == "manual_portfolio_remove"
+
+        portfolio = client.get("/api/simulate/portfolio")
+        assert portfolio.status_code == 200
+        p = portfolio.get_json()
+        assert p.get("open_positions_count") == 0
 
 
 def test_simulated_trade_rejects_outside_market_hours(monkeypatch, tmp_path):
