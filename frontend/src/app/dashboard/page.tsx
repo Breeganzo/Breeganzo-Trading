@@ -16,11 +16,12 @@ export default function DashboardPage() {
   const activePanel = useStore((s) => s.activePanel);
   const setUser = useStore((s) => s.setUser);
   const router = useRouter();
+  const authBypass = process.env.NEXT_PUBLIC_AUTH_BYPASS_LOCAL === 'true';
 
   // Verify auth on mount
   useEffect(() => {
     const token = api.getToken();
-    if (!token) {
+    if (!token && !authBypass) {
       router.push('/login');
       return;
     }
@@ -28,10 +29,12 @@ export default function DashboardPage() {
       .getMe()
       .then((data) => setUser(data))
       .catch(() => {
-        api.clearToken();
-        router.push('/login');
+        if (!authBypass) {
+          api.clearToken();
+          router.push('/login');
+        }
       });
-  }, [setUser, router]);
+  }, [setUser, router, authBypass]);
 
   const renderPanel = () => {
     switch (activePanel) {

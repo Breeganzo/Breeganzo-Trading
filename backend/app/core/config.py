@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_SECRET: str = ""
     GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/callback"
     ALLOWED_EMAIL: str = "anthonybreeganzo02@gmail.com"
+    AUTH_BYPASS_LOCAL: bool = False
+    LOCAL_BYPASS_EMAIL: str = "anthonybreeganzo02@gmail.com"
+    LOCAL_BYPASS_NAME: str = "Local User"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRY_MINUTES: int = 720  # 12 hours
     TOTP_SECRET: str = ""  # Generated on first setup
@@ -62,6 +65,12 @@ class Settings(BaseSettings):
     RANKING_CACHE_TTL: int = 3600  # 1 hour
     RISK_CACHE_TTL: int = 1800  # 30 min
     MAX_WS_CONNECTIONS: int = 3
+
+    # Auto signal background worker
+    AUTO_SIGNAL_WORKER_ENABLED: bool = True
+    AUTO_SIGNAL_INTERVAL_SEC: int = 10
+    AUTO_SIGNAL_BATCH_SIZE: int = 50
+    AUTO_SIGNAL_WORKER_MARKET_HOURS_ONLY: bool = True
 
     class Config:
         env_file = ".env"

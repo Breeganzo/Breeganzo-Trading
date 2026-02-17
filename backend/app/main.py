@@ -8,6 +8,7 @@ graceful shutdown).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -44,6 +45,85 @@ API_PREFIX: str = settings.API_PREFIX  # e.g. "/api/v1"
 # ---------------------------------------------------------------------------
 
 _app_start_time: float = 0.0
+_auto_signal_worker_task: asyncio.Task | None = None
+
+
+async def _auto_signal_worker_loop() -> None:
+    """
+    Background worker: processes pending DB signal triggers server-side.
+
+    Runs independently of UI sessions so queued BUY/SELL/HOLD triggers can be
+    consumed even when dashboard is closed.
+    """
+    # Lazy imports to avoid startup cycles.
+    from sqlalchemy import select
+
+    from app.api.routes.orders import process_pending_signals_for_user
+    from app.db.database import async_session_factory
+    from app.models.models import SignalTrigger, User
+    from app.services.market_data import market_data_service
+
+    interval = max(2, int(settings.AUTO_SIGNAL_INTERVAL_SEC or 10))
+    batch_size = max(1, int(settings.AUTO_SIGNAL_BATCH_SIZE or 50))
+
+    logger.info(
+        "Auto-signal worker started (interval=%ss, batch=%s, market_hours_only=%s)",
+        interval,
+        batch_size,
+        bool(settings.AUTO_SIGNAL_WORKER_MARKET_HOURS_ONLY),
+    )
+    while True:
+        try:
+            if settings.AUTO_SIGNAL_WORKER_MARKET_HOURS_ONLY:
+                try:
+                    if not await market_data_service.is_market_open():
+                        await asyncio.sleep(interval)
+                        continue
+                except Exception:
+                    logger.warning("Market status check failed in auto-signal worker")
+                    await asyncio.sleep(interval)
+                    continue
+
+            async with async_session_factory() as session:
+                user_ids = (
+                    await session.execute(
+                        select(SignalTrigger.user_id)
+                        .where(SignalTrigger.status == "PENDING")
+                        .distinct()
+                    )
+                ).scalars().all()
+
+                total_exec = 0
+                total_processed = 0
+                for user_id in user_ids:
+                    user = (
+                        await session.execute(
+                            select(User).where(User.id == user_id, User.is_active.is_(True))
+                        )
+                    ).scalar_one_or_none()
+                    if user is None:
+                        continue
+                    result = await process_pending_signals_for_user(
+                        db=session,
+                        current_user=user,
+                        limit=batch_size,
+                    )
+                    total_exec += int(result.get("executed_count", 0) or 0)
+                    total_processed += int(result.get("processed", 0) or 0)
+                await session.commit()
+                if total_processed > 0:
+                    logger.info(
+                        "Auto-signal worker cycle processed=%s executed=%s users=%s",
+                        total_processed,
+                        total_exec,
+                        len(user_ids),
+                    )
+        except asyncio.CancelledError:
+            logger.info("Auto-signal worker stopped.")
+            break
+        except Exception:
+            logger.exception("Auto-signal worker cycle failed")
+        await asyncio.sleep(interval)
 
 # ---------------------------------------------------------------------------
 # Lifespan
@@ -63,7 +143,7 @@ async def lifespan(app: FastAPI):
         1. Close the database engine.
         2. Close the Redis connection pool.
     """
-    global _app_start_time
+    global _app_start_time, _auto_signal_worker_task
 
     # ── Startup ──────────────────────────────────────────────────────────
     logger.info("Starting QuantDesk Pro API v1.0.0 ...")
@@ -97,10 +177,21 @@ async def lifespan(app: FastAPI):
 
     logger.info("QuantDesk Pro API startup complete.")
 
+    if settings.AUTO_SIGNAL_WORKER_ENABLED:
+        _auto_signal_worker_task = asyncio.create_task(_auto_signal_worker_loop())
+
     yield
 
     # ── Shutdown ─────────────────────────────────────────────────────────
     logger.info("Shutting down QuantDesk Pro API ...")
+
+    if _auto_signal_worker_task is not None:
+        _auto_signal_worker_task.cancel()
+        try:
+            await _auto_signal_worker_task
+        except asyncio.CancelledError:
+            pass
+        _auto_signal_worker_task = None
 
     try:
         await close_db()

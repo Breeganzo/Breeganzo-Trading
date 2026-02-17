@@ -9,6 +9,7 @@ function LoginContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const setUser = useStore((s) => s.setUser);
+  const authBypass = process.env.NEXT_PUBLIC_AUTH_BYPASS_LOCAL === 'true';
   const [status, setStatus] = useState<'idle' | 'loading' | 'callback' | 'totp' | 'error'>('idle');
   const [error, setError] = useState('');
   const [totpCode, setTotpCode] = useState('');
@@ -17,6 +18,19 @@ function LoginContent() {
 
   // Handle OAuth redirect: backend redirects here with ?token=...&requires_totp=...
   useEffect(() => {
+    if (authBypass) {
+      api
+        .getMe()
+        .then((data) => {
+          setUser(data);
+          router.push('/dashboard');
+        })
+        .catch(() => {
+          // allow manual local entry button below
+        });
+      return;
+    }
+
     const token = searchParams.get('token');
     const errorParam = searchParams.get('error');
     const totpSetupParam = searchParams.get('totp_setup_uri');
@@ -53,10 +67,11 @@ function LoginContent() {
           });
       }
     }
-  }, [searchParams, setUser, router]);
+  }, [searchParams, setUser, router, authBypass]);
 
   // Check if already logged in (existing token in localStorage)
   useEffect(() => {
+    if (authBypass) return;
     const existingToken = api.getToken();
     if (existingToken && !searchParams.get('token') && !searchParams.get('error')) {
       api
@@ -69,7 +84,7 @@ function LoginContent() {
           api.clearToken();
         });
     }
-  }, [setUser, router, searchParams]);
+  }, [setUser, router, searchParams, authBypass]);
 
   const handleLogin = async () => {
     setStatus('loading');
@@ -158,25 +173,41 @@ function LoginContent() {
             </>
           ) : (
             <>
-              <p className="text-sm text-text-secondary text-center">
-                Sign in with your authorized Google account to access the dashboard.
-              </p>
-              <button
-                onClick={handleLogin}
-                disabled={status === 'loading' || status === 'callback'}
-                className="w-full flex items-center justify-center gap-2 bg-white text-gray-800
-                           font-medium py-2.5 px-4 rounded-md text-sm
-                           hover:bg-gray-100 disabled:opacity-50 transition-colors"
-              >
-                {(status === 'loading' || status === 'callback') && (
-                  <div className="w-4 h-4 border-2 border-gray-400 border-t-gray-800 rounded-full animate-spin" />
-                )}
-                {status === 'callback'
-                  ? 'Authenticating...'
-                  : status === 'loading'
-                  ? 'Redirecting...'
-                  : 'Sign in with Google'}
-              </button>
+              {authBypass ? (
+                <>
+                  <p className="text-sm text-text-secondary text-center">
+                    Local auth bypass is enabled. Google OAuth is disabled for localhost.
+                  </p>
+                  <button
+                    onClick={() => router.push('/dashboard')}
+                    className="w-full btn btn-primary py-2.5 text-sm"
+                  >
+                    Enter Local Dashboard
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm text-text-secondary text-center">
+                    Sign in with your authorized Google account to access the dashboard.
+                  </p>
+                  <button
+                    onClick={handleLogin}
+                    disabled={status === 'loading' || status === 'callback'}
+                    className="w-full flex items-center justify-center gap-2 bg-white text-gray-800
+                               font-medium py-2.5 px-4 rounded-md text-sm
+                               hover:bg-gray-100 disabled:opacity-50 transition-colors"
+                  >
+                    {(status === 'loading' || status === 'callback') && (
+                      <div className="w-4 h-4 border-2 border-gray-400 border-t-gray-800 rounded-full animate-spin" />
+                    )}
+                    {status === 'callback'
+                      ? 'Authenticating...'
+                      : status === 'loading'
+                      ? 'Redirecting...'
+                      : 'Sign in with Google'}
+                  </button>
+                </>
+              )}
             </>
           )}
 
@@ -188,7 +219,9 @@ function LoginContent() {
         </div>
 
         <p className="text-center text-xs text-text-muted">
-          Single-user platform. Only authorized accounts can sign in.
+          {authBypass
+            ? 'Local mode: authentication bypass enabled.'
+            : 'Single-user platform. Only authorized accounts can sign in.'}
         </p>
       </div>
     </div>

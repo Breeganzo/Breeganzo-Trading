@@ -102,6 +102,14 @@ ALLOWED_EMAIL=anthonybreeganzo02@gmail.com
 GROQ_API_KEY=gsk_<your-key>
 
 ALLOWED_ORIGINS=http://localhost:3000,https://quantdesk-pro.vercel.app
+AUTH_BYPASS_LOCAL=false
+LOCAL_BYPASS_EMAIL=anthonybreeganzo02@gmail.com
+LOCAL_BYPASS_NAME=Local User
+
+AUTO_SIGNAL_WORKER_ENABLED=true
+AUTO_SIGNAL_INTERVAL_SEC=10
+AUTO_SIGNAL_BATCH_SIZE=50
+AUTO_SIGNAL_WORKER_MARKET_HOURS_ONLY=true
 ```
 
 ### Frontend `.env.local`:
@@ -109,6 +117,7 @@ ALLOWED_ORIGINS=http://localhost:3000,https://quantdesk-pro.vercel.app
 ```env
 NEXT_PUBLIC_API_URL=https://quantdesk-pro-api.onrender.com/api/v1
 NEXT_PUBLIC_WS_URL=wss://quantdesk-pro-api.onrender.com/api/v1/ticker/ws
+NEXT_PUBLIC_AUTH_BYPASS_LOCAL=false
 ```
 
 ---

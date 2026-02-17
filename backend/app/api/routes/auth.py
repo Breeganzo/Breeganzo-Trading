@@ -32,6 +32,13 @@ async def login():
     The frontend should redirect the user to this URL to begin the
     login flow.
     """
+    settings = get_settings()
+    if settings.AUTH_BYPASS_LOCAL:
+        return {
+            "auth_url": "/dashboard",
+            "mode": "local_bypass",
+            "message": "Google OAuth disabled for local development.",
+        }
     auth_url = auth_service.get_google_auth_url()
     return {"auth_url": auth_url}
 

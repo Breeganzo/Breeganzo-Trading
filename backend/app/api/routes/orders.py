@@ -741,19 +741,13 @@ async def delete_auto_signal(
     return {"ok": True, "deleted_signal_id": str(signal_id)}
 
 
-@router.post("/auto-signals/process")
-async def process_auto_signals(
-    limit: int = Query(25, ge=1, le=200, description="Max pending signals to process"),
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Process pending DB triggers once:
-      - checks live ticker price
-      - applies sentiment gate
-      - executes BUY/SELL trades when triggered
-      - deletes consumed signals to avoid redundant execution
-    """
+async def process_pending_signals_for_user(
+    *,
+    db: AsyncSession,
+    current_user: User,
+    limit: int = 25,
+) -> dict:
+    """Process pending auto signals for one user (internal helper)."""
     query = (
         select(SignalTrigger)
         .where(
@@ -761,7 +755,7 @@ async def process_auto_signals(
             SignalTrigger.status == "PENDING",
         )
         .order_by(SignalTrigger.created_at.asc())
-        .limit(limit)
+        .limit(max(1, int(limit or 25)))
     )
     pending = (await db.execute(query)).scalars().all()
 
@@ -781,7 +775,9 @@ async def process_auto_signals(
             live = None
         current_price = float((live or {}).get("price") or 0.0)
         if current_price <= 0:
-            skipped.append({"signal_id": str(signal.id), "ticker": ticker, "reason": "no_live_price"})
+            skipped.append(
+                {"signal_id": str(signal.id), "ticker": ticker, "reason": "no_live_price"}
+            )
             continue
 
         if not _signal_is_triggered(signal, current_price):
@@ -883,3 +879,21 @@ async def process_auto_signals(
         "hold_consumed": consumed_hold,
         "skipped": skipped,
     }
+
+
+@router.post("/auto-signals/process")
+async def process_auto_signals(
+    limit: int = Query(25, ge=1, le=200, description="Max pending signals to process"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Process pending DB triggers once:
+      - checks live ticker price
+      - applies sentiment gate
+      - executes BUY/SELL trades when triggered
+      - deletes consumed signals to avoid redundant execution
+    """
+    return await process_pending_signals_for_user(
+        db=db, current_user=current_user, limit=limit
+    )

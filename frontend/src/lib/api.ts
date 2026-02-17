@@ -1,4 +1,5 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+const AUTH_BYPASS_LOCAL = process.env.NEXT_PUBLIC_AUTH_BYPASS_LOCAL === 'true';
 
 class ApiClient {
   private baseUrl: string;
@@ -48,9 +49,11 @@ class ApiClient {
     });
 
     if (response.status === 401) {
-      this.clearToken();
-      if (typeof window !== 'undefined') {
-        window.location.href = '/login';
+      if (!AUTH_BYPASS_LOCAL) {
+        this.clearToken();
+        if (typeof window !== 'undefined') {
+          window.location.href = '/login';
+        }
       }
       throw new Error('Unauthorized');
     }
