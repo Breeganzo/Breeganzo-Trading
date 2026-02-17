@@ -143,6 +143,38 @@ export interface OrderSummary {
   total_pending_sell_value: number;
 }
 
+export interface AutoSignalCreate {
+  ticker: string;
+  exchange?: string;
+  action: 'BUY' | 'SELL' | 'HOLD';
+  quantity?: number;
+  trigger_price_low?: number;
+  trigger_price_high?: number;
+  sentiment_min?: number;
+  sentiment_max?: number;
+  source?: string;
+  notes?: string;
+}
+
+export interface AutoSignal {
+  id: string;
+  ticker: string;
+  exchange: string;
+  action: 'BUY' | 'SELL' | 'HOLD';
+  quantity: number;
+  trigger_price_low: number | null;
+  trigger_price_high: number | null;
+  sentiment_min: number | null;
+  sentiment_max: number | null;
+  sentiment_last: number | null;
+  status: 'PENDING' | 'SKIPPED' | 'CANCELLED';
+  source: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string | null;
+  triggered_at: string | null;
+}
+
 // ── Rankings ──
 
 export interface RankingEntry {

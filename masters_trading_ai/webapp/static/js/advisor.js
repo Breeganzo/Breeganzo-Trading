@@ -398,6 +398,36 @@ async function resetAdvisorSimulation() {
     }
 }
 
+async function rebuildAdvisorPortfolioPrices() {
+    if (advisorBusy) return;
+    const status = document.getElementById('advisor-status');
+    if (status) {
+        status.textContent = 'Rebuilding portfolio prices from live quotes and ledger...';
+    }
+    setAdvisorBusy(true);
+    try {
+        const res = await fetch('/api/simulate/rebuild-prices', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Rebuild failed');
+        if (status) {
+            status.textContent = `Price rebuild complete. Updated ${Number(data.updated_positions || 0)} positions (live ${Number(data.live_price_updates || 0)}, ledger ${Number(data.ledger_price_updates || 0)}).`;
+        }
+        await refreshAdvisorSummary();
+        if (advisorViewFilter === 'buy' || advisorViewFilter === 'hold') {
+            renderAdvisorOpenList(advisorOpenList);
+        } else {
+            renderAdvisorTradeLedgerRows(advisorLedgerRows);
+        }
+    } catch (e) {
+        if (status) status.textContent = `Price rebuild error: ${e.message}`;
+    } finally {
+        setAdvisorBusy(false);
+    }
+}
+
 async function advisorRealtimeTick() {
     if (advisorRealtimeBusy || advisorBusy) return;
     if (document.visibilityState !== 'visible') return;
@@ -425,6 +455,7 @@ window.loadAdvisorOpenBuyList = loadAdvisorOpenBuyList;
 window.simulateAdvisorBuy = simulateAdvisorBuy;
 window.runAdvisorAutoCheck = runAdvisorAutoCheck;
 window.resetAdvisorSimulation = resetAdvisorSimulation;
+window.rebuildAdvisorPortfolioPrices = rebuildAdvisorPortfolioPrices;
 window.refreshAdvisorSummary = refreshAdvisorSummary;
 window.refreshAdvisorTransactions = refreshAdvisorTransactions;
 window.refreshAdvisorTradeLedger = refreshAdvisorTradeLedger;

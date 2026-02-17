@@ -1,10 +1,10 @@
 'use client';
 
-import { useState, useCallback } from 'react';
-import { useOrders, useOrderSummary } from '@/hooks/useData';
+import { useState, useCallback, useEffect } from 'react';
+import { useAutoSignals, useOrders, useOrderSummary } from '@/hooks/useData';
 import { api } from '@/lib/api';
 import { formatCurrency, formatTimestamp } from '@/lib/utils';
-import type { Order, OrderCreate } from '@/types';
+import type { AutoSignal, AutoSignalCreate, Order, OrderCreate } from '@/types';
 
 // ── Status filter tabs ──
 
@@ -44,6 +44,7 @@ export default function OrderBookPanel() {
   // ── Data hooks ──
   const { data: orders, isLoading: ordersLoading, error: ordersError, mutate: mutateOrders } = useOrders();
   const { data: summary, isLoading: summaryLoading, mutate: mutateSummary } = useOrderSummary();
+  const { data: autoSignals, mutate: mutateAutoSignals } = useAutoSignals('PENDING');
 
   // ── Filter state ──
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
@@ -59,6 +60,16 @@ export default function OrderBookPanel() {
 
   // ── Action loading states ──
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+  const [signalTicker, setSignalTicker] = useState('');
+  const [signalAction, setSignalAction] = useState<'BUY' | 'SELL' | 'HOLD'>('BUY');
+  const [signalQuantity, setSignalQuantity] = useState('1');
+  const [signalLow, setSignalLow] = useState('');
+  const [signalHigh, setSignalHigh] = useState('');
+  const [signalSentimentMin, setSignalSentimentMin] = useState('');
+  const [signalSentimentMax, setSignalSentimentMax] = useState('');
+  const [signalNotes, setSignalNotes] = useState('');
+  const [signalError, setSignalError] = useState<string | null>(null);
+  const [signalBusy, setSignalBusy] = useState(false);
 
   // ── Form submit handler ──
   const handleSubmitOrder = useCallback(async (e: React.FormEvent) => {
@@ -135,6 +146,98 @@ export default function OrderBookPanel() {
     }
   }, [mutateOrders, mutateSummary]);
 
+  const handleCreateSignal = useCallback(async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSignalError(null);
+    const ticker = signalTicker.trim().toUpperCase();
+    const low = signalLow.trim() ? Number(signalLow) : undefined;
+    const high = signalHigh.trim() ? Number(signalHigh) : undefined;
+    const qty = Math.max(1, parseInt(signalQuantity || '1', 10) || 1);
+    const sentimentMin = signalSentimentMin.trim() ? Number(signalSentimentMin) : undefined;
+    const sentimentMax = signalSentimentMax.trim() ? Number(signalSentimentMax) : undefined;
+
+    if (!ticker) {
+      setSignalError('Ticker is required for auto signal.');
+      return;
+    }
+    if (!Number.isFinite(low as number) && !Number.isFinite(high as number)) {
+      setSignalError('Set trigger low or trigger high.');
+      return;
+    }
+    if (Number.isFinite(low as number) && Number(low) <= 0) {
+      setSignalError('Trigger low must be > 0.');
+      return;
+    }
+    if (Number.isFinite(high as number) && Number(high) <= 0) {
+      setSignalError('Trigger high must be > 0.');
+      return;
+    }
+
+    const payload: AutoSignalCreate = {
+      ticker,
+      action: signalAction,
+      quantity: signalAction === 'HOLD' ? 1 : qty,
+      trigger_price_low: Number.isFinite(low as number) ? low : undefined,
+      trigger_price_high: Number.isFinite(high as number) ? high : undefined,
+      sentiment_min: Number.isFinite(sentimentMin as number) ? sentimentMin : undefined,
+      sentiment_max: Number.isFinite(sentimentMax as number) ? sentimentMax : undefined,
+      notes: signalNotes.trim() || undefined,
+      source: 'dashboard_manual',
+    };
+
+    setSignalBusy(true);
+    try {
+      await api.createAutoSignal(payload);
+      setSignalTicker('');
+      setSignalQuantity('1');
+      setSignalLow('');
+      setSignalHigh('');
+      setSignalSentimentMin('');
+      setSignalSentimentMax('');
+      setSignalNotes('');
+      await mutateAutoSignals();
+    } catch (err: any) {
+      setSignalError(err?.message || 'Failed to create auto signal.');
+    } finally {
+      setSignalBusy(false);
+    }
+  }, [
+    mutateAutoSignals,
+    signalAction,
+    signalHigh,
+    signalLow,
+    signalNotes,
+    signalQuantity,
+    signalSentimentMax,
+    signalSentimentMin,
+    signalTicker,
+  ]);
+
+  const handleDeleteSignal = useCallback(async (signalId: string) => {
+    setSignalBusy(true);
+    try {
+      await api.deleteAutoSignal(signalId);
+      await mutateAutoSignals();
+    } catch (err: any) {
+      setSignalError(err?.message || 'Failed to delete auto signal.');
+    } finally {
+      setSignalBusy(false);
+    }
+  }, [mutateAutoSignals]);
+
+  const handleProcessSignals = useCallback(async () => {
+    setSignalBusy(true);
+    setSignalError(null);
+    try {
+      await api.processAutoSignals(50);
+      await Promise.all([mutateAutoSignals(), mutateOrders(), mutateSummary()]);
+    } catch (err: any) {
+      setSignalError(err?.message || 'Failed to process auto signals.');
+    } finally {
+      setSignalBusy(false);
+    }
+  }, [mutateAutoSignals, mutateOrders, mutateSummary]);
+
   // ── Filter orders ──
   const filteredOrders: Order[] = (() => {
     if (!orders) return [];
@@ -142,8 +245,21 @@ export default function OrderBookPanel() {
     if (statusFilter === 'all') return list;
     return list.filter((o) => o.status === statusFilter);
   })();
+  const signalRows: AutoSignal[] = Array.isArray(autoSignals)
+    ? autoSignals
+    : ((autoSignals as any)?.signals ?? []);
 
   const isLoading = ordersLoading || summaryLoading;
+
+  useEffect(() => {
+    if (!signalRows.length) return;
+    const timer = setInterval(() => {
+      if (!signalBusy) {
+        void handleProcessSignals();
+      }
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [handleProcessSignals, signalBusy, signalRows.length]);
 
   // ── Loading state ──
   if (isLoading) {
@@ -314,7 +430,166 @@ export default function OrderBookPanel() {
           </form>
         </div>
 
-        {/* ── 3. Orders Table with Tabs ── */}
+        {/* ── 3. Auto Signal Queue ── */}
+        <div className="border-t border-border/50 pt-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-label text-text-muted uppercase tracking-wider">
+              Auto Signal Queue (DB Trigger)
+            </div>
+            <button
+              type="button"
+              onClick={handleProcessSignals}
+              disabled={signalBusy}
+              className="px-3 py-1 text-xs font-semibold rounded
+                         bg-accent-blue/15 text-accent-blue border border-accent-blue/30
+                         hover:bg-accent-blue/25 disabled:opacity-50"
+            >
+              {signalBusy ? 'Processing...' : 'Process Triggers'}
+            </button>
+          </div>
+
+          <form onSubmit={handleCreateSignal} className="grid grid-cols-1 md:grid-cols-4 gap-2">
+            <input
+              type="text"
+              className="input"
+              placeholder="Ticker (e.g. INFY)"
+              value={signalTicker}
+              onChange={(e) => setSignalTicker(e.target.value)}
+            />
+            <select
+              className="input"
+              value={signalAction}
+              onChange={(e) => setSignalAction(e.target.value as 'BUY' | 'SELL' | 'HOLD')}
+            >
+              <option value="BUY">BUY</option>
+              <option value="SELL">SELL</option>
+              <option value="HOLD">HOLD</option>
+            </select>
+            <input
+              type="number"
+              className="input"
+              placeholder="Qty"
+              min="1"
+              step="1"
+              value={signalQuantity}
+              onChange={(e) => setSignalQuantity(e.target.value)}
+              disabled={signalAction === 'HOLD'}
+            />
+            <input
+              type="text"
+              className="input"
+              placeholder="Notes (optional)"
+              value={signalNotes}
+              onChange={(e) => setSignalNotes(e.target.value)}
+            />
+            <input
+              type="number"
+              className="input"
+              placeholder="Trigger Low"
+              min="0.01"
+              step="0.01"
+              value={signalLow}
+              onChange={(e) => setSignalLow(e.target.value)}
+            />
+            <input
+              type="number"
+              className="input"
+              placeholder="Trigger High"
+              min="0.01"
+              step="0.01"
+              value={signalHigh}
+              onChange={(e) => setSignalHigh(e.target.value)}
+            />
+            <input
+              type="number"
+              className="input"
+              placeholder="Sentiment Min (-1..1)"
+              min="-1"
+              max="1"
+              step="0.01"
+              value={signalSentimentMin}
+              onChange={(e) => setSignalSentimentMin(e.target.value)}
+            />
+            <div className="flex gap-2">
+              <input
+                type="number"
+                className="input"
+                placeholder="Sentiment Max (-1..1)"
+                min="-1"
+                max="1"
+                step="0.01"
+                value={signalSentimentMax}
+                onChange={(e) => setSignalSentimentMax(e.target.value)}
+              />
+              <button
+                type="submit"
+                disabled={signalBusy}
+                className="px-3 py-1 text-xs font-semibold rounded
+                           bg-profit/15 text-profit border border-profit/30
+                           hover:bg-profit/25 disabled:opacity-50"
+              >
+                Add Trigger
+              </button>
+            </div>
+          </form>
+          {signalError && <div className="text-loss text-xs">{signalError}</div>}
+
+          {signalRows.length === 0 ? (
+            <div className="text-text-muted text-sm">No pending auto signals.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th className="text-left">Ticker</th>
+                    <th className="text-center">Action</th>
+                    <th className="text-right">Qty</th>
+                    <th className="text-right">Trigger Low</th>
+                    <th className="text-right">Trigger High</th>
+                    <th className="text-right">Sentiment</th>
+                    <th className="text-left">Created</th>
+                    <th className="text-center">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {signalRows.map((row) => (
+                    <tr key={row.id}>
+                      <td className="font-semibold text-text-primary">{row.ticker}</td>
+                      <td className="text-center">
+                        <span className={row.action === 'BUY' ? 'badge badge-buy' : row.action === 'SELL' ? 'badge badge-sell' : 'badge badge-draft'}>
+                          {row.action}
+                        </span>
+                      </td>
+                      <td className="text-right font-mono tabular-nums">{row.quantity}</td>
+                      <td className="text-right font-mono tabular-nums">{formatCurrency(row.trigger_price_low)}</td>
+                      <td className="text-right font-mono tabular-nums">{formatCurrency(row.trigger_price_high)}</td>
+                      <td className="text-right font-mono tabular-nums">
+                        {row.sentiment_min != null || row.sentiment_max != null
+                          ? `[${row.sentiment_min ?? '-1'} .. ${row.sentiment_max ?? '1'}]`
+                          : 'Any'}
+                      </td>
+                      <td className="text-text-muted text-xs font-mono tabular-nums">{formatTimestamp(row.created_at)}</td>
+                      <td className="text-center">
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteSignal(row.id)}
+                          disabled={signalBusy}
+                          className="px-2 py-0.5 text-xs font-medium rounded
+                                     bg-loss/10 text-loss border border-loss/30
+                                     hover:bg-loss/20 disabled:opacity-50"
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* ── 4. Orders Table with Tabs ── */}
         <div className="border-t border-border/50 pt-4">
           {/* Tab Buttons */}
           <div className="flex gap-1 mb-3">

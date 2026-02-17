@@ -38,6 +38,9 @@ class User(Base):
     portfolio = relationship("Portfolio", back_populates="user", cascade="all, delete-orphan")
     trades = relationship("Trade", back_populates="user", cascade="all, delete-orphan")
     orders = relationship("OrderBook", back_populates="user", cascade="all, delete-orphan")
+    signal_triggers = relationship(
+        "SignalTrigger", back_populates="user", cascade="all, delete-orphan"
+    )
     daily_returns = relationship("DailyReturn", back_populates="user", cascade="all, delete-orphan")
 
 
@@ -119,6 +122,37 @@ class OrderBook(Base):
 
     __table_args__ = (
         Index("ix_orders_user_status", "user_id", "status"),
+    )
+
+
+class SignalTrigger(Base):
+    __tablename__ = "signal_triggers"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    ticker = Column(String(20), nullable=False, index=True)
+    exchange = Column(String(10), default="NSE")
+    action = Column(String(6), nullable=False, default="BUY")  # BUY / SELL / HOLD
+    quantity = Column(Integer, nullable=False, default=1)
+    trigger_price_low = Column(Float)
+    trigger_price_high = Column(Float)
+    sentiment_min = Column(Float)  # optional floor in [-1, 1]
+    sentiment_max = Column(Float)  # optional ceiling in [-1, 1]
+    sentiment_last = Column(Float)
+    status = Column(String(20), default="PENDING")  # PENDING / SKIPPED / CANCELLED
+    source = Column(String(40), default="manual")
+    notes = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    triggered_at = Column(DateTime(timezone=True))
+
+    user = relationship("User", back_populates="signal_triggers")
+
+    __table_args__ = (
+        Index("ix_signal_triggers_user_status", "user_id", "status"),
+        Index("ix_signal_triggers_user_created", "user_id", "created_at"),
     )
 
 

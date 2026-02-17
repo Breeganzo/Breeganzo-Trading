@@ -131,6 +131,41 @@ class OrderResponse(BaseModel):
         from_attributes = True
 
 
+class SignalTriggerCreate(BaseModel):
+    ticker: str
+    exchange: str = "NSE"
+    action: str = Field(..., pattern="^(BUY|SELL|HOLD)$")
+    quantity: int = Field(1, ge=1)
+    trigger_price_low: Optional[float] = Field(None, gt=0)
+    trigger_price_high: Optional[float] = Field(None, gt=0)
+    sentiment_min: Optional[float] = Field(None, ge=-1, le=1)
+    sentiment_max: Optional[float] = Field(None, ge=-1, le=1)
+    source: Optional[str] = "manual"
+    notes: Optional[str] = None
+
+
+class SignalTriggerResponse(BaseModel):
+    id: UUID
+    ticker: str
+    exchange: str
+    action: str
+    quantity: int
+    trigger_price_low: Optional[float] = None
+    trigger_price_high: Optional[float] = None
+    sentiment_min: Optional[float] = None
+    sentiment_max: Optional[float] = None
+    sentiment_last: Optional[float] = None
+    status: str
+    source: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    triggered_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
 # ── Rankings ──
 class RankingEntry(BaseModel):
     ticker: str

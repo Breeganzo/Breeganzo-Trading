@@ -33,7 +33,12 @@
 7. **Important**: For async Python (asyncpg), use the **Session Mode** (port 5432) or **Transaction Mode** (port 6543)
 8. The app auto-converts `postgresql://` to `postgresql+asyncpg://`
 
-**Tables are auto-created** on first startup via SQLAlchemy `create_all()`. No manual SQL needed.
+**Tables are auto-created** on first startup via SQLAlchemy `create_all()`.
+Reference schema is now stored in:
+- `backend/sql/schema.sql` (runtime schema reference)
+- `docs/schema.sql` (documentation copy)
+
+The schema includes `signal_triggers` for DB-driven BUY/SELL/HOLD trigger queues.
 
 ---
 
@@ -219,6 +224,27 @@ curl https://quantdesk-pro-api.onrender.com/api/v1/system/health
 # Market regime
 curl https://quantdesk-pro-api.onrender.com/api/v1/risk/regime
 ```
+
+### Auto Signal Trigger Queue (consume-once)
+
+```bash
+# Add a pending BUY trigger
+curl -X POST https://quantdesk-pro-api.onrender.com/api/v1/orders/auto-signals \
+  -H "Authorization: Bearer <your-jwt-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"ticker":"INFY.NS","action":"BUY","quantity":2,"trigger_price_low":1400,"trigger_price_high":1410,"sentiment_min":-0.2}'
+
+# List pending triggers
+curl https://quantdesk-pro-api.onrender.com/api/v1/orders/auto-signals?status=PENDING \
+  -H "Authorization: Bearer <your-jwt-token>"
+
+# Process triggers once (uses live price + sentiment gate)
+curl -X POST 'https://quantdesk-pro-api.onrender.com/api/v1/orders/auto-signals/process?limit=25' \
+  -H "Authorization: Bearer <your-jwt-token>"
+```
+
+When a trigger executes, the trade is written to `trades` and the trigger row is deleted
+to avoid redundant repeat execution.
 
 ---
 

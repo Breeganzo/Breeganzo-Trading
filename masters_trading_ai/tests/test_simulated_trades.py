@@ -241,6 +241,61 @@ def test_sim_state_backfills_last_price_from_ledger(monkeypatch, tmp_path):
     assert str(pos.get("last_price_source", "")).startswith("jsonl")
 
 
+def test_rebuild_prices_endpoint_uses_ledger_fallback(monkeypatch, tmp_path):
+    sim_file = tmp_path / "portfolio_sim.json"
+    sim_log = tmp_path / "simulated_trades.jsonl"
+    sim_csv = tmp_path / "simulated_trades.csv"
+    sim_xlsx = tmp_path / "simulated_trades.xlsx"
+    report_dir = tmp_path / "daily_reports"
+
+    monkeypatch.setattr(server, "PORTFOLIO_SIM_FILE", sim_file)
+    monkeypatch.setattr(server, "SIMULATED_TRADE_LOG_FILE", sim_log)
+    monkeypatch.setattr(server, "SIMULATED_TRADE_CSV_FILE", sim_csv)
+    monkeypatch.setattr(server, "SIMULATED_TRADE_EXCEL_FILE", sim_xlsx)
+    monkeypatch.setattr(server, "DAILY_TRADE_REPORT_DIR", report_dir)
+    monkeypatch.setattr(
+        server,
+        "_get_live_prices_batch",
+        lambda tickers: {t: {"price": 0.0} for t in tickers},
+    )
+
+    base_state = server._simulation_state_template(cash=40000.0)
+    base_state["open_positions"] = {
+        "INFY.NS": {
+            "ticker": "INFY.NS",
+            "quantity": 3.0,
+            "avg_entry_price": 100.0,
+            "stop_loss_price": 95.0,
+            "target_price": 110.0,
+            "last_price": 0.0,
+        }
+    }
+    sim_file.write_text(json.dumps(base_state))
+    sim_log.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-02-16T10:15:00+05:30",
+                "action": "BUY",
+                "ticker": "INFY.NS",
+                "quantity": 3,
+                "price": 104.75,
+            }
+        )
+        + "\n"
+    )
+
+    with server.app.test_client() as client:
+        out = client.post("/api/simulate/rebuild-prices")
+        assert out.status_code == 200
+        payload = out.get_json()
+        assert payload.get("ok") is True
+        assert payload.get("ledger_price_updates", 0) >= 1
+
+        state = server._read_portfolio_sim_state()
+        pos = state.get("open_positions", {}).get("INFY.NS", {})
+        assert float(pos.get("last_price", 0)) == 104.75
+
+
 def test_simulated_trade_ledger_reports_sold_and_hold(monkeypatch, tmp_path):
     sim_file = tmp_path / "portfolio_sim.json"
     sim_log = tmp_path / "simulated_trades.jsonl"

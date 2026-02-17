@@ -79,6 +79,17 @@ export function useOrderSummary() {
   });
 }
 
+export function useAutoSignals(status?: string) {
+  return useSWR(
+    status ? `auto-signals-${status}` : 'auto-signals',
+    () => api.getAutoSignals(status),
+    {
+      refreshInterval: 15000,
+      revalidateOnFocus: false,
+    }
+  );
+}
+
 export function useSystemHealth() {
   const { setSystemHealth } = useStore();
   return useSWR('system-health', () => api.getSystemHealth(), {

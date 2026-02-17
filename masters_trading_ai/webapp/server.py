@@ -4695,6 +4695,120 @@ def api_simulate_portfolio():
     )
 
 
+@app.route("/api/simulate/rebuild-prices", methods=["POST"])
+def api_simulate_rebuild_prices():
+    """
+    Manually rebuild simulated open-position prices from live quotes and ledgers.
+
+    Priority:
+      1) Live quote (if available)
+      2) Persisted trade ledger price (JSONL/Excel)
+      3) Existing last_price / avg_entry_price fallback
+    """
+    state = _read_portfolio_sim_state()
+    open_positions = dict(state.get("open_positions", {}))
+    if not open_positions:
+        return jsonify(
+            {
+                "ok": True,
+                "message": "No open positions to rebuild.",
+                "updated_positions": 0,
+                "live_price_updates": 0,
+                "ledger_price_updates": 0,
+                "entry_fallback_updates": 0,
+                "positions": [],
+            }
+        )
+
+    tickers = sorted(open_positions.keys())
+    live_prices = _get_live_prices_batch(tickers) if tickers else {}
+    ledger_prices = _latest_sim_prices_from_ledgers()
+
+    updated_positions = 0
+    live_updates = 0
+    ledger_updates = 0
+    entry_fallback_updates = 0
+    rows: list[dict] = []
+
+    now_iso = datetime.now(IST).isoformat()
+    for ticker in tickers:
+        pos = dict(open_positions.get(ticker, {}))
+        qty = _safe_float(pos.get("quantity"))
+        entry = _safe_float(pos.get("avg_entry_price"))
+        if qty <= 0 or entry <= 0:
+            continue
+
+        old_last = _safe_float(pos.get("last_price"))
+        old_source = str(pos.get("last_price_source") or "")
+        old_at = str(pos.get("last_price_at") or "")
+
+        live_px = _safe_float(live_prices.get(ticker, {}).get("price"))
+        ledger_row = dict(ledger_prices.get(ticker, {}) or {})
+        ledger_px = _safe_float(ledger_row.get("price"))
+
+        resolved_price = 0.0
+        resolved_source = ""
+        resolved_at = now_iso
+
+        if live_px > 0:
+            resolved_price = live_px
+            resolved_source = "live_quote_rebuild"
+            resolved_at = now_iso
+            live_updates += 1
+        elif ledger_px > 0:
+            resolved_price = ledger_px
+            resolved_source = str(ledger_row.get("source") or "ledger_rebuild")
+            resolved_at = str(ledger_row.get("timestamp") or now_iso)
+            ledger_updates += 1
+        else:
+            fallback = old_last if old_last > 0 else entry
+            if fallback > 0:
+                resolved_price = fallback
+                resolved_source = old_source or "entry_fallback_rebuild"
+                resolved_at = old_at or now_iso
+                if old_last <= 0:
+                    entry_fallback_updates += 1
+
+        if resolved_price <= 0:
+            continue
+
+        if (
+            abs(old_last - resolved_price) > 1e-9
+            or old_source != resolved_source
+            or not old_at
+        ):
+            updated_positions += 1
+        pos["last_price"] = round(resolved_price, 2)
+        pos["last_price_source"] = resolved_source
+        pos["last_price_at"] = resolved_at
+        open_positions[ticker] = pos
+
+        rows.append(
+            {
+                "ticker": ticker,
+                "last_price": round(resolved_price, 2),
+                "last_price_source": resolved_source,
+                "last_price_at": resolved_at,
+            }
+        )
+
+    state["open_positions"] = open_positions
+    _write_portfolio_sim_state(state)
+
+    return jsonify(
+        {
+            "ok": True,
+            "message": "Simulation prices rebuilt from live/ledger sources.",
+            "updated_positions": updated_positions,
+            "live_price_updates": live_updates,
+            "ledger_price_updates": ledger_updates,
+            "entry_fallback_updates": entry_fallback_updates,
+            "positions": rows,
+            "updated_at": datetime.now(IST).isoformat(),
+        }
+    )
+
+
 @app.route("/api/simulate/transactions-summary")
 def api_simulate_transactions_summary():
     """Aggregate simulated BUY/SELL counts, costs and totals for a date."""
@@ -7866,7 +7980,11 @@ def api_price_tracker(ticker: str):
         )
         next_day_predicted_at = now_ist.isoformat()
         current_strategy_predicted_at = next_day_predicted_at
-        current_ai_predicted_at = ai_meta_live.get("generated_at_iso") or None
+        current_ai_predicted_at = (
+            ai_meta_live.get("generated_at_iso")
+            or ai_predicted_at_open
+            or now_ist.isoformat()
+        )
         ai_source = str(ai_meta_live.get("source", ai_meta_open.get("source", "none")))
     else:
         reference_price = open_price

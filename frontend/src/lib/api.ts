@@ -164,6 +164,29 @@ class ApiClient {
     return this.request('/orders/summary');
   }
 
+  async getAutoSignals(status?: string, limit: number = 100): Promise<any> {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (status) params.set('status', status);
+    return this.request(`/orders/auto-signals?${params}`);
+  }
+
+  async createAutoSignal(signal: any): Promise<any> {
+    return this.request('/orders/auto-signals', {
+      method: 'POST',
+      body: JSON.stringify(signal),
+    });
+  }
+
+  async deleteAutoSignal(signalId: string): Promise<any> {
+    return this.request(`/orders/auto-signals/${signalId}`, { method: 'DELETE' });
+  }
+
+  async processAutoSignals(limit: number = 25): Promise<any> {
+    return this.request(`/orders/auto-signals/process?limit=${encodeURIComponent(String(limit))}`, {
+      method: 'POST',
+    });
+  }
+
   // ── Rankings ──
   async getAllRankings(): Promise<any> {
     return this.request('/rankings/');

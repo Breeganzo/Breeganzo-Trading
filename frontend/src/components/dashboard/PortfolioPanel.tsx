@@ -238,26 +238,32 @@ export default function PortfolioPanel() {
             </div>
             {/* Stacked bar */}
             <div className="flex h-5 rounded overflow-hidden border border-border/50">
-              {sectorEntries.map(([sector, weight]) => (
+              {sectorEntries.map(([sector, weight]) => {
+                const pct = Math.max(0, Math.min(100, Number(weight as number)));
+                return (
                 <div
                   key={sector}
                   className={`${getSectorColor(sector)} transition-all duration-300`}
-                  style={{ width: `${((weight as number) * 100).toFixed(1)}%` }}
-                  title={`${sector}: ${((weight as number) * 100).toFixed(1)}%`}
+                  style={{ width: `${pct.toFixed(1)}%` }}
+                  title={`${sector}: ${pct.toFixed(1)}%`}
                 />
-              ))}
+                );
+              })}
             </div>
             {/* Legend */}
             <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2">
-              {sectorEntries.map(([sector, weight]) => (
+              {sectorEntries.map(([sector, weight]) => {
+                const pct = Math.max(0, Math.min(100, Number(weight as number)));
+                return (
                 <div key={sector} className="flex items-center gap-1.5 text-label">
                   <span className={`w-2.5 h-2.5 rounded-sm ${getSectorColor(sector)}`} />
                   <span className="text-text-secondary">{sector}</span>
                   <span className="text-text-muted font-mono tabular-nums">
-                    {((weight as number) * 100).toFixed(1)}%
+                    {pct.toFixed(1)}%
                   </span>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
