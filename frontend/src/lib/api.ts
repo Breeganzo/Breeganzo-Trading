@@ -39,7 +39,7 @@ class ApiClient {
       ...(options.headers as Record<string, string>),
     };
 
-    if (this.token) {
+    if (this.token && !AUTH_BYPASS_LOCAL) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
 
@@ -227,6 +227,58 @@ class ApiClient {
 
   async getTickerPrice(ticker: string): Promise<any> {
     return this.request(`/ticker/price/${ticker}`);
+  }
+
+  async getStocksOverview(limit: number = 100, portfolioOnly: boolean = false): Promise<any> {
+    const params = new URLSearchParams({
+      limit: String(limit),
+      portfolio_only: String(portfolioOnly),
+    });
+    return this.request(`/ticker/stocks/overview?${params}`);
+  }
+
+  async getTopPicks(
+    source: 'strategy' | 'ai' = 'strategy',
+    n: number = 10,
+    signal?: 'BUY' | 'SELL' | 'HOLD'
+  ): Promise<any> {
+    const params = new URLSearchParams({
+      source,
+      n: String(n),
+    });
+    if (signal) params.set('signal', signal);
+    return this.request(`/ticker/top-picks?${params}`);
+  }
+
+  async getAdvisorOpenBuyList(n: number = 10, budget: number = 40000): Promise<any> {
+    const params = new URLSearchParams({
+      n: String(n),
+      budget: String(budget),
+    });
+    return this.request(`/ticker/advisor/open-buy-list?${params}`);
+  }
+
+  async getStockDetail(ticker: string): Promise<any> {
+    return this.request(`/ticker/stock-detail/${encodeURIComponent(ticker)}`);
+  }
+
+  async getExpectedVsActual(snapshotDate?: string): Promise<any> {
+    const params = new URLSearchParams();
+    if (snapshotDate) params.set('snapshot_date', snapshotDate);
+    const query = params.toString();
+    return this.request(`/ticker/expected-vs-actual${query ? `?${query}` : ''}`);
+  }
+
+  async captureTodaySnapshot(limit: number = 150, portfolioOnly: boolean = false): Promise<any> {
+    const params = new URLSearchParams({
+      limit: String(limit),
+      portfolio_only: String(portfolioOnly),
+    });
+    return this.request(`/ticker/snapshot/today?${params}`, { method: 'POST' });
+  }
+
+  async getTodaySnapshot(): Promise<any> {
+    return this.request('/ticker/snapshot/today');
   }
 
   async getMarketStatus(): Promise<any> {

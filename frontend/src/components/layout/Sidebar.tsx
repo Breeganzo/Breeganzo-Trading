@@ -8,6 +8,10 @@ import {
   BookOpen,
   ArrowLeftRight,
   Settings,
+  CandlestickChart,
+  Layers,
+  BrainCircuit,
+  Scale,
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react';
@@ -17,6 +21,10 @@ import { cn } from '@/lib/utils';
 // ── Navigation items ──
 const NAV_ITEMS = [
   { id: 'portfolio', label: 'Portfolio', icon: BarChart3 },
+  { id: 'stocks', label: 'Stocks', icon: CandlestickChart },
+  { id: 'top_picks', label: 'Top Picks', icon: Layers },
+  { id: 'advisor', label: 'Strategy Advisor', icon: BrainCircuit },
+  { id: 'expected_actual', label: 'Expected vs Actual', icon: Scale },
   { id: 'risk', label: 'Risk Analytics', icon: Shield },
   { id: 'rankings', label: 'Rankings', icon: TrendingUp },
   { id: 'orders', label: 'Order Book', icon: BookOpen },

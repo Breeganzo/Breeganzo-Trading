@@ -260,6 +260,130 @@ export interface MarketStatus {
   current_time: string;
 }
 
+export interface StocksOverviewItem {
+  ticker: string;
+  base_ticker: string;
+  sector_bucket: string;
+  current_price: number;
+  open_price: number | null;
+  prev_close: number | null;
+  high: number | null;
+  low: number | null;
+  change_pct: number | null;
+  volume: number;
+  signal: 'BUY' | 'SELL' | 'HOLD';
+  expected_return: number | null;
+  ranking_score: number | null;
+  ranking_position: number | null;
+  ranking_computed_at: string | null;
+  source: string;
+  captured_at: string;
+}
+
+export interface TopPickItem {
+  ticker: string;
+  base_ticker: string;
+  sector_bucket: string;
+  current_price: number;
+  strategy_return_pct: number;
+  strategy_price: number;
+  ai_return_pct: number | null;
+  ai_price: number | null;
+  signal_strategy: 'BUY' | 'SELL' | 'HOLD';
+  signal_ai: 'BUY' | 'SELL' | 'HOLD' | null;
+  confidence: number;
+  agreement: number;
+  score: number;
+  entry_range_low: number | null;
+  entry_range_high: number | null;
+  ranking_position: number | null;
+  ranking_computed_at: string | null;
+  captured_at: string | null;
+  source: 'strategy' | 'ai';
+}
+
+export interface TopPicksResponse {
+  source: 'strategy' | 'ai';
+  signal_filter: 'BUY' | 'SELL' | 'HOLD' | null;
+  count: number;
+  captured_at: string;
+  items: TopPickItem[];
+}
+
+export interface AdvisorPick {
+  ticker: string;
+  sector_bucket: string | null;
+  strategy_price_at_open: number;
+  current_price: number;
+  suggested_qty: number;
+  estimated_fee: number;
+  est_trade_cost: number;
+  stop_loss_price: number;
+  target_price: number;
+  risk_reward: number;
+  entry_range_low: number | null;
+  entry_range_high: number | null;
+  confidence: number | null;
+  agreement: number | null;
+  score: number | null;
+  source: 'strategy';
+}
+
+export interface AdvisorOpenBuyListResponse {
+  captured_at: string;
+  source: 'strategy';
+  budget: number;
+  estimated_total_cost: number;
+  estimated_total_fees: number;
+  remaining_cash: number;
+  picks: AdvisorPick[];
+}
+
+export interface StockDetailResponse {
+  ticker: string;
+  current_price: number;
+  open_price: number | null;
+  prev_close: number | null;
+  day_high: number | null;
+  day_low: number | null;
+  volume: number;
+  sector_bucket: string;
+  strategy_price_at_open: number;
+  strategy_return_pct: number;
+  ai_predicted_price: number;
+  ai_return_pct: number;
+  strategy_signal: 'BUY' | 'SELL' | 'HOLD';
+  ai_signal: 'BUY' | 'SELL' | 'HOLD';
+  entry_range_low: number | null;
+  entry_range_high: number | null;
+  confidence: number;
+  agreement: number;
+  indicators: Record<string, number | string>;
+  sentiment_score: number;
+  captured_at: string;
+}
+
+export interface ExpectedActualRow {
+  ticker: string;
+  open_price: number;
+  current_price: number;
+  close_price: number;
+  strategy_price_at_open: number;
+  ai_price_at_open: number;
+  strategy_return_pct: number;
+  ai_return_pct: number;
+  actual_return_pct: number;
+  alpha_pct: number;
+  direction_comparison: boolean;
+  captured_at: string | null;
+}
+
+export interface ExpectedActualResponse {
+  snapshot_date: string;
+  count: number;
+  items: ExpectedActualRow[];
+}
+
 // ── System ──
 
 export interface SystemHealth {
@@ -268,7 +392,11 @@ export interface SystemHealth {
   redis: string;
   data_feed: string;
   model_last_updated: string | null;
+  rankings_last_computed?: string | null;
+  model_freshness?: string | null;
   correlation_last_calculated: string | null;
+  correlation_last_computed?: string | null;
+  correlation_freshness?: string | null;
   uptime_seconds: number;
   version: string;
 }

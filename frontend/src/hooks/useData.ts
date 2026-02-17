@@ -112,6 +112,65 @@ export function useDailyReturns(days: number = 90) {
   });
 }
 
+export function useStocksOverview(limit: number = 120, portfolioOnly: boolean = false) {
+  return useSWR(
+    `stocks-overview-${limit}-${portfolioOnly}`,
+    () => api.getStocksOverview(limit, portfolioOnly),
+    {
+      refreshInterval: 15000,
+      revalidateOnFocus: false,
+    }
+  );
+}
+
+export function useTopPicks(
+  source: 'strategy' | 'ai' = 'strategy',
+  signal?: 'BUY' | 'SELL' | 'HOLD',
+  n: number = 10
+) {
+  return useSWR(
+    `top-picks-${source}-${signal ?? 'all'}-${n}`,
+    () => api.getTopPicks(source, n, signal),
+    {
+      refreshInterval: 20000,
+      revalidateOnFocus: false,
+    }
+  );
+}
+
+export function useAdvisorOpenBuyList(n: number = 10, budget: number = 40000) {
+  return useSWR(
+    `advisor-open-buy-list-${n}-${budget}`,
+    () => api.getAdvisorOpenBuyList(n, budget),
+    {
+      refreshInterval: 20000,
+      revalidateOnFocus: false,
+    }
+  );
+}
+
+export function useStockDetail(ticker: string | null) {
+  return useSWR(
+    ticker ? `stock-detail-${ticker}` : null,
+    () => api.getStockDetail(String(ticker)),
+    {
+      refreshInterval: 10000,
+      revalidateOnFocus: false,
+    }
+  );
+}
+
+export function useExpectedVsActual(snapshotDate?: string) {
+  return useSWR(
+    `expected-vs-actual-${snapshotDate ?? 'today'}`,
+    () => api.getExpectedVsActual(snapshotDate),
+    {
+      refreshInterval: 30000,
+      revalidateOnFocus: false,
+    }
+  );
+}
+
 // ── WebSocket / Polling Ticker ──
 
 export function useTickerStream() {
@@ -121,20 +180,27 @@ export function useTickerStream() {
   const reconnectRef = useRef<NodeJS.Timeout | null>(null);
   const mountedRef = useRef(true);
 
+  const fetchTickerSnapshot = useCallback(async () => {
+    if (!mountedRef.current) return;
+    try {
+      const prices: TickerData[] = await api.getTickerPrices();
+      const mapped: Record<string, TickerData> = {};
+      prices.forEach((p: TickerData) => {
+        mapped[p.ticker] = p;
+      });
+      setTickerData(mapped);
+    } catch {
+      // silent fail; next poll/ws event will retry
+    }
+  }, [setTickerData]);
+
   const startPolling = useCallback(() => {
     if (pollRef.current) return;
+    void fetchTickerSnapshot(); // immediate snapshot instead of waiting first interval
     pollRef.current = setInterval(async () => {
-      if (!mountedRef.current) return;
-      try {
-        const prices: TickerData[] = await api.getTickerPrices();
-        const mapped: Record<string, TickerData> = {};
-        prices.forEach((p: TickerData) => { mapped[p.ticker] = p; });
-        setTickerData(mapped);
-      } catch {
-        // silent fail on polling
-      }
+      await fetchTickerSnapshot();
     }, 5000);
-  }, [setTickerData]);
+  }, [fetchTickerSnapshot]);
 
   const connectWs = useCallback(() => {
     const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/api/v1/ticker/ws';

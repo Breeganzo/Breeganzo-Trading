@@ -14,7 +14,12 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     API_PREFIX: str = "/api/v1"
     SECRET_KEY: str = "CHANGE_ME_IN_PRODUCTION"
-    ALLOWED_ORIGINS: str = "http://localhost:3000,https://quantdesk.vercel.app"
+    ALLOWED_ORIGINS: str = (
+        "http://localhost:3000,"
+        "https://quantdesk.vercel.app,"
+        "https://quantdesk-pro.vercel.app,"
+        "https://frontend-ten-alpha-49.vercel.app"
+    )
 
     # Database - Supabase
     DATABASE_URL: str = ""
@@ -38,7 +43,23 @@ class Settings(BaseSettings):
 
     # Groq AI
     GROQ_API_KEY: str = ""
+    GROQ_API_KEY_2: str = ""
+    GROQ_API_KEY_3: str = ""
+    GROQ_API_KEYS: str = ""
+    GROQ_KEY_ROTATION_ENABLED: bool = False
+    GROQ_KEY_COOLDOWN_SEC: int = 300
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
+
+    # Trade email notifications
+    TRADE_EMAIL_ENABLED: bool = False
+    TRADE_EMAIL_TO: str = "anthonybreeganzo02@gmail.com"
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = ""
+    SMTP_STARTTLS: bool = True
+    SMTP_USE_SSL: bool = False
 
     # Market Data
     TICKER_UPDATE_INTERVAL: int = 5  # seconds
@@ -75,6 +96,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "ignore"
 
 
 @lru_cache()

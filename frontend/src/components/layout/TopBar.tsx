@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo } from 'react';
+import Link from 'next/link';
 import { Menu } from 'lucide-react';
 import { useStore } from '@/lib/store';
 import { formatCurrency, pnlColor, regimeColor, regimeLabel } from '@/lib/utils';
@@ -80,6 +81,20 @@ export default function TopBar() {
           <span className="hidden md:inline text-text-secondary text-xs font-medium tracking-wide">
             QuantDesk Pro
           </span>
+        </div>
+        <div className="hidden xl:flex items-center gap-1 ml-2">
+          <Link href="/stocks" className="text-label text-text-muted hover:text-text-primary px-2 py-1 rounded hover:bg-bg-hover">
+            Stocks
+          </Link>
+          <Link href="/top-picks" className="text-label text-text-muted hover:text-text-primary px-2 py-1 rounded hover:bg-bg-hover">
+            Top Picks
+          </Link>
+          <Link href="/advisor" className="text-label text-text-muted hover:text-text-primary px-2 py-1 rounded hover:bg-bg-hover">
+            Advisor
+          </Link>
+          <Link href="/expected-vs-actual" className="text-label text-text-muted hover:text-text-primary px-2 py-1 rounded hover:bg-bg-hover">
+            Expected vs Actual
+          </Link>
         </div>
       </div>
 
