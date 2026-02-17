@@ -168,6 +168,19 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 PREDICTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
 SIMULATION_DEFAULT_CASH = float(os.environ.get("SIMULATION_DEFAULT_CASH", "40000"))
 SIMULATION_DEFAULT_CASH = max(1000.0, SIMULATION_DEFAULT_CASH)
+AUTO_SIMULATION_ENABLED = os.environ.get("AUTO_SIMULATION_ENABLED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+AUTO_SIMULATION_AUTO_BUY = os.environ.get(
+    "AUTO_SIMULATION_AUTO_BUY",
+    "true",
+).lower() in ("1", "true", "yes")
+AUTO_SIMULATION_INTERVAL_SEC = max(
+    5,
+    int(os.environ.get("AUTO_SIMULATION_INTERVAL_SEC", "30")),
+)
 
 # Trading-desk risk management defaults (simulation only).
 RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE", "0.01"))
@@ -976,6 +989,212 @@ def _next_recommended_sell_time(
     return (now + timedelta(minutes=45)).isoformat()
 
 
+def _run_sim_auto_check(
+    state: dict,
+    *,
+    auto_buy_enabled: bool,
+    now_iso: str | None = None,
+    source: str = "strategy_simulation",
+) -> dict:
+    """
+    Execute one simulation auto-check cycle:
+      - auto-sell on stop-loss / target hit
+      - optional auto-buy on strategy-entry threshold
+    """
+    state = dict(state or {})
+    now_iso = str(now_iso or datetime.now(IST).isoformat())
+    state["daily_loss_tracker"] = _daily_tracker_for_state(state, now_ts=now_iso)
+
+    open_positions = dict(state.get("open_positions", {}))
+    state["open_positions"] = dict(open_positions)
+    tickers = sorted(open_positions.keys())
+    live = _get_live_prices_batch(tickers) if tickers else {}
+    events = []
+    trailing_updates = []
+
+    for ticker in tickers:
+        pos = dict(open_positions.get(ticker, {}))
+        qty = _safe_float(pos.get("quantity"))
+        if qty <= 0:
+            continue
+        cp = _safe_float(live.get(ticker, {}).get("price"))
+        if cp <= 0:
+            continue
+        stop_loss = _safe_float(pos.get("stop_loss_price"))
+        target = _safe_float(pos.get("target_price"))
+        entry = _safe_float(pos.get("avg_entry_price"))
+        if entry > 0:
+            highest = max(_safe_float(pos.get("highest_price")), cp, entry)
+            pos["highest_price"] = round(highest, 2)
+            initial_dist = max(entry - stop_loss, entry * 0.01)
+            # Optional trailing stop: activate once move >= 1.5x initial stop distance.
+            if initial_dist > 0 and cp >= entry + 1.5 * initial_dist:
+                proposed_trail = _round_to_tick(highest * 0.985)
+                prev_trail = _safe_float(pos.get("trail_stop_price"))
+                new_trail = max(proposed_trail, prev_trail, stop_loss)
+                if new_trail > stop_loss:
+                    pos["trail_stop_price"] = round(new_trail, 2)
+                    pos["stop_loss_price"] = round(new_trail, 2)
+                    stop_loss = float(new_trail)
+                    trailing_updates.append(
+                        {
+                            "ticker": ticker,
+                            "new_stop_loss": round(new_trail, 2),
+                            "price": round(cp, 2),
+                        }
+                    )
+            open_positions[ticker] = pos
+            state.setdefault("open_positions", {})[ticker] = pos
+        reason = None
+        if stop_loss > 0 and cp <= stop_loss:
+            reason = "auto_stop_loss"
+        elif target > 0 and cp >= target:
+            reason = "auto_target_hit"
+        if not reason:
+            continue
+        state, event, err = _execute_sim_sell(
+            state,
+            ticker=ticker,
+            quantity=qty,
+            price=cp,
+            reason=reason,
+            timestamp=now_iso,
+        )
+        if err:
+            log.warning("AUTO_CHECK skipped %s: %s", ticker, err)
+            continue
+        if event:
+            events.append(event)
+            _log_simulated_trade(
+                {
+                    **event,
+                    "source": source,
+                    "auto": True,
+                }
+            )
+
+    auto_buy_events = []
+    tracker = _daily_tracker_for_state(state, now_ts=now_iso)
+    if (
+        auto_buy_enabled
+        and not tracker.get("trading_paused")
+        and models_loaded
+        and predictor is not None
+    ):
+        try:
+            snapshot = _get_prediction_snapshot(use_latest_stored=True)
+            snap_rows = snapshot.get("items", []) if isinstance(snapshot, dict) else []
+            candidates = []
+            for row in snap_rows:
+                if not isinstance(row, dict):
+                    continue
+                ticker = str(row.get("ticker", "")).upper()
+                strategy_price = _safe_float(
+                    row.get("strategy_price_at_open") or row.get("predicted_price")
+                )
+                pred_ret_dec = _safe_float(row.get("predicted_return_decimal"))
+                if not ticker or strategy_price <= 0:
+                    continue
+                if pred_ret_dec <= 0:
+                    continue
+                candidates.append(
+                    {
+                        "ticker": ticker,
+                        "target_price": strategy_price,
+                        "predicted_price": strategy_price,
+                        "predicted_return": pred_ret_dec * 100.0,
+                        "confidence": _safe_float(row.get("confidence")),
+                        "atr_pct": abs(_safe_float(row.get("atr_pct"))),
+                        "risk_reward": _safe_float(row.get("risk_reward")),
+                        "sentiment_articles": 0,
+                        "sentiment_weight_used": 0,
+                    }
+                )
+            candidates.sort(
+                key=lambda r: (
+                    _safe_float(r.get("confidence")),
+                    _safe_float(r.get("predicted_return")),
+                ),
+                reverse=True,
+            )
+            candidates = candidates[:10]
+            cand_tickers = [
+                str(r.get("ticker", "")).upper()
+                for r in candidates
+                if str(r.get("ticker", "")).strip()
+            ]
+            cand_live = _get_live_prices_batch(cand_tickers) if cand_tickers else {}
+            for row in candidates:
+                ticker = str(row.get("ticker", "")).upper()
+                if not ticker or ticker in state.get("open_positions", {}):
+                    continue
+                cp = _safe_float(cand_live.get(ticker, {}).get("price"))
+                strategy_entry = _safe_float(
+                    row.get("target_price") or row.get("predicted_price")
+                )
+                if cp <= 0 or strategy_entry <= 0:
+                    continue
+                trigger = cp <= strategy_entry * 1.002
+                if not trigger:
+                    continue
+                conf = _safe_float(row.get("confidence"))
+                atr_pct = abs(_safe_float(row.get("atr_pct")))
+                uses_sentiment = (
+                    int(_safe_float(row.get("sentiment_articles"))) > 0
+                    and _safe_float(row.get("sentiment_weight_used")) > 0
+                )
+                sl_pct, skip = _compute_dynamic_stop_loss_pct(
+                    confidence_pct=conf,
+                    atr_pct=atr_pct,
+                    uses_sentiment=uses_sentiment,
+                )
+                if skip:
+                    continue
+                qty_risk = _position_size_for_risk(
+                    account_balance=_safe_float(state.get("cash")),
+                    entry_price=cp,
+                    stop_loss_pct=sl_pct,
+                )
+                if qty_risk <= 0:
+                    continue
+                rr = max(1.0, _safe_float(row.get("risk_reward")) or 1.5)
+                stop_loss = _round_to_tick(cp * (1 - sl_pct))
+                target = _round_to_tick(cp + max((cp - stop_loss) * rr, cp * 0.01))
+                state, buy_event, buy_err = _execute_sim_buy(
+                    state,
+                    ticker=ticker,
+                    quantity=qty_risk,
+                    price=cp,
+                    strategy_entry_price=strategy_entry,
+                    stop_loss_price=stop_loss,
+                    target_price=target,
+                    risk_reward=rr,
+                    trade_type="equity_delivery",
+                    timestamp=now_iso,
+                    reason="auto_strategy_entry",
+                )
+                if buy_err or not buy_event:
+                    continue
+                auto_buy_events.append(buy_event)
+                _log_simulated_trade(
+                    {
+                        **buy_event,
+                        "source": source,
+                        "auto": True,
+                    }
+                )
+        except Exception as exc:
+            log.warning("AUTO_CHECK auto-buy stage failed: %s", exc)
+
+    return {
+        "state": state,
+        "events": events,
+        "auto_buy_events": auto_buy_events,
+        "trailing_updates": trailing_updates,
+        "triggered_count": len(events) + len(auto_buy_events),
+    }
+
+
 def _execute_sim_sell(
     state: dict,
     ticker: str,
@@ -1735,6 +1954,12 @@ def api_status():
             },
             "premarket_snapshot": premarket_meta,
             "groq": get_groq_system_status(),
+            "simulation_automation": {
+                "enabled": AUTO_SIMULATION_ENABLED,
+                "auto_buy_enabled": AUTO_SIMULATION_AUTO_BUY,
+                "interval_sec": AUTO_SIMULATION_INTERVAL_SEC,
+                "trade_window": "09:30-15:30 IST (weekdays)",
+            },
         }
     )
 
@@ -2346,191 +2571,22 @@ def api_simulate_trade():
         )
 
     if action == "AUTO_CHECK":
-        open_positions = dict(state.get("open_positions", {}))
-        state["open_positions"] = dict(open_positions)
-        tickers = sorted(open_positions.keys())
-        live = _get_live_prices_batch(tickers) if tickers else {}
-        events = []
-        trailing_updates = []
-        for ticker in tickers:
-            pos = dict(open_positions.get(ticker, {}))
-            qty = _safe_float(pos.get("quantity"))
-            if qty <= 0:
-                continue
-            cp = _safe_float(live.get(ticker, {}).get("price"))
-            if cp <= 0:
-                continue
-            stop_loss = _safe_float(pos.get("stop_loss_price"))
-            target = _safe_float(pos.get("target_price"))
-            entry = _safe_float(pos.get("avg_entry_price"))
-            if entry > 0:
-                highest = max(_safe_float(pos.get("highest_price")), cp, entry)
-                pos["highest_price"] = round(highest, 2)
-                initial_dist = max(entry - stop_loss, entry * 0.01)
-                # Optional trailing stop: activate once move >= 1.5x initial stop distance.
-                if initial_dist > 0 and cp >= entry + 1.5 * initial_dist:
-                    proposed_trail = _round_to_tick(highest * 0.985)
-                    prev_trail = _safe_float(pos.get("trail_stop_price"))
-                    new_trail = max(proposed_trail, prev_trail, stop_loss)
-                    if new_trail > stop_loss:
-                        pos["trail_stop_price"] = round(new_trail, 2)
-                        pos["stop_loss_price"] = round(new_trail, 2)
-                        stop_loss = float(new_trail)
-                        trailing_updates.append(
-                            {
-                                "ticker": ticker,
-                                "new_stop_loss": round(new_trail, 2),
-                                "price": round(cp, 2),
-                            }
-                        )
-                open_positions[ticker] = pos
-                state.setdefault("open_positions", {})[ticker] = pos
-            reason = None
-            if stop_loss > 0 and cp <= stop_loss:
-                reason = "auto_stop_loss"
-            elif target > 0 and cp >= target:
-                reason = "auto_target_hit"
-            if not reason:
-                continue
-            state, event, err = _execute_sim_sell(
-                state,
-                ticker=ticker,
-                quantity=qty,
-                price=cp,
-                reason=reason,
-                timestamp=now_iso,
-            )
-            if err:
-                log.warning("AUTO_CHECK skipped %s: %s", ticker, err)
-                continue
-            if event:
-                events.append(event)
-                _log_simulated_trade(
-                    {
-                        **event,
-                        "source": "strategy_simulation",
-                        "auto": True,
-                    }
-                )
-        auto_buy_events = []
-        auto_buy_enabled = bool(payload.get("auto_buy", False))
-        tracker = _daily_tracker_for_state(state, now_ts=now_iso)
-        if (
-            auto_buy_enabled
-            and not tracker.get("trading_paused")
-            and models_loaded
-            and predictor is not None
-        ):
-            try:
-                snapshot = _get_prediction_snapshot(use_latest_stored=True)
-                snap_rows = (
-                    snapshot.get("items", []) if isinstance(snapshot, dict) else []
-                )
-                candidates = []
-                for row in snap_rows:
-                    if not isinstance(row, dict):
-                        continue
-                    ticker = str(row.get("ticker", "")).upper()
-                    strategy_price = _safe_float(
-                        row.get("strategy_price_at_open") or row.get("predicted_price")
-                    )
-                    pred_ret_dec = _safe_float(row.get("predicted_return_decimal"))
-                    if not ticker or strategy_price <= 0:
-                        continue
-                    if pred_ret_dec <= 0:
-                        continue
-                    candidates.append(
-                        {
-                            "ticker": ticker,
-                            "target_price": strategy_price,
-                            "predicted_price": strategy_price,
-                            "predicted_return": pred_ret_dec * 100.0,
-                            "confidence": _safe_float(row.get("confidence")),
-                            "atr_pct": abs(_safe_float(row.get("atr_pct"))),
-                            "risk_reward": _safe_float(row.get("risk_reward")),
-                            "sentiment_articles": 0,
-                            "sentiment_weight_used": 0,
-                        }
-                    )
-                candidates.sort(
-                    key=lambda r: (
-                        _safe_float(r.get("confidence")),
-                        _safe_float(r.get("predicted_return")),
-                    ),
-                    reverse=True,
-                )
-                candidates = candidates[:10]
-                cand_tickers = [
-                    str(r.get("ticker", "")).upper()
-                    for r in candidates
-                    if str(r.get("ticker", "")).strip()
-                ]
-                cand_live = _get_live_prices_batch(cand_tickers) if cand_tickers else {}
-                for row in candidates:
-                    ticker = str(row.get("ticker", "")).upper()
-                    if not ticker or ticker in state.get("open_positions", {}):
-                        continue
-                    cp = _safe_float(cand_live.get(ticker, {}).get("price"))
-                    strategy_entry = _safe_float(
-                        row.get("target_price") or row.get("predicted_price")
-                    )
-                    if cp <= 0 or strategy_entry <= 0:
-                        continue
-                    trigger = cp <= strategy_entry * 1.002
-                    if not trigger:
-                        continue
-                    conf = _safe_float(row.get("confidence"))
-                    atr_pct = abs(_safe_float(row.get("atr_pct")))
-                    uses_sentiment = (
-                        int(_safe_float(row.get("sentiment_articles"))) > 0
-                        and _safe_float(row.get("sentiment_weight_used")) > 0
-                    )
-                    sl_pct, skip = _compute_dynamic_stop_loss_pct(
-                        confidence_pct=conf,
-                        atr_pct=atr_pct,
-                        uses_sentiment=uses_sentiment,
-                    )
-                    if skip:
-                        continue
-                    qty_risk = _position_size_for_risk(
-                        account_balance=_safe_float(state.get("cash")),
-                        entry_price=cp,
-                        stop_loss_pct=sl_pct,
-                    )
-                    if qty_risk <= 0:
-                        continue
-                    rr = max(1.0, _safe_float(row.get("risk_reward")) or 1.5)
-                    stop_loss = _round_to_tick(cp * (1 - sl_pct))
-                    target = _round_to_tick(cp + max((cp - stop_loss) * rr, cp * 0.01))
-                    state, buy_event, buy_err = _execute_sim_buy(
-                        state,
-                        ticker=ticker,
-                        quantity=qty_risk,
-                        price=cp,
-                        strategy_entry_price=strategy_entry,
-                        stop_loss_price=stop_loss,
-                        target_price=target,
-                        risk_reward=rr,
-                        trade_type="equity_delivery",
-                        timestamp=now_iso,
-                        reason="auto_strategy_entry",
-                    )
-                    if buy_err or not buy_event:
-                        continue
-                    auto_buy_events.append(buy_event)
-                    _log_simulated_trade({**buy_event, "auto": True})
-            except Exception as exc:
-                log.warning("AUTO_CHECK auto-buy stage failed: %s", exc)
-
+        result = _run_sim_auto_check(
+            state,
+            auto_buy_enabled=bool(payload.get("auto_buy", False)),
+            now_iso=now_iso,
+            source="strategy_simulation",
+        )
+        state = result["state"]
         _write_portfolio_sim_state(state)
         return jsonify(
             {
                 "ok": True,
                 "action": "AUTO_CHECK",
-                "triggered_count": len(events) + len(auto_buy_events),
-                "events": events,
-                "auto_buy_events": auto_buy_events,
-                "trailing_updates": trailing_updates,
+                "triggered_count": result["triggered_count"],
+                "events": result["events"],
+                "auto_buy_events": result["auto_buy_events"],
+                "trailing_updates": result["trailing_updates"],
                 "state": state,
                 "source": "strategy_simulation",
             }
@@ -4954,6 +5010,39 @@ def _scheduled_precompute_loop():
         time.sleep(12)
 
 
+def _auto_simulation_background_loop():
+    """
+    Background auto-simulation loop.
+    Runs AUTO_CHECK logic during market trade window (09:30-15:30 IST).
+    """
+    while True:
+        try:
+            if not AUTO_SIMULATION_ENABLED:
+                time.sleep(10)
+                continue
+            if not _is_market_trade_window():
+                time.sleep(min(30, AUTO_SIMULATION_INTERVAL_SEC))
+                continue
+
+            state = _read_portfolio_sim_state()
+            result = _run_sim_auto_check(
+                state,
+                auto_buy_enabled=AUTO_SIMULATION_AUTO_BUY,
+                source="strategy_auto_loop",
+            )
+            _write_portfolio_sim_state(result["state"])
+            if result["triggered_count"] > 0 or result["trailing_updates"]:
+                log.info(
+                    "Auto simulation: sells=%s buys=%s trailing_updates=%s",
+                    len(result["events"]),
+                    len(result["auto_buy_events"]),
+                    len(result["trailing_updates"]),
+                )
+        except Exception as exc:
+            log.warning("Auto simulation loop error: %s", exc)
+        time.sleep(AUTO_SIMULATION_INTERVAL_SEC)
+
+
 @app.route("/api/daily-analysis")
 def api_daily_analysis():
     """
@@ -6630,6 +6719,18 @@ if __name__ == "__main__":
         PRECOMPUTE_OPEN_MINUTE,
         PRECOMPUTE_CLOSE_HOUR,
         PRECOMPUTE_CLOSE_MINUTE,
+    )
+
+    auto_sim_thread = threading.Thread(
+        target=_auto_simulation_background_loop,
+        daemon=True,
+    )
+    auto_sim_thread.start()
+    log.info(
+        "Auto simulation thread started (enabled=%s, auto_buy=%s, interval=%ss)",
+        AUTO_SIMULATION_ENABLED,
+        AUTO_SIMULATION_AUTO_BUY,
+        AUTO_SIMULATION_INTERVAL_SEC,
     )
 
     port = int(os.environ.get("FLASK_PORT", 5001))
