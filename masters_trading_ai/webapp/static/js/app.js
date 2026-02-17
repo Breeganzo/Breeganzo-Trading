@@ -800,7 +800,6 @@ function setTopPickFilter(filterKey) {
     }
     renderTopPicks();
     renderPremarketOutlookTable();
-    loadCurrentSecondSnapshot();
 }
 
 function togglePremarketStored(checked) {
@@ -941,7 +940,6 @@ async function loadPremarketOutlook() {
             }
         }
         renderPremarketOutlookTable();
-        loadCurrentSecondSnapshot();
     } catch (e) {
         table.innerHTML = `<tr><td colspan="6" class="muted-text">Premarket fetch failed: ${e.message}</td></tr>`;
         if (header) header.textContent = 'Premarket snapshot unavailable';
@@ -983,77 +981,6 @@ function renderPremarketOutlookTable() {
 function selectPremarketTicker(ticker) {
     highlightedPremarketTicker = ticker;
     renderPremarketOutlookTable();
-    loadCurrentSecondSnapshot();
-}
-
-async function loadCurrentSecondSnapshot() {
-    const body = document.getElementById('current-second-body');
-    const label = document.getElementById('current-second-ticker');
-    if (!body) return;
-
-    const fallbackTicker = (groupedTopPicks[topPickFilter] || [])[0]?.ticker;
-    const ticker = highlightedPremarketTicker || fallbackTicker;
-    if (!ticker) {
-        body.innerHTML = '<tr><td colspan="4" class="muted-text">Select a ticker from the premarket table.</td></tr>';
-        if (label) label.textContent = '—';
-        return;
-    }
-
-    body.innerHTML = '<tr><td colspan="4" class="muted-text">Loading live snapshot...</td></tr>';
-    if (label) label.textContent = ticker;
-    try {
-        const strategyUrl = `/api/strategy-price/${encodeURIComponent(ticker)}?use_latest_stored=${useLatestStoredPredictions ? 'true' : 'false'}`;
-        const trackerUrl = `/api/price-tracker/${encodeURIComponent(ticker)}`;
-        const priceUrl = `/api/prices?tickers=${encodeURIComponent(ticker)}`;
-        const [strategyRes, trackerRes, priceRes] = await Promise.all([
-            fetch(strategyUrl),
-            fetch(trackerUrl),
-            fetch(priceUrl),
-        ]);
-        const strategyData = await strategyRes.json();
-        const trackerData = trackerRes.ok ? await trackerRes.json() : {};
-        const priceData = await priceRes.json();
-        if (!strategyRes.ok || strategyData.error) {
-            body.innerHTML = `<tr><td colspan="4" class="muted-text">${strategyData.error || 'Strategy snapshot unavailable'}</td></tr>`;
-            return;
-        }
-
-        const current = Number(
-            priceData?.[ticker]?.price
-            || trackerData.current_price
-            || strategyData.current_price
-            || 0
-        );
-        const strategyNow = Number(strategyData.strategy_price || 0);
-        const aiNow = Number(
-            trackerData.current_ai_predicted_price
-            || trackerData.ai_predicted_price
-            || 0
-        );
-        const strategyDir = strategyNow > current ? 'UP' : strategyNow < current ? 'DOWN' : 'FLAT';
-        const aiAvailable = aiNow > 0;
-        const aiDir = aiAvailable ? (aiNow > current ? 'UP' : aiNow < current ? 'DOWN' : 'FLAT') : 'N/A';
-        const aligned = aiAvailable ? strategyDir === aiDir : null;
-        const badgeClass = aligned === null ? '' : (aligned ? 'correct' : 'wrong');
-        const badgeText = aligned === null ? `${strategyDir}/N/A` : `${strategyDir}/${aiDir}`;
-        const strategyTime = formatIstTimestamp(strategyData.strategy_generated_at);
-        const aiTime = formatIstTimestamp(
-            trackerData.current_ai_predicted_at
-            || trackerData.ai_display_predicted_at
-            || trackerData.ai_predicted_at_open
-        );
-
-        body.innerHTML = `
-            <tr>
-                <td>${formatPrice(current)}</td>
-                <td>${strategyNow > 0 ? `${formatPrice(strategyNow)}<br><span class="muted-text">${strategyTime}</span>` : '—'}</td>
-                <td>${aiAvailable ? `${formatPrice(aiNow)}<br><span class="muted-text">${aiTime}</span>` : '—'}</td>
-                <td><span class="direction-badge ${badgeClass}">${badgeText}</span></td>
-            </tr>
-        `;
-    } catch (e) {
-        body.innerHTML = `<tr><td colspan="4" class="muted-text">Snapshot fetch failed: ${e.message}</td></tr>`;
-    }
 }
 
 // ── Expected vs Actual ────────────────────────────

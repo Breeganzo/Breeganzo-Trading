@@ -4,9 +4,15 @@ from webapp import server
 def test_simulated_trade_flow_stop_loss_autosell(monkeypatch, tmp_path):
     sim_file = tmp_path / "portfolio_sim.json"
     sim_log = tmp_path / "simulated_trades.jsonl"
+    sim_csv = tmp_path / "simulated_trades.csv"
+    sim_xlsx = tmp_path / "simulated_trades.xlsx"
+    report_dir = tmp_path / "daily_reports"
 
     monkeypatch.setattr(server, "PORTFOLIO_SIM_FILE", sim_file)
     monkeypatch.setattr(server, "SIMULATED_TRADE_LOG_FILE", sim_log)
+    monkeypatch.setattr(server, "SIMULATED_TRADE_CSV_FILE", sim_csv)
+    monkeypatch.setattr(server, "SIMULATED_TRADE_EXCEL_FILE", sim_xlsx)
+    monkeypatch.setattr(server, "DAILY_TRADE_REPORT_DIR", report_dir)
     monkeypatch.setattr(server, "_is_tradeable_ticker", lambda ticker: True)
     monkeypatch.setattr(
         server,
@@ -60,14 +66,26 @@ def test_simulated_trade_flow_stop_loss_autosell(monkeypatch, tmp_path):
         assert summary.status_code == 200
         payload = summary.get_json()
         assert payload["open_positions_count"] == 0
+        tx = client.get("/api/simulate/transactions-summary")
+        assert tx.status_code == 200
+        tx_data = tx.get_json()
+        assert tx_data["total_transactions"] >= 2
+        assert tx_data["buy_transactions"] >= 1
+        assert tx_data["sell_transactions"] >= 1
 
 
 def test_simulated_trade_rejects_outside_market_hours(monkeypatch, tmp_path):
     sim_file = tmp_path / "portfolio_sim.json"
     sim_log = tmp_path / "simulated_trades.jsonl"
+    sim_csv = tmp_path / "simulated_trades.csv"
+    sim_xlsx = tmp_path / "simulated_trades.xlsx"
+    report_dir = tmp_path / "daily_reports"
 
     monkeypatch.setattr(server, "PORTFOLIO_SIM_FILE", sim_file)
     monkeypatch.setattr(server, "SIMULATED_TRADE_LOG_FILE", sim_log)
+    monkeypatch.setattr(server, "SIMULATED_TRADE_CSV_FILE", sim_csv)
+    monkeypatch.setattr(server, "SIMULATED_TRADE_EXCEL_FILE", sim_xlsx)
+    monkeypatch.setattr(server, "DAILY_TRADE_REPORT_DIR", report_dir)
     monkeypatch.setattr(server, "_is_tradeable_ticker", lambda ticker: True)
     monkeypatch.setattr(server, "_is_market_trade_window", lambda *_: False)
 
@@ -89,3 +107,9 @@ def test_simulated_trade_rejects_outside_market_hours(monkeypatch, tmp_path):
         assert buy.status_code == 403
         payload = buy.get_json()
         assert "market hours" in payload.get("error", "").lower()
+
+        auto = client.post("/api/simulate/trade", json={"action": "AUTO_CHECK"})
+        assert auto.status_code == 200
+        auto_payload = auto.get_json()
+        assert auto_payload.get("ok") is True
+        assert auto_payload.get("triggered_count") == 0

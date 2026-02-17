@@ -13,8 +13,11 @@ import os
 import json
 import csv
 import time
+import smtplib
 import logging
 import threading
+from email.message import EmailMessage
+from collections import deque
 from uuid import uuid4
 from io import StringIO
 from pathlib import Path
@@ -159,6 +162,9 @@ PORTFOLIO_FILE = CACHE_DIR / "portfolio.json"
 PORTFOLIO_TRADES_FILE = CACHE_DIR / "portfolio_trades.json"
 PORTFOLIO_SIM_FILE = CACHE_DIR / "portfolio_sim.json"
 SIMULATED_TRADE_LOG_FILE = PREDICTION_LOG_DIR / "simulated_trades.jsonl"
+SIMULATED_TRADE_EXCEL_FILE = PREDICTION_LOG_DIR / "simulated_trades.xlsx"
+SIMULATED_TRADE_CSV_FILE = PREDICTION_LOG_DIR / "simulated_trades.csv"
+DAILY_TRADE_REPORT_DIR = PREDICTION_LOG_DIR / "daily_reports"
 DELISTED_TICKERS_FILE = CACHE_DIR / "delisted_tickers.csv"
 PREMARKET_OUTLOOK_FILE = CACHE_DIR / "premarket_outlook.json"
 PREDICTION_SNAPSHOTS_FILE = CACHE_DIR / "prediction_snapshots.json"
@@ -166,6 +172,7 @@ GROQ_FORECAST_CACHE_FILE = CACHE_DIR / "groq_forecasts.json"
 SNAPSHOT_SCHEMA_VERSION = 1
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 PREDICTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
+DAILY_TRADE_REPORT_DIR.mkdir(parents=True, exist_ok=True)
 SIMULATION_DEFAULT_CASH = float(os.environ.get("SIMULATION_DEFAULT_CASH", "40000"))
 SIMULATION_DEFAULT_CASH = max(1000.0, SIMULATION_DEFAULT_CASH)
 AUTO_SIMULATION_ENABLED = os.environ.get("AUTO_SIMULATION_ENABLED", "true").lower() in (
@@ -203,6 +210,43 @@ MEDIUM_CONFIDENCE_THRESHOLD = float(
 )
 AI_STRATEGY_GAP_WARN = float(os.environ.get("AI_STRATEGY_GAP_WARN", "0.10"))
 AI_STRATEGY_GAP_BLOCK = float(os.environ.get("AI_STRATEGY_GAP_BLOCK", "0.50"))
+TRADE_DAILY_REPORT_HOUR_IST = int(
+    np.clip(int(os.environ.get("TRADE_DAILY_REPORT_HOUR_IST", "15")), 0, 23)
+)
+TRADE_DAILY_REPORT_MINUTE_IST = int(
+    np.clip(int(os.environ.get("TRADE_DAILY_REPORT_MINUTE_IST", "45")), 0, 59)
+)
+TRADE_EMAIL_ENABLED = os.environ.get("TRADE_EMAIL_ENABLED", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+TRADE_EMAIL_TO = os.environ.get("TRADE_EMAIL_TO", "anthonybreeganzo07@gmail.com")
+SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
+try:
+    SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+except Exception:
+    SMTP_PORT = 587
+SMTP_USER = os.environ.get("SMTP_USER", "").strip()
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "").strip()
+SMTP_FROM = os.environ.get("SMTP_FROM", "").strip() or SMTP_USER
+SMTP_USE_SSL = os.environ.get("SMTP_USE_SSL", "false").lower() in ("1", "true", "yes")
+SMTP_STARTTLS = os.environ.get("SMTP_STARTTLS", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+SIM_TRADE_CACHE_MAX_ROWS = max(
+    100,
+    int(os.environ.get("SIM_TRADE_CACHE_MAX_ROWS", "5000")),
+)
+
+try:
+    import openpyxl  # noqa: F401
+
+    OPENPYXL_AVAILABLE = True
+except Exception:
+    OPENPYXL_AVAILABLE = False
 
 
 def _load_settings() -> dict:
@@ -323,6 +367,8 @@ _log_lock = threading.Lock()
 _portfolio_lock = threading.Lock()
 _portfolio_sim_lock = threading.Lock()
 _delisted_lock = threading.Lock()
+_sim_trade_cache_lock = threading.Lock()
+_daily_trade_report_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Global state (loaded once at startup)
@@ -342,6 +388,8 @@ _groq_forecast_cache_time: dict[str, float] = {}
 _groq_forecast_cache_lock = threading.Lock()
 _groq_forecast_cache_loaded = False
 GROQ_FORECAST_TTL = 900  # 15m
+_sim_trade_event_cache: deque = deque(maxlen=SIM_TRADE_CACHE_MAX_ROWS)
+_daily_trade_report_dates_done: set[str] = set()
 try:
     _groww_cost_calculator = GrowwCostCalculator()
 except Exception as _cost_exc:
@@ -834,13 +882,275 @@ def _write_portfolio_sim_state(state: dict) -> None:
         PORTFOLIO_SIM_FILE.write_text(json.dumps(payload, indent=2, default=str))
 
 
-def _log_simulated_trade(event: dict) -> None:
+def _normalize_sim_trade_event(event: dict) -> dict:
+    """Normalize one simulated-trade event for log/cache/export consistency."""
+    row = dict(event or {})
+    ts = str(row.get("timestamp") or datetime.now(IST).isoformat())
     try:
-        SIMULATED_TRADE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(SIMULATED_TRADE_LOG_FILE, "a") as f:
-            f.write(json.dumps(event, default=str) + "\n")
+        ts_dt = datetime.fromisoformat(ts)
+        if ts_dt.tzinfo is None:
+            ts_dt = ts_dt.replace(tzinfo=IST)
+        ts_dt = ts_dt.astimezone(IST)
+    except Exception:
+        ts_dt = datetime.now(IST)
+        ts = ts_dt.isoformat()
+
+    action = str(row.get("action", "")).strip().upper()
+    ticker = str(row.get("ticker", "")).strip().upper()
+    qty = _safe_float(row.get("quantity"))
+    price = _safe_float(row.get("price"))
+    notional = _safe_float(row.get("notional"))
+    fee = max(0.0, _safe_float(row.get("fee")))
+    total_paid = round(notional + fee, 2) if action == "BUY" else 0.0
+    total_received = round(max(0.0, notional - fee), 2) if action == "SELL" else 0.0
+    net_cash_impact = round(total_received - total_paid, 2)
+
+    normalized = {
+        **row,
+        "timestamp": ts_dt.isoformat(),
+        "date_ist": ts_dt.strftime("%Y-%m-%d"),
+        "time_ist": ts_dt.strftime("%H:%M:%S"),
+        "action": action,
+        "ticker": ticker,
+        "quantity": round(qty, 4) if qty > 0 else 0.0,
+        "price": round(price, 2) if price > 0 else 0.0,
+        "notional": round(notional, 2) if notional > 0 else 0.0,
+        "fee": round(fee, 2),
+        "total_paid": total_paid,
+        "total_received": total_received,
+        "net_cash_impact": net_cash_impact,
+        "source": str(row.get("source", "strategy_simulation") or "strategy_simulation"),
+    }
+    return normalized
+
+
+def _append_trade_event_to_csv(event: dict) -> None:
+    fieldnames = [
+        "id",
+        "timestamp",
+        "date_ist",
+        "time_ist",
+        "action",
+        "ticker",
+        "quantity",
+        "price",
+        "notional",
+        "fee",
+        "total_paid",
+        "total_received",
+        "net_cash_impact",
+        "trade_type",
+        "reason",
+        "realized_pnl",
+        "cash_after",
+        "source",
+        "auto",
+    ]
+    SIMULATED_TRADE_CSV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    exists = SIMULATED_TRADE_CSV_FILE.exists()
+    with open(SIMULATED_TRADE_CSV_FILE, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not exists:
+            writer.writeheader()
+        writer.writerow({k: event.get(k) for k in fieldnames})
+
+
+def _append_trade_event_to_excel(event: dict) -> None:
+    """Append one event to .xlsx ledger (best effort)."""
+    if not OPENPYXL_AVAILABLE:
+        return
+    try:
+        row_df = pd.DataFrame([event])
+        if SIMULATED_TRADE_EXCEL_FILE.exists():
+            prev_df = pd.read_excel(SIMULATED_TRADE_EXCEL_FILE)
+            out_df = pd.concat([prev_df, row_df], ignore_index=True)
+        else:
+            out_df = row_df
+        SIMULATED_TRADE_EXCEL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        out_df.to_excel(SIMULATED_TRADE_EXCEL_FILE, index=False)
+    except Exception as exc:
+        log.warning("Failed to update Excel trade ledger: %s", exc)
+
+
+def _smtp_ready() -> bool:
+    return bool(
+        TRADE_EMAIL_ENABLED
+        and SMTP_HOST
+        and SMTP_PORT > 0
+        and SMTP_FROM
+        and TRADE_EMAIL_TO
+    )
+
+
+def _send_email(subject: str, body: str, recipient: str | None = None) -> tuple[bool, str]:
+    to_addr = (recipient or TRADE_EMAIL_TO or "").strip()
+    if not to_addr:
+        return False, "No recipient configured"
+    if not _smtp_ready():
+        return False, "SMTP is not configured"
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = SMTP_FROM
+        msg["To"] = to_addr
+        msg.set_content(body)
+
+        if SMTP_USE_SSL:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
+                if SMTP_USER and SMTP_PASSWORD:
+                    smtp.login(SMTP_USER, SMTP_PASSWORD)
+                smtp.send_message(msg)
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
+                if SMTP_STARTTLS:
+                    smtp.starttls()
+                if SMTP_USER and SMTP_PASSWORD:
+                    smtp.login(SMTP_USER, SMTP_PASSWORD)
+                smtp.send_message(msg)
+        return True, "sent"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _send_trade_notification_async(event: dict) -> None:
+    if str(event.get("action", "")).upper() not in {"BUY", "SELL"}:
+        return
+    if not TRADE_EMAIL_ENABLED:
+        return
+
+    def _send():
+        subject = (
+            f"[Trading Bot] {event.get('action')} {event.get('ticker')} "
+            f"qty={event.get('quantity')} @ ₹{event.get('price')}"
+        )
+        body = (
+            f"Trade executed (simulation).\n\n"
+            f"Timestamp (IST): {event.get('timestamp')}\n"
+            f"Action: {event.get('action')}\n"
+            f"Ticker: {event.get('ticker')}\n"
+            f"Quantity: {event.get('quantity')}\n"
+            f"Price: ₹{event.get('price')}\n"
+            f"Notional: ₹{event.get('notional')}\n"
+            f"Fee: ₹{event.get('fee')}\n"
+            f"Total Paid: ₹{event.get('total_paid')}\n"
+            f"Total Received: ₹{event.get('total_received')}\n"
+            f"Reason: {event.get('reason')}\n"
+            f"Source: {event.get('source')}\n"
+            f"Cash After: ₹{event.get('cash_after')}\n"
+        )
+        ok, msg = _send_email(subject, body)
+        if not ok:
+            log.warning("Trade notification email failed: %s", msg)
+
+    threading.Thread(target=_send, daemon=True).start()
+
+
+def _read_sim_trade_events(date_str: str | None = None) -> list[dict]:
+    rows: list[dict] = []
+    if not SIMULATED_TRADE_LOG_FILE.exists():
+        return rows
+    try:
+        with open(SIMULATED_TRADE_LOG_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    raw = json.loads(line)
+                except Exception:
+                    continue
+                row = _normalize_sim_trade_event(raw)
+                if date_str and str(row.get("date_ist")) != str(date_str):
+                    continue
+                rows.append(row)
+    except Exception as exc:
+        log.warning("Failed reading simulated trade log: %s", exc)
+    return rows
+
+
+def _warm_sim_trade_cache_from_log() -> None:
+    """Best-effort bootstrapping of in-memory trade cache from JSONL ledger."""
+    rows = _read_sim_trade_events()
+    if not rows:
+        return
+    tail = rows[-SIM_TRADE_CACHE_MAX_ROWS :]
+    with _sim_trade_cache_lock:
+        _sim_trade_event_cache.clear()
+        for row in tail:
+            _sim_trade_event_cache.append(row)
+
+
+def _build_transaction_summary(date_str: str | None = None) -> dict:
+    target_date = str(date_str or datetime.now(IST).strftime("%Y-%m-%d"))
+    rows = _read_sim_trade_events(target_date)
+    with _sim_trade_cache_lock:
+        cache_rows = [r for r in list(_sim_trade_event_cache) if r.get("date_ist") == target_date]
+    trade_rows = [r for r in rows if r.get("action") in {"BUY", "SELL"}]
+    buy_rows = [r for r in trade_rows if r.get("action") == "BUY"]
+    sell_rows = [r for r in trade_rows if r.get("action") == "SELL"]
+    buy_notional = sum(_safe_float(r.get("notional")) for r in buy_rows)
+    sell_notional = sum(_safe_float(r.get("notional")) for r in sell_rows)
+    buy_fees = sum(_safe_float(r.get("fee")) for r in buy_rows)
+    sell_fees = sum(_safe_float(r.get("fee")) for r in sell_rows)
+    total_fees = buy_fees + sell_fees
+    total_paid_buy = buy_notional + buy_fees
+    total_received_sell = max(0.0, sell_notional - sell_fees)
+    realized_pnl = sum(_safe_float(r.get("realized_pnl")) for r in sell_rows)
+
+    return {
+        "date": target_date,
+        "total_events": len(rows),
+        "total_transactions": len(trade_rows),
+        "buy_transactions": len(buy_rows),
+        "sell_transactions": len(sell_rows),
+        "buy_notional": round(buy_notional, 2),
+        "sell_notional": round(sell_notional, 2),
+        "buy_transaction_cost": round(buy_fees, 2),
+        "sell_transaction_cost": round(sell_fees, 2),
+        "total_transaction_cost": round(total_fees, 2),
+        "total_paid_for_buys": round(total_paid_buy, 2),
+        "total_received_from_sells": round(total_received_sell, 2),
+        "net_cash_flow": round(total_received_sell - total_paid_buy, 2),
+        "realized_pnl": round(realized_pnl, 2),
+        "excel_ledger_file": str(SIMULATED_TRADE_EXCEL_FILE),
+        "csv_ledger_file": str(SIMULATED_TRADE_CSV_FILE),
+        "in_memory_cache_rows": len(cache_rows),
+        "events": trade_rows[-100:],
+    }
+
+
+def _write_daily_trade_report(date_str: str | None = None) -> dict:
+    target_date = str(date_str or datetime.now(IST).strftime("%Y-%m-%d"))
+    summary = _build_transaction_summary(target_date)
+    report_payload = {
+        "generated_at": datetime.now(IST).isoformat(),
+        "report_type": "simulation_transaction_summary",
+        "schema_version": 1,
+        **summary,
+    }
+    DAILY_TRADE_REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    report_file = DAILY_TRADE_REPORT_DIR / f"{target_date}.json"
+    report_file.write_text(json.dumps(report_payload, indent=2, default=str))
+    report_payload["report_file"] = str(report_file)
+    return report_payload
+
+
+def _log_simulated_trade(event: dict) -> None:
+    row = _normalize_sim_trade_event(event)
+    try:
+        with _log_lock:
+            SIMULATED_TRADE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(SIMULATED_TRADE_LOG_FILE, "a") as f:
+                f.write(json.dumps(row, default=str) + "\n")
+            _append_trade_event_to_csv(row)
+            _append_trade_event_to_excel(row)
     except Exception as exc:
         log.warning("Failed to append simulated trade log: %s", exc)
+        return
+
+    with _sim_trade_cache_lock:
+        _sim_trade_event_cache.append(row)
+    _send_trade_notification_async(row)
 
 
 def _infer_trade_type_for_exit(entry_ts: str, exit_ts: str) -> str:
@@ -1959,6 +2269,14 @@ def api_status():
                 "auto_buy_enabled": AUTO_SIMULATION_AUTO_BUY,
                 "interval_sec": AUTO_SIMULATION_INTERVAL_SEC,
                 "trade_window": "09:30-15:30 IST (weekdays)",
+                "trade_ledger": {
+                    "jsonl": str(SIMULATED_TRADE_LOG_FILE),
+                    "csv": str(SIMULATED_TRADE_CSV_FILE),
+                    "excel": str(SIMULATED_TRADE_EXCEL_FILE),
+                },
+                "daily_report_time_ist": f"{TRADE_DAILY_REPORT_HOUR_IST:02d}:{TRADE_DAILY_REPORT_MINUTE_IST:02d}",
+                "email_notifications_enabled": bool(TRADE_EMAIL_ENABLED),
+                "email_recipient": TRADE_EMAIL_TO,
             },
         }
     )
@@ -2507,10 +2825,36 @@ def api_simulate_portfolio():
             "closed_trades_count": len(state.get("closed_trades", [])),
             "holdings": holdings,
             "trade_history": state.get("trade_history", [])[-50:],
+            "transaction_summary": _build_transaction_summary(),
             "daily_loss_tracker": state.get("daily_loss_tracker", {}),
             "updated_at": state.get("updated_at"),
         }
     )
+
+
+@app.route("/api/simulate/transactions-summary")
+def api_simulate_transactions_summary():
+    """Aggregate simulated BUY/SELL counts, costs and totals for a date."""
+    date_str = request.args.get("date", "").strip()
+    target_date = date_str or datetime.now(IST).strftime("%Y-%m-%d")
+    summary = _build_transaction_summary(target_date)
+    return jsonify(summary)
+
+
+@app.route("/api/simulate/daily-report")
+def api_simulate_daily_report():
+    """Generate or fetch the 15:45 IST style simulation summary report."""
+    date_str = request.args.get("date", "").strip()
+    force = request.args.get("force", "").lower() in ("1", "true", "yes")
+    target_date = date_str or datetime.now(IST).strftime("%Y-%m-%d")
+    report_file = DAILY_TRADE_REPORT_DIR / f"{target_date}.json"
+    if report_file.exists() and not force:
+        try:
+            return jsonify(json.loads(report_file.read_text()))
+        except Exception:
+            pass
+    report = _write_daily_trade_report(target_date)
+    return jsonify(report)
 
 
 @app.route("/api/simulate/trade", methods=["POST"])
@@ -2552,25 +2896,26 @@ def api_simulate_trade():
             }
         )
 
-    if not _is_market_trade_window():
-        now_iso = datetime.now(IST).isoformat()
-        return (
-            jsonify(
-                {
-                    "error": (
-                        "Simulated BUY/SELL triggers are allowed only during market hours "
-                        "(09:30-15:30 IST, trading days)."
-                    ),
-                    "action": action,
-                    "market_window": _prediction_window_type(),
-                    "server_time_ist": now_iso,
-                    "source": "strategy_simulation",
-                }
-            ),
-            403,
-        )
-
     if action == "AUTO_CHECK":
+        if not _is_market_trade_window():
+            return jsonify(
+                {
+                    "ok": True,
+                    "action": "AUTO_CHECK",
+                    "triggered_count": 0,
+                    "events": [],
+                    "auto_buy_events": [],
+                    "trailing_updates": [],
+                    "state": state,
+                    "source": "strategy_simulation",
+                    "note": (
+                        "Auto-check skipped: market window closed. "
+                        "Auto buy/sell simulation runs only in 09:30-15:30 IST."
+                    ),
+                    "market_window": _prediction_window_type(),
+                    "server_time_ist": datetime.now(IST).isoformat(),
+                }
+            )
         result = _run_sim_auto_check(
             state,
             auto_buy_enabled=bool(payload.get("auto_buy", False)),
@@ -2590,6 +2935,24 @@ def api_simulate_trade():
                 "state": state,
                 "source": "strategy_simulation",
             }
+        )
+
+    if not _is_market_trade_window():
+        now_iso = datetime.now(IST).isoformat()
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "Simulated BUY/SELL triggers are allowed only during market hours "
+                        "(09:30-15:30 IST, trading days)."
+                    ),
+                    "action": action,
+                    "market_window": _prediction_window_type(),
+                    "server_time_ist": now_iso,
+                    "source": "strategy_simulation",
+                }
+            ),
+            403,
         )
 
     ticker = str(payload.get("ticker", "")).strip().upper()
@@ -5043,6 +5406,72 @@ def _auto_simulation_background_loop():
         time.sleep(AUTO_SIMULATION_INTERVAL_SEC)
 
 
+def _send_daily_report_email_async(report: dict) -> None:
+    if not TRADE_EMAIL_ENABLED:
+        return
+
+    def _send():
+        report_date = str(report.get("date", ""))
+        subject = f"[Trading Bot] Daily Simulation Report {report_date}"
+        body = (
+            f"Daily simulation summary ({report_date})\n\n"
+            f"Total transactions: {report.get('total_transactions', 0)}\n"
+            f"Buy transactions: {report.get('buy_transactions', 0)}\n"
+            f"Sell transactions: {report.get('sell_transactions', 0)}\n"
+            f"Buy transaction cost: ₹{report.get('buy_transaction_cost', 0)}\n"
+            f"Sell transaction cost: ₹{report.get('sell_transaction_cost', 0)}\n"
+            f"Total transaction cost: ₹{report.get('total_transaction_cost', 0)}\n"
+            f"Total paid for buys: ₹{report.get('total_paid_for_buys', 0)}\n"
+            f"Total received from sells: ₹{report.get('total_received_from_sells', 0)}\n"
+            f"Net cash flow: ₹{report.get('net_cash_flow', 0)}\n"
+            f"Realized PnL: ₹{report.get('realized_pnl', 0)}\n"
+            f"Report file: {report.get('report_file', '')}\n"
+        )
+        ok, msg = _send_email(subject, body)
+        if not ok:
+            log.warning("Daily report email failed: %s", msg)
+
+    threading.Thread(target=_send, daemon=True).start()
+
+
+def _daily_trade_report_scheduler_loop():
+    """
+    Generate one daily report after 15:45 IST and optionally email it.
+    """
+    while True:
+        try:
+            now = datetime.now(IST)
+            today = now.strftime("%Y-%m-%d")
+            due = (
+                now.weekday() < 5
+                and (
+                    now.hour > TRADE_DAILY_REPORT_HOUR_IST
+                    or (
+                        now.hour == TRADE_DAILY_REPORT_HOUR_IST
+                        and now.minute >= TRADE_DAILY_REPORT_MINUTE_IST
+                    )
+                )
+            )
+            if due:
+                with _daily_trade_report_lock:
+                    if today not in _daily_trade_report_dates_done:
+                        report = _write_daily_trade_report(today)
+                        _daily_trade_report_dates_done.add(today)
+                        log.info(
+                            "Daily trade report generated for %s at %s",
+                            today,
+                            now.isoformat(),
+                        )
+                        _send_daily_report_email_async(report)
+
+            # Keep only today's marker in memory.
+            with _daily_trade_report_lock:
+                _daily_trade_report_dates_done.intersection_update({today})
+        except Exception as exc:
+            log.warning("Daily trade report scheduler error: %s", exc)
+        time.sleep(20)
+
+
 @app.route("/api/daily-analysis")
 def api_daily_analysis():
     """
@@ -6699,6 +7128,12 @@ if __name__ == "__main__":
             pruned.get("removed"),
             pruned.get("remaining"),
         )
+    _warm_sim_trade_cache_from_log()
+    if TRADE_EMAIL_ENABLED and not _smtp_ready():
+        log.warning(
+            "TRADE_EMAIL_ENABLED is true but SMTP is not fully configured. "
+            "Set SMTP_HOST/SMTP_PORT/SMTP_FROM (and credentials if needed)."
+        )
 
     # Load models in background thread
     model_thread = threading.Thread(target=load_models_background, daemon=True)
@@ -6731,6 +7166,17 @@ if __name__ == "__main__":
         AUTO_SIMULATION_ENABLED,
         AUTO_SIMULATION_AUTO_BUY,
         AUTO_SIMULATION_INTERVAL_SEC,
+    )
+
+    report_thread = threading.Thread(
+        target=_daily_trade_report_scheduler_loop,
+        daemon=True,
+    )
+    report_thread.start()
+    log.info(
+        "Daily trade report scheduler started (%02d:%02d IST)",
+        TRADE_DAILY_REPORT_HOUR_IST,
+        TRADE_DAILY_REPORT_MINUTE_IST,
     )
 
     port = int(os.environ.get("FLASK_PORT", 5001))

@@ -3,6 +3,7 @@
    ============================================================ */
 
 let advisorOpenList = [];
+let advisorBusy = false;
 
 function advisorFormatPrice(value) {
     const n = Number(value);
@@ -17,6 +18,44 @@ function advisorBudgetValue() {
     return Math.max(1000, n);
 }
 
+function setAdvisorBusy(isBusy) {
+    advisorBusy = Boolean(isBusy);
+    const panel = document.getElementById('advisor-panel');
+    if (!panel) return;
+    panel.querySelectorAll('button.tf-btn').forEach((btn) => {
+        btn.disabled = advisorBusy;
+    });
+    const budgetInput = document.getElementById('advisor-budget');
+    if (budgetInput) budgetInput.disabled = advisorBusy;
+}
+
+function renderTransactionSummary(summary) {
+    const el = document.getElementById('advisor-transactions-summary');
+    if (!el) return;
+    if (!summary || typeof summary !== 'object') {
+        el.textContent = 'Transactions: —';
+        return;
+    }
+    const total = Number(summary.total_transactions || 0);
+    const buy = Number(summary.buy_transactions || 0);
+    const sell = Number(summary.sell_transactions || 0);
+    const buyFee = Number(summary.buy_transaction_cost || 0);
+    const sellFee = Number(summary.sell_transaction_cost || 0);
+    const totalFee = Number(summary.total_transaction_cost || 0);
+    el.textContent = `Transactions today: ${total} (BUY ${buy} / SELL ${sell}) | Fees: BUY ₹${buyFee.toFixed(2)}, SELL ₹${sellFee.toFixed(2)}, TOTAL ₹${totalFee.toFixed(2)}`;
+}
+
+async function refreshAdvisorTransactions() {
+    try {
+        const res = await fetch('/api/simulate/transactions-summary');
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Transaction summary unavailable');
+        renderTransactionSummary(data);
+    } catch (_) {
+        renderTransactionSummary(null);
+    }
+}
+
 async function refreshAdvisorSummary() {
     try {
         const res = await fetch('/api/simulate/portfolio');
@@ -28,9 +67,11 @@ async function refreshAdvisorSummary() {
         if (cashEl) cashEl.textContent = advisorFormatPrice(data.cash);
         if (openEl) openEl.textContent = String(data.open_positions_count || 0);
         if (eqEl) eqEl.textContent = advisorFormatPrice(data.equity_value);
+        renderTransactionSummary(data.transaction_summary || null);
     } catch (e) {
         const status = document.getElementById('advisor-status');
         if (status) status.textContent = `Simulation summary error: ${e.message}`;
+        await refreshAdvisorTransactions();
     }
 }
 
@@ -57,9 +98,11 @@ function renderAdvisorOpenList(rows) {
 }
 
 async function loadAdvisorOpenBuyList() {
+    if (advisorBusy) return;
     const status = document.getElementById('advisor-status');
     const budget = advisorBudgetValue();
     if (status) status.textContent = 'Loading advisor picks...';
+    setAdvisorBusy(true);
     try {
         const res = await fetch(`/api/advisor/open-buy-list?n=10&budget=${encodeURIComponent(budget)}`);
         const data = await res.json();
@@ -76,10 +119,13 @@ async function loadAdvisorOpenBuyList() {
         advisorOpenList = [];
         renderAdvisorOpenList([]);
         if (status) status.textContent = `Advisor error: ${e.message}`;
+    } finally {
+        setAdvisorBusy(false);
     }
 }
 
 async function simulateAdvisorBuy(ticker) {
+    if (advisorBusy) return;
     const row = advisorOpenList.find((r) => r.ticker === ticker);
     const status = document.getElementById('advisor-status');
     if (!row) {
@@ -87,6 +133,7 @@ async function simulateAdvisorBuy(ticker) {
         return;
     }
     if (status) status.textContent = `Submitting simulated BUY for ${ticker}...`;
+    setAdvisorBusy(true);
     try {
         const res = await fetch('/api/simulate/trade', {
             method: 'POST',
@@ -112,12 +159,16 @@ async function simulateAdvisorBuy(ticker) {
         await refreshAdvisorSummary();
     } catch (e) {
         if (status) status.textContent = `Simulated BUY error: ${e.message}`;
+    } finally {
+        setAdvisorBusy(false);
     }
 }
 
 async function runAdvisorAutoCheck() {
+    if (advisorBusy) return;
     const status = document.getElementById('advisor-status');
     if (status) status.textContent = 'Running auto-check (trailing stop, auto-sell, auto-buy entry)...';
+    setAdvisorBusy(true);
     try {
         const res = await fetch('/api/simulate/trade', {
             method: 'POST',
@@ -128,17 +179,24 @@ async function runAdvisorAutoCheck() {
         if (!res.ok || data.error) throw new Error(data.error || 'Auto-check failed');
         const sells = Number((data.events || []).length || 0);
         const buys = Number((data.auto_buy_events || []).length || 0);
-        if (status) status.textContent = `Auto-check completed. Auto-sell: ${sells}, auto-buy: ${buys}.`;
+        if (status) {
+            const note = data.note ? ` ${data.note}` : '';
+            status.textContent = `Auto-check completed. Auto-sell: ${sells}, auto-buy: ${buys}.${note}`;
+        }
         await refreshAdvisorSummary();
     } catch (e) {
         if (status) status.textContent = `Auto-check error: ${e.message}`;
+    } finally {
+        setAdvisorBusy(false);
     }
 }
 
 async function resetAdvisorSimulation() {
+    if (advisorBusy) return;
     const status = document.getElementById('advisor-status');
     const budget = advisorBudgetValue();
     if (status) status.textContent = 'Resetting simulation portfolio...';
+    setAdvisorBusy(true);
     try {
         const res = await fetch('/api/simulate/trade', {
             method: 'POST',
@@ -149,9 +207,12 @@ async function resetAdvisorSimulation() {
         if (!res.ok || data.error) throw new Error(data.error || 'Reset failed');
         if (status) status.textContent = `Simulation reset to ₹${budget.toLocaleString('en-IN')}.`;
         await refreshAdvisorSummary();
+        setAdvisorBusy(false);
         await loadAdvisorOpenBuyList();
     } catch (e) {
         if (status) status.textContent = `Reset error: ${e.message}`;
+    } finally {
+        if (advisorBusy) setAdvisorBusy(false);
     }
 }
 
@@ -160,3 +221,4 @@ window.simulateAdvisorBuy = simulateAdvisorBuy;
 window.runAdvisorAutoCheck = runAdvisorAutoCheck;
 window.resetAdvisorSimulation = resetAdvisorSimulation;
 window.refreshAdvisorSummary = refreshAdvisorSummary;
+window.refreshAdvisorTransactions = refreshAdvisorTransactions;

@@ -942,7 +942,7 @@ a:hover { text-decoration: underline; }
 
 .premarket-panels {
     display: grid;
-    grid-template-columns: 2fr 1fr;
+    grid-template-columns: 1fr;
     gap: 12px;
     margin-bottom: 14px;
 }
@@ -952,10 +952,6 @@ a:hover { text-decoration: underline; }
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 12px;
-}
-
-.premarket-panel.compact {
-    min-width: 0;
 }
 
 .advisor-panel {

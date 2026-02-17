@@ -162,15 +162,31 @@ curl -s 'http://localhost:5001/api/simulate/portfolio' | jq
 Simulation state is persisted in:
 - `cache/portfolio_sim.json`
 - `cache/prediction_log/simulated_trades.jsonl`
+- `cache/prediction_log/simulated_trades.csv`
+- `cache/prediction_log/simulated_trades.xlsx` (when `openpyxl` is installed)
 
 Simulation risk controls:
 - ATR + confidence dynamic stop-loss
 - position sizing by risk-per-trade and max-position cap
 - trailing-stop updates after favorable move
 - daily loss circuit breaker (`MAX_DAILY_LOSS`)
-- BUY/SELL/AUTO_CHECK triggers are allowed only during `09:30-15:30 IST` on trading days
+- BUY/SELL triggers are allowed only during `09:30-15:30 IST` on trading days
+- AUTO_CHECK outside market hours returns a safe "skipped" response (no trades fired)
 
 Important: this is simulation only; no live brokerage order is sent.
+
+### `/api/simulate/transactions-summary` and `/api/simulate/daily-report`
+```bash
+curl -s 'http://localhost:5001/api/simulate/transactions-summary' | jq
+curl -s 'http://localhost:5001/api/simulate/daily-report' | jq
+```
+
+Returns:
+- total transaction counts (BUY/SELL)
+- buy/sell/total transaction costs
+- total paid for buys, total received from sells, net cash flow
+- realized PnL, recent transaction rows
+- report file path for daily 15:45 IST summary
 
 ### `/api/expected-vs-actual`
 ```bash
@@ -217,12 +233,20 @@ Export schema is retraining-friendly and includes direction comparison fields.
   - Top Picks: actionable ranked list (up to 50).
   - Top-10 Analysis: deep analytics cards and context.
 - New table: **Premarket vs Current**.
-- New table: **Current Second Snapshot** for highlighted ticker.
 - New **Trading Desk Advisor** panel:
   - default simulation cash ₹40,000,
   - open-buy list constrained by budget + estimated fees,
   - simulated BUY/SELL and auto stop-loss/target checks.
+  - transaction totals (count + buy/sell/both costs) from server summary endpoint.
 - `0/null` prices render as `—` (not fake `₹0`).
+
+Email notifications/report (optional):
+- `TRADE_EMAIL_ENABLED=true`
+- `TRADE_EMAIL_TO=anthonybreeganzo07@gmail.com`
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`
+- Daily report scheduler defaults to `15:45 IST`:
+  - `TRADE_DAILY_REPORT_HOUR_IST=15`
+  - `TRADE_DAILY_REPORT_MINUTE_IST=45`
 
 ## 8) Risk analytics behavior
 - `/api/risk-analytics` now uses **only user portfolio tickers**.
