@@ -1681,14 +1681,16 @@ async function loadPriceTracker() {
                         ? stock.current_strategy_predicted_at
                         : stock.strategy_predicted_at_open))
                 || stock.current_snapshot_at;
-            strategyOpenTimeEl.textContent = `Predicted: ${formatTimestamp(strategyDisplayTime)}`;
+            const source = stock.strategy_price_source ? ` | Source: ${stock.strategy_price_source}` : '';
+            strategyOpenTimeEl.textContent = `Predicted: ${formatTimestamp(strategyDisplayTime)}${source}`;
         }
         const entryRangeEl = document.getElementById('tracker-entry-range');
         if (entryRangeEl) {
             const lo = Number(stock.entry_range_low || 0);
             const hi = Number(stock.entry_range_high || 0);
             if (Number.isFinite(lo) && lo > 0 && Number.isFinite(hi) && hi > 0) {
-                entryRangeEl.textContent = `Entry Range: ${formatPrice(Math.min(lo, hi))} - ${formatPrice(Math.max(lo, hi))}`;
+                const src = stock.entry_range_source ? ` (${stock.entry_range_source})` : '';
+                entryRangeEl.textContent = `Entry Range: ${formatPrice(Math.min(lo, hi))} - ${formatPrice(Math.max(lo, hi))}${src}`;
             } else {
                 entryRangeEl.textContent = 'Entry Range: —';
             }

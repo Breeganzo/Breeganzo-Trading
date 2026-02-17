@@ -206,13 +206,15 @@ function renderAdvisorOpenList(rows) {
     const body = document.getElementById('advisor-open-buy-body');
     if (!body) return;
     if (!rows || !rows.length) {
-        body.innerHTML = '<tr><td colspan="9" class="muted-text">No advisor picks available right now.</td></tr>';
+        body.innerHTML = '<tr><td colspan="11" class="muted-text">No advisor picks available right now.</td></tr>';
         return;
     }
     body.innerHTML = rows.map((row) => `
         <tr>
             <td><strong>${row.name || row.ticker.replace('.NS', '')}</strong><br><span class="muted-text">${row.ticker}</span></td>
             <td>${String(row.sector || 'other').replaceAll('_', ' ')}</td>
+            <td>${advisorFormatPrice(row.strategy_price_at_open)}</td>
+            <td>${advisorFormatTimestamp(row.strategy_generated_at || row.strategy_generated_at_display)}</td>
             <td>${advisorFormatPrice(row.current_price)}</td>
             <td>${advisorFormatPriceRange(row.buy_range_low || row.entry_range_low, row.buy_range_high || row.entry_range_high)}</td>
             <td>${advisorFormatPriceRange(row.sell_range_low || row.stop_loss_price, row.sell_range_high || row.target_price)}</td>
@@ -254,7 +256,11 @@ async function loadAdvisorOpenBuyList() {
         const warnings = (data.warnings || []).slice(0, 3);
         if (status) {
             const warnText = warnings.length ? ` | Warnings: ${warnings.join(' ; ')}` : '';
-            status.textContent = `Generated ${data.count || 0} ${requestedView.toUpperCase()} picks. Budget ₹${budget.toLocaleString('en-IN')} | Estimated total ₹${Number(data.estimated_total_cost || 0).toLocaleString('en-IN')}${warnText}`;
+            const first = advisorOpenList[0] || null;
+            const sourceText = first
+                ? ` | Strategy source: ${first.strategy_price_source || 'strategy_model'} @ ${advisorFormatTimestamp(first.strategy_generated_at)}`
+                : '';
+            status.textContent = `Generated ${data.count || 0} ${requestedView.toUpperCase()} picks. Budget ₹${budget.toLocaleString('en-IN')} | Estimated total ₹${Number(data.estimated_total_cost || 0).toLocaleString('en-IN')}${sourceText}${warnText}`;
         }
         await refreshAdvisorSummary();
     } catch (e) {

@@ -2139,7 +2139,12 @@ def _build_strategy_buy_candidates(
             strategy_price * max(pred_ret_pct / 100.0, 0.008),
         )
         target_price = _round_to_tick(strategy_price + target_delta)
-        entry_low, entry_high = _entry_price_range(strategy_price)
+        entry_low = _safe_float(raw.get("entry_range_low"))
+        entry_high = _safe_float(raw.get("entry_range_high"))
+        if entry_low <= 0 or entry_high <= 0:
+            entry_low, entry_high = _entry_price_range(strategy_price)
+        if entry_high < entry_low:
+            entry_low, entry_high = entry_high, entry_low
         # Keep strategy entry anchored inside its configured range for UI/API consistency.
         strategy_px_rounded = round(strategy_price, 2)
         if entry_low <= 0 or entry_low > strategy_px_rounded:
@@ -2210,6 +2215,9 @@ def _build_strategy_buy_candidates(
                 "strategy_action": strategy_signal,
                 "effective_action": effective_action,
                 "action_source": action_source,
+                "strategy_price_source": str(
+                    raw.get("strategy_price_source") or "strategy_model"
+                ),
                 "soft_candidate": bool(soft_candidate),
                 "weighted_sentiment_raw": round(
                     _safe_float(raw.get("weighted_sentiment_raw")),
@@ -3937,17 +3945,64 @@ def api_advisor_open_buy_list():
 
         warnings: list[str] = []
         filtered_rows: list[dict] = []
+        window_type = _prediction_window_type(datetime.now(IST))
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+        snapshot_rows: dict[str, dict] = {}
+        try:
+            snap = _get_prediction_snapshot(use_latest_stored=True)
+            if (
+                isinstance(snap, dict)
+                and str(snap.get("date", "")) == today_str
+                and isinstance(snap.get("items"), list)
+            ):
+                for snap_row in snap.get("items", []):
+                    if not isinstance(snap_row, dict):
+                        continue
+                    t = str(snap_row.get("ticker", "")).strip().upper()
+                    if t:
+                        snapshot_rows[t] = dict(snap_row)
+        except Exception as exc:
+            log.debug("Advisor snapshot overlay unavailable: %s", exc)
+
         for row in candidate_rows:
-            ticker = str(row.get("ticker", "")).upper()
+            raw_row = dict(row or {})
+            ticker = str(raw_row.get("ticker", "")).upper()
+            snap_row = dict(snapshot_rows.get(ticker, {}) or {})
+            snap_strategy = _safe_float(snap_row.get("strategy_price_at_open"))
+            if snap_strategy > 0:
+                raw_row["strategy_price_at_open"] = round(snap_strategy, 2)
+                raw_row["strategy_generated_at"] = (
+                    snap_row.get("strategy_predicted_at_open")
+                    or snap_row.get("captured_at")
+                    or raw_row.get("strategy_generated_at")
+                )
+                raw_row["strategy_price_source"] = "market_open_snapshot"
+                low = _safe_float(snap_row.get("entry_range_low"))
+                high = _safe_float(snap_row.get("entry_range_high"))
+                if low <= 0 or high <= 0:
+                    low, high = _entry_price_range(snap_strategy)
+                if high < low:
+                    low, high = high, low
+                raw_row["entry_range_low"] = round(low, 2)
+                raw_row["entry_range_high"] = round(high, 2)
+            else:
+                raw_row["strategy_price_source"] = (
+                    "strategy_model"
+                    if _safe_float(raw_row.get("strategy_price_at_open")) > 0
+                    else "unavailable"
+                )
+
             strategy_price = _safe_float(
-                row.get("strategy_price_at_open")
-                or row.get("target_price")
-                or row.get("predicted_price")
+                raw_row.get("strategy_price_at_open")
+                or raw_row.get("target_price")
+                or raw_row.get("predicted_price")
             )
-            current_price = _safe_float(row.get("current_price"))
+            current_price = _safe_float(raw_row.get("current_price"))
             if strategy_price <= 0:
-                strategy_price = current_price
-            ai_price = _safe_float(row.get("ai_predicted_price"))
+                warnings.append(f"{ticker} skipped: strategy price unavailable.")
+                continue
+
+            ai_price = _safe_float(raw_row.get("ai_predicted_price"))
             if ai_price > 0 and strategy_price > 0:
                 ai_gap = abs(ai_price - strategy_price) / max(strategy_price, 1e-9)
                 if ai_gap > AI_STRATEGY_GAP_WARN:
@@ -3959,7 +4014,7 @@ def api_advisor_open_buy_list():
                         f"{ticker} skipped: AI/strategy gap exceeded block threshold ({AI_STRATEGY_GAP_BLOCK*100:.0f}%)."
                     )
                     continue
-            filtered_rows.append(row)
+            filtered_rows.append(raw_row)
 
         candidate_tickers = sorted(
             {
@@ -4261,6 +4316,16 @@ def api_advisor_open_buy_list():
             row["suggested_qty"] = int(qty_display) if qty_display is not None else None
             row["advisor_view"] = advisor_view
             row["advisor_action"] = "WATCH" if advisor_view == "hold" else "BUY"
+            row["strategy_price_source"] = str(
+                row.get("strategy_price_source") or "strategy_model"
+            )
+            row["strategy_generated_at_display"] = _format_ist_timestamp(
+                row.get("strategy_generated_at")
+            )
+            row["strategy_locked_for_window"] = window_type in {
+                "premarket_open",
+                "market_open_locked",
+            }
             if _safe_float(row.get("liquidity_factor")) < 0.8:
                 warnings.append(
                     f"{row.get('ticker')} has lower liquidity "
@@ -7409,8 +7474,17 @@ def api_price_tracker(ticker: str):
         )
         or 0
     )
+    strategy_price_source = (
+        "market_open_snapshot"
+        if _safe_float(premarket_row.get("strategy_price_at_open")) > 0
+        else "strategy_model"
+    )
+    if strategy_price_at_open <= 0 and open_price > 0 and abs(predicted_return) <= 50:
+        strategy_price_at_open = round(open_price * (1 + predicted_return / 100.0), 2)
+        strategy_price_source = "derived_from_open_return"
     if strategy_price_at_open <= 0:
-        strategy_price_at_open = float(strategy_predicted_price or 0)
+        strategy_price_at_open = 0.0
+        strategy_price_source = "unavailable"
     ai_meta_open = _resolve_ai_forecast_price(
         ticker,
         open_price=float(open_price or 0),
@@ -7491,15 +7565,36 @@ def api_price_tracker(ticker: str):
 
     if open_price <= 0:
         open_price = current_price
-    if strategy_price_at_open <= 0:
-        strategy_price_at_open = strategy_predicted_price or open_price
     if ai_open_price <= 0:
         ai_open_price = ai_predicted_price if ai_predicted_price > 0 else 0.0
 
     sim_positions = dict(_read_portfolio_sim_state().get("open_positions", {}))
     sim_pos = dict(sim_positions.get(ticker, {}) or {})
+    entry_range_source = "none"
     entry_range_low = _safe_float(sim_pos.get("entry_range_low"))
     entry_range_high = _safe_float(sim_pos.get("entry_range_high"))
+    if entry_range_low > 0 and entry_range_high > 0:
+        entry_range_source = "sim_position"
+    else:
+        entry_range_low = _safe_float(premarket_row.get("entry_range_low"))
+        entry_range_high = _safe_float(premarket_row.get("entry_range_high"))
+        if entry_range_low > 0 and entry_range_high > 0:
+            entry_range_source = "market_open_snapshot"
+        elif strategy_price_at_open > 0:
+            entry_range_low, entry_range_high = _entry_price_range(
+                strategy_price_at_open
+            )
+            entry_range_source = "strategy_derived"
+        else:
+            entry_range_low = 0.0
+            entry_range_high = 0.0
+            entry_range_source = "unavailable"
+    if (
+        entry_range_high > 0
+        and entry_range_low > 0
+        and entry_range_high < entry_range_low
+    ):
+        entry_range_low, entry_range_high = entry_range_high, entry_range_low
 
     current_strategy_ref = current_price if current_price > 0 else open_price
     current_strategy_price = (
@@ -7629,6 +7724,7 @@ def api_price_tracker(ticker: str):
             "predicted_price": _display_price_or_none(display_strategy_price),
             "strategy_predicted_price": _display_price_or_none(display_strategy_price),
             "strategy_price_at_open": strategy_price_at_open_display,
+            "strategy_price_source": strategy_price_source,
             "ai_predicted_price": (
                 round(display_ai_price, 2) if display_ai_price > 0 else None
             ),
@@ -7644,6 +7740,7 @@ def api_price_tracker(ticker: str):
             ),
             "entry_range_low": _display_price_or_none(entry_range_low),
             "entry_range_high": _display_price_or_none(entry_range_high),
+            "entry_range_source": entry_range_source,
             "display_price_label": display_price_label,
             "market_status": market_status,
             "prediction_window": prediction_window,
