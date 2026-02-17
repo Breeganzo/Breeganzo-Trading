@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # we override with a clear 401 in the dependency instead.
 _bearer_scheme = HTTPBearer(auto_error=False)
 _settings = get_settings()
+_bypass_invalid_token_log_once = False
 
 
 async def _get_or_create_local_bypass_user(db: AsyncSession) -> User:
@@ -78,7 +79,12 @@ async def get_current_user(
         payload = auth_service.verify_jwt_token(token)
     except JWTError:
         if _settings.AUTH_BYPASS_LOCAL:
-            logger.warning("JWT invalid; falling back to local auth bypass user.")
+            global _bypass_invalid_token_log_once
+            if not _bypass_invalid_token_log_once:
+                logger.info(
+                    "JWT invalid in local bypass mode; falling back to local bypass user."
+                )
+                _bypass_invalid_token_log_once = True
             return await _get_or_create_local_bypass_user(db)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

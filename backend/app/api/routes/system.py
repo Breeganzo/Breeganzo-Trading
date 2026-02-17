@@ -109,6 +109,19 @@ async def _get_system_timestamp(
         return None
 
 
+def _freshness_label(ts: datetime | None, stale_after_hours: int = 24) -> str:
+    """Return a coarse freshness label for a component timestamp."""
+    if ts is None:
+        return "unknown"
+    try:
+        age_sec = (datetime.now(timezone.utc) - ts).total_seconds()
+    except Exception:
+        return "unknown"
+    if age_sec <= stale_after_hours * 3600:
+        return "fresh"
+    return "stale"
+
+
 # ---------------------------------------------------------------------------
 # GET /health -- Full system health check
 # ---------------------------------------------------------------------------
@@ -141,7 +154,11 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         redis=redis_status,
         data_feed=feed_status,
         model_last_updated=model_last_updated,
+        rankings_last_computed=model_last_updated,
+        model_freshness=_freshness_label(model_last_updated, stale_after_hours=24),
         correlation_last_calculated=correlation_last_calculated,
+        correlation_last_computed=correlation_last_calculated,
+        correlation_freshness=_freshness_label(correlation_last_calculated, stale_after_hours=24 * 7),
         uptime_seconds=_uptime_seconds(),
         version="1.0.0",
     )

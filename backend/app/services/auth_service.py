@@ -153,7 +153,10 @@ class AuthService:
             )
             return payload
         except JWTError:
-            logger.warning("JWT verification failed")
+            if self._settings.AUTH_BYPASS_LOCAL:
+                logger.info("JWT verification failed (local bypass mode).")
+            else:
+                logger.warning("JWT verification failed")
             raise
 
     # ── TOTP Two-Factor Authentication ────────────────────────────────

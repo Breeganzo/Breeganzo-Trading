@@ -238,7 +238,11 @@ class SystemHealthResponse(BaseModel):
     redis: str
     data_feed: str
     model_last_updated: Optional[datetime]
+    rankings_last_computed: Optional[datetime] = None
+    model_freshness: Optional[str] = None
     correlation_last_calculated: Optional[datetime]
+    correlation_last_computed: Optional[datetime] = None
+    correlation_freshness: Optional[str] = None
     uptime_seconds: float
     version: str
 

@@ -157,3 +157,28 @@ CREATE TABLE IF NOT EXISTS system_status (
     details TEXT,
     metadata_json TEXT
 );
+
+-- Daily stock snapshot (persisted live market view for replay/export)
+CREATE TABLE IF NOT EXISTS daily_stock_snapshot (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    snapshot_date DATE NOT NULL,
+    ticker VARCHAR(20) NOT NULL,
+    sector_bucket VARCHAR(60),
+    current_price FLOAT NOT NULL,
+    open_price FLOAT,
+    prev_close FLOAT,
+    high FLOAT,
+    low FLOAT,
+    change_pct FLOAT,
+    volume INTEGER,
+    signal VARCHAR(12),
+    source VARCHAR(40) DEFAULT 'live_market',
+    captured_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+    CONSTRAINT uq_daily_snapshot_user_date_ticker_source
+      UNIQUE(user_id, snapshot_date, ticker, source)
+);
+CREATE INDEX IF NOT EXISTS ix_daily_snapshot_user_date
+  ON daily_stock_snapshot(user_id, snapshot_date);
+CREATE INDEX IF NOT EXISTS ix_daily_snapshot_ticker
+  ON daily_stock_snapshot(ticker);

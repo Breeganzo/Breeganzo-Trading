@@ -19,6 +19,7 @@ from app.engines.transaction_cost import TransactionCostEngine
 from app.middleware.auth import get_current_user
 from app.models.models import Portfolio, Trade, User
 from app.schemas.schemas import TradeCreate, TradeResponse
+from app.services.email_service import send_trade_email
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +205,20 @@ async def execute_trade(
         current_user.id,
         costs["total_cost"],
     )
+
+    if trade_type == "BUY":
+        await send_trade_email(
+            action=trade_type,
+            ticker=ticker,
+            quantity=body.quantity,
+            price=body.price,
+            total_amount=total_amount,
+            total_cost=costs["total_cost"],
+            net_amount=costs["net_amount"],
+            user_email=current_user.email,
+            source="trades_api",
+            executed_at=trade.executed_at,
+        )
 
     return trade
 

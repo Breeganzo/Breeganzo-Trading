@@ -6,6 +6,7 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -42,6 +43,11 @@ class User(Base):
         "SignalTrigger", back_populates="user", cascade="all, delete-orphan"
     )
     daily_returns = relationship("DailyReturn", back_populates="user", cascade="all, delete-orphan")
+    daily_stock_snapshots = relationship(
+        "DailyStockSnapshot",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 class Portfolio(Base):
@@ -211,3 +217,38 @@ class SystemStatus(Base):
     last_updated = Column(DateTime(timezone=True), server_default=func.now())
     details = Column(Text)
     metadata_json = Column(Text)  # JSON string for flexible data
+
+
+class DailyStockSnapshot(Base):
+    __tablename__ = "daily_stock_snapshot"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    snapshot_date = Column(Date, nullable=False, index=True)
+    ticker = Column(String(20), nullable=False, index=True)
+    sector_bucket = Column(String(60))
+    current_price = Column(Float, nullable=False)
+    open_price = Column(Float)
+    prev_close = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    change_pct = Column(Float)
+    volume = Column(Integer)
+    signal = Column(String(12))
+    source = Column(String(40), default="live_market")
+    captured_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    user = relationship("User", back_populates="daily_stock_snapshots")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "snapshot_date",
+            "ticker",
+            "source",
+            name="uq_daily_snapshot_user_date_ticker_source",
+        ),
+        Index("ix_daily_snapshot_user_date", "user_id", "snapshot_date"),
+    )

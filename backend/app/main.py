@@ -147,6 +147,11 @@ async def lifespan(app: FastAPI):
 
     # ── Startup ──────────────────────────────────────────────────────────
     logger.info("Starting QuantDesk Pro API v1.0.0 ...")
+    if settings.APP_ENV.lower() == "production" and settings.AUTH_BYPASS_LOCAL:
+        logger.warning(
+            "AUTH_BYPASS_LOCAL=true while APP_ENV=production. "
+            "Google OAuth is effectively bypassed."
+        )
 
     # Database
     try:

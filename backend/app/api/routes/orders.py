@@ -29,6 +29,7 @@ from app.schemas.schemas import (
     SignalTriggerResponse,
     TradeResponse,
 )
+from app.services.email_service import send_trade_email
 from app.services.market_data import market_data_service
 
 logger = logging.getLogger(__name__)
@@ -273,6 +274,21 @@ async def _execute_portfolio_trade(
 
     await db.flush()
     await db.refresh(trade)
+
+    if trade_type == "BUY":
+        await send_trade_email(
+            action=trade_type,
+            ticker=ticker,
+            quantity=quantity,
+            price=price,
+            total_amount=total_amount,
+            total_cost=costs["total_cost"],
+            net_amount=costs["net_amount"],
+            user_email=current_user.email,
+            source="order_auto_signal",
+            executed_at=trade.executed_at,
+        )
+
     return trade
 
 
@@ -600,6 +616,20 @@ async def confirm_order(
         current_user.id,
         costs["total_cost"],
     )
+
+    if trade_type == "BUY":
+        await send_trade_email(
+            action=trade_type,
+            ticker=ticker,
+            quantity=order.quantity,
+            price=order.target_price,
+            total_amount=total_amount,
+            total_cost=costs["total_cost"],
+            net_amount=costs["net_amount"],
+            user_email=current_user.email,
+            source="order_confirm",
+            executed_at=trade.executed_at,
+        )
 
     return trade
 
