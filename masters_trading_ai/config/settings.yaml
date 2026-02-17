@@ -72,3 +72,6 @@ horizons:
 webapp:
   premarket_max_buffer_minutes: 30   # Snapshot must be captured no later than market open - 30m
   premarket_default_tickers: 10      # Number of large-cap rows in premarket dashboard table
+  sentiment_weight: 0.10             # Predictor default: 90% strategy/ensemble + 10% sentiment
+  advisor_sentiment_influence: 0.10  # Advisor edge blend: strategy component dominates
+  sentiment_same_day_only: true      # Apply sentiment influence only when day0 news exists

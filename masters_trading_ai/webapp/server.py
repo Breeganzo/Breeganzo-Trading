@@ -53,6 +53,7 @@ from flask import Flask, jsonify, render_template, request, make_response
 from flask_cors import CORS
 import numpy as np
 import pandas as pd
+
 try:
     from scipy.optimize import linprog
 except Exception:
@@ -221,13 +222,18 @@ MEDIUM_CONFIDENCE_THRESHOLD = float(
 AI_STRATEGY_GAP_WARN = float(os.environ.get("AI_STRATEGY_GAP_WARN", "0.10"))
 AI_STRATEGY_GAP_BLOCK = float(os.environ.get("AI_STRATEGY_GAP_BLOCK", "0.50"))
 ADVISOR_RISK_AVERSION = float(os.environ.get("ADVISOR_RISK_AVERSION", "0.35"))
-ADVISOR_MAX_PORTFOLIO_RISK = float(
-    os.environ.get("ADVISOR_MAX_PORTFOLIO_RISK", "0.12")
+ADVISOR_MAX_PORTFOLIO_RISK = float(os.environ.get("ADVISOR_MAX_PORTFOLIO_RISK", "0.12"))
+ADVISOR_SENTIMENT_INFLUENCE = float(
+    os.environ.get("ADVISOR_SENTIMENT_INFLUENCE", "0.10")
 )
 ADVISOR_MAX_PER_SECTOR = max(1, int(os.environ.get("ADVISOR_MAX_PER_SECTOR", "3")))
-ADVISOR_BUY_TRIGGER_BUFFER = float(os.environ.get("ADVISOR_BUY_TRIGGER_BUFFER", "0.002"))
+ADVISOR_BUY_TRIGGER_BUFFER = float(
+    os.environ.get("ADVISOR_BUY_TRIGGER_BUFFER", "0.002")
+)
 ADVISOR_ENTRY_RANGE_PCT = float(os.environ.get("ADVISOR_ENTRY_RANGE_PCT", "0.003"))
-ADVISOR_ENTRY_RANGE_MIN_PCT = float(os.environ.get("ADVISOR_ENTRY_RANGE_MIN_PCT", "0.001"))
+ADVISOR_ENTRY_RANGE_MIN_PCT = float(
+    os.environ.get("ADVISOR_ENTRY_RANGE_MIN_PCT", "0.001")
+)
 ADVISOR_TARGET_STEP_MULTIPLIER = float(
     os.environ.get("ADVISOR_TARGET_STEP_MULTIPLIER", "1.0")
 )
@@ -241,9 +247,7 @@ SIM_MAX_PRICE_DEVIATION_FROM_ENTRY = float(
     os.environ.get("SIM_MAX_PRICE_DEVIATION_FROM_ENTRY", "0.35")
 )
 PORTFOLIO_MAX_TRADE_QTY = int(os.environ.get("PORTFOLIO_MAX_TRADE_QTY", "25000"))
-PORTFOLIO_MAX_TRADE_PRICE = float(
-    os.environ.get("PORTFOLIO_MAX_TRADE_PRICE", "200000")
-)
+PORTFOLIO_MAX_TRADE_PRICE = float(os.environ.get("PORTFOLIO_MAX_TRADE_PRICE", "200000"))
 SIM_PRICE_HARD_MAX = float(os.environ.get("SIM_PRICE_HARD_MAX", "1000000"))
 SIM_QTY_HARD_MAX = int(os.environ.get("SIM_QTY_HARD_MAX", "100000"))
 TRADE_DAILY_REPORT_HOUR_IST = int(
@@ -1037,7 +1041,9 @@ def _normalize_sim_trade_event(event: dict) -> dict:
         "total_paid": total_paid,
         "total_received": total_received,
         "net_cash_impact": net_cash_impact,
-        "source": str(row.get("source", "strategy_simulation") or "strategy_simulation"),
+        "source": str(
+            row.get("source", "strategy_simulation") or "strategy_simulation"
+        ),
     }
     return normalized
 
@@ -1101,9 +1107,9 @@ def _append_trade_event_to_excel(event: dict) -> None:
             "source",
             "auto",
         ]
-        sheet_name = str(event.get("date_ist") or datetime.now(IST).strftime("%Y-%m-%d"))[
-            :31
-        ]
+        sheet_name = str(
+            event.get("date_ist") or datetime.now(IST).strftime("%Y-%m-%d")
+        )[:31]
 
         SIMULATED_TRADE_EXCEL_FILE.parent.mkdir(parents=True, exist_ok=True)
         if SIMULATED_TRADE_EXCEL_FILE.exists():
@@ -1150,7 +1156,9 @@ def _smtp_ready() -> bool:
     )
 
 
-def _send_email(subject: str, body: str, recipient: str | None = None) -> tuple[bool, str]:
+def _send_email(
+    subject: str, body: str, recipient: str | None = None
+) -> tuple[bool, str]:
     to_addr = (recipient or TRADE_EMAIL_TO or "").strip()
     if not to_addr:
         return False, "No recipient configured"
@@ -1241,7 +1249,7 @@ def _warm_sim_trade_cache_from_log() -> None:
     rows = _read_sim_trade_events()
     if not rows:
         return
-    tail = rows[-SIM_TRADE_CACHE_MAX_ROWS :]
+    tail = rows[-SIM_TRADE_CACHE_MAX_ROWS:]
     with _sim_trade_cache_lock:
         _sim_trade_event_cache.clear()
         for row in tail:
@@ -1272,11 +1280,16 @@ def _build_transaction_summary(
         rows = [
             r
             for r in rows
-            if (_parse_iso_with_ist(r.get("timestamp")) or datetime.min.replace(tzinfo=IST))
+            if (
+                _parse_iso_with_ist(r.get("timestamp"))
+                or datetime.min.replace(tzinfo=IST)
+            )
             >= since_dt
         ]
     with _sim_trade_cache_lock:
-        cache_rows = [r for r in list(_sim_trade_event_cache) if r.get("date_ist") == target_date]
+        cache_rows = [
+            r for r in list(_sim_trade_event_cache) if r.get("date_ist") == target_date
+        ]
     trade_rows = [r for r in rows if r.get("action") in {"BUY", "SELL"}]
     buy_rows = [r for r in trade_rows if r.get("action") == "BUY"]
     sell_rows = [r for r in trade_rows if r.get("action") == "SELL"]
@@ -1345,7 +1358,10 @@ def _build_sim_trade_ledger(
         events = [
             e
             for e in events
-            if (_parse_iso_with_ist(e.get("timestamp")) or datetime.min.replace(tzinfo=IST))
+            if (
+                _parse_iso_with_ist(e.get("timestamp"))
+                or datetime.min.replace(tzinfo=IST)
+            )
             >= since_dt
         ]
     trade_events = [
@@ -1446,22 +1462,28 @@ def _build_sim_trade_ledger(
                     "sell_time_ist": ev.get("time_ist"),
                     "sell_price": round(price, 2),
                     "sell_fee": round(sell_fee_alloc, 2),
-                    "sell_total_received": round(max(0.0, sell_notional - sell_fee_alloc), 2),
+                    "sell_total_received": round(
+                        max(0.0, sell_notional - sell_fee_alloc), 2
+                    ),
                     "realized_pnl": round(realized_alloc, 2),
                     "unrealized_pnl": None,
                     "hold_minutes": hold_minutes,
                     "sell_reason": str(ev.get("reason", "")),
-                    "source": str(ev.get("source", lot.get("source", "strategy_simulation"))),
-                    "stop_loss_price": round(
-                        _safe_float(ev.get("stop_loss_price") or lot.get("stop_loss_price")),
-                        2,
+                    "source": str(
+                        ev.get("source", lot.get("source", "strategy_simulation"))
                     ),
-                    "target_price": round(
-                        _safe_float(ev.get("target_price") or lot.get("target_price")),
-                        2,
+                    "stop_loss_price": _display_price_or_none(
+                        ev.get("stop_loss_price") or lot.get("stop_loss_price")
                     ),
-                    "entry_range_low": round(_safe_float(lot.get("entry_range_low")), 2),
-                    "entry_range_high": round(_safe_float(lot.get("entry_range_high")), 2),
+                    "target_price": _display_price_or_none(
+                        ev.get("target_price") or lot.get("target_price")
+                    ),
+                    "entry_range_low": _display_price_or_none(
+                        lot.get("entry_range_low")
+                    ),
+                    "entry_range_high": _display_price_or_none(
+                        lot.get("entry_range_high")
+                    ),
                 }
             )
 
@@ -1525,26 +1547,24 @@ def _build_sim_trade_ledger(
                     "sell_fee": None,
                     "sell_total_received": None,
                     "realized_pnl": None,
-                    "unrealized_pnl": round(unrealized, 2) if unrealized is not None else None,
+                    "unrealized_pnl": (
+                        round(unrealized, 2) if unrealized is not None else None
+                    ),
                     "hold_minutes": _minutes_between(lot.get("timestamp"), now_iso),
                     "sell_reason": None,
                     "source": str(lot.get("source", "strategy_simulation")),
-                    "current_price": round(current_price, 2) if current_price > 0 else None,
-                    "stop_loss_price": round(
-                        _safe_float(pos.get("stop_loss_price") or lot.get("stop_loss_price")),
-                        2,
+                    "current_price": _display_price_or_none(current_price),
+                    "stop_loss_price": _display_price_or_none(
+                        pos.get("stop_loss_price") or lot.get("stop_loss_price")
                     ),
-                    "target_price": round(
-                        _safe_float(pos.get("target_price") or lot.get("target_price")),
-                        2,
+                    "target_price": _display_price_or_none(
+                        pos.get("target_price") or lot.get("target_price")
                     ),
-                    "entry_range_low": round(
-                        _safe_float(pos.get("entry_range_low") or lot.get("entry_range_low")),
-                        2,
+                    "entry_range_low": _display_price_or_none(
+                        pos.get("entry_range_low") or lot.get("entry_range_low")
                     ),
-                    "entry_range_high": round(
-                        _safe_float(pos.get("entry_range_high") or lot.get("entry_range_high")),
-                        2,
+                    "entry_range_high": _display_price_or_none(
+                        pos.get("entry_range_high") or lot.get("entry_range_high")
                     ),
                 }
             )
@@ -1633,7 +1653,9 @@ def _sync_portfolio_from_simulated_trade(event: dict) -> None:
         or qty > PORTFOLIO_MAX_TRADE_QTY
         or price > PORTFOLIO_MAX_TRADE_PRICE
     ):
-        if ticker and (qty > PORTFOLIO_MAX_TRADE_QTY or price > PORTFOLIO_MAX_TRADE_PRICE):
+        if ticker and (
+            qty > PORTFOLIO_MAX_TRADE_QTY or price > PORTFOLIO_MAX_TRADE_PRICE
+        ):
             log.warning(
                 "Skipping portfolio sync for %s due extreme qty/price (qty=%s price=%s)",
                 ticker,
@@ -1701,7 +1723,11 @@ def _is_simulation_portfolio_trade(tr: dict) -> bool:
 def _clear_simulation_history(*, clear_portfolio_sim_trades: bool = True) -> dict:
     removed_files: list[str] = []
     with _log_lock:
-        for path in (SIMULATED_TRADE_LOG_FILE, SIMULATED_TRADE_CSV_FILE, SIMULATED_TRADE_EXCEL_FILE):
+        for path in (
+            SIMULATED_TRADE_LOG_FILE,
+            SIMULATED_TRADE_CSV_FILE,
+            SIMULATED_TRADE_EXCEL_FILE,
+        ):
             try:
                 if path.exists():
                     path.unlink()
@@ -1721,7 +1747,9 @@ def _clear_simulation_history(*, clear_portfolio_sim_trades: bool = True) -> dic
             removed_portfolio_trades = max(0, len(trades) - len(kept))
             if removed_portfolio_trades > 0:
                 _write_portfolio_trades(kept)
-                summary = _portfolio_summary_from_trades(kept, include_live_prices=False)
+                summary = _portfolio_summary_from_trades(
+                    kept, include_live_prices=False
+                )
                 _write_portfolio(
                     [
                         {
@@ -1966,7 +1994,7 @@ def _sentiment_adjusted_action(strategy_action: str, row: dict) -> tuple[str, st
         return base, "strategy_only"
 
     sent_raw = _safe_float(row.get("weighted_sentiment_raw"))
-    # Very poor sentiment: block/aggressively reduce long exposure.
+    # Keep sentiment conservative: only severe negative news can override strategy.
     if sent_raw <= -0.55:
         if base == "BUY":
             return "HOLD", "sentiment_blocked_buy"
@@ -1975,12 +2003,6 @@ def _sentiment_adjusted_action(strategy_action: str, row: dict) -> tuple[str, st
     elif sent_raw <= -0.30:
         if base == "BUY":
             return "HOLD", "sentiment_downgrade_to_hold"
-
-    # Strong positive sentiment: soften bearish/neutral decisions.
-    if sent_raw >= 0.45 and base == "SELL":
-        return "HOLD", "sentiment_softened_sell"
-    if sent_raw >= 0.35 and base == "HOLD":
-        return "BUY", "sentiment_upgrade_to_buy"
 
     return base, "strategy_plus_sentiment"
 
@@ -2114,11 +2136,23 @@ def _build_strategy_buy_candidates(
         entry_low, entry_high = _entry_price_range(strategy_price)
 
         predicted_edge = max(0.0, pred_ret_pct) / 100.0
-        sentiment_edge = float(np.clip(_safe_float(raw.get("weighted_sentiment_raw")), -1, 1))
-        expected_edge = (
-            predicted_edge * (confidence_pct / 100.0) * (model_agreement / 100.0) * liq_factor
-            + 0.03 * sentiment_edge
+        sentiment_edge = (
+            float(np.clip(_safe_float(raw.get("weighted_sentiment_raw")), -1, 1))
+            if _has_relevant_today_sentiment(raw)
+            else 0.0
         )
+        strategy_edge_component = (
+            predicted_edge
+            * (confidence_pct / 100.0)
+            * (model_agreement / 100.0)
+            * liq_factor
+        )
+        # Keep sentiment on the same return scale as strategy edge.
+        sentiment_component = sentiment_edge * max(predicted_edge, 0.01)
+        sentiment_influence = float(np.clip(ADVISOR_SENTIMENT_INFLUENCE, 0.0, 1.0))
+        expected_edge = (
+            1.0 - sentiment_influence
+        ) * strategy_edge_component + sentiment_influence * sentiment_component
         if soft_candidate:
             expected_edge *= 0.85
         risk_metric = max(stop_loss_pct, atr_pct / 100.0, 0.01)
@@ -2153,6 +2187,9 @@ def _build_strategy_buy_candidates(
                 "entry_range_low": round(entry_low, 2),
                 "entry_range_high": round(entry_high, 2),
                 "expected_edge": float(expected_edge),
+                "strategy_edge_component": float(strategy_edge_component),
+                "sentiment_edge_component": float(sentiment_component),
+                "sentiment_influence": round(sentiment_influence, 4),
                 "risk_metric": float(risk_metric),
                 "objective_utility": float(utility),
                 "signal": str(raw.get("signal", "") or strategy_signal),
@@ -2181,7 +2218,11 @@ def _build_strategy_buy_candidates(
         )
 
     candidates.sort(
-        key=lambda c: (c["objective_utility"], c["confidence"], c["predicted_return_pct"]),
+        key=lambda c: (
+            c["objective_utility"],
+            c["confidence"],
+            c["predicted_return_pct"],
+        ),
         reverse=True,
     )
     return candidates, sorted(set(warnings))
@@ -2206,10 +2247,17 @@ def _optimize_candidate_allocations(
 
     n = len(candidates)
     max_positions = max(1, min(max_positions, n))
-    utilities = np.array([max(-1.0, float(c["objective_utility"])) for c in candidates], dtype=float)
-    risks = np.array([max(0.001, float(c["risk_metric"])) for c in candidates], dtype=float)
+    utilities = np.array(
+        [max(-1.0, float(c["objective_utility"])) for c in candidates], dtype=float
+    )
+    risks = np.array(
+        [max(0.001, float(c["risk_metric"])) for c in candidates], dtype=float
+    )
     per_name_cap = np.array(
-        [min(budget * max(0.1, min(MAX_POSITION_SIZE, 1.0)), budget) for _ in candidates],
+        [
+            min(budget * max(0.1, min(MAX_POSITION_SIZE, 1.0)), budget)
+            for _ in candidates
+        ],
         dtype=float,
     )
     allocations = np.zeros(n, dtype=float)
@@ -2243,7 +2291,11 @@ def _optimize_candidate_allocations(
 
     order = sorted(
         range(n),
-        key=lambda i: (utilities[i], candidates[i]["confidence"], candidates[i]["predicted_return_pct"]),
+        key=lambda i: (
+            utilities[i],
+            candidates[i]["confidence"],
+            candidates[i]["predicted_return_pct"],
+        ),
         reverse=True,
     )
     picks: list[dict] = []
@@ -2470,7 +2522,9 @@ def _run_sim_auto_check(
                     max(_safe_float(pos.get("trail_stop_price")), new_stop), 2
                 )
                 pos["target_price"] = round(new_target, 2)
-                pos["highest_price"] = round(max(_safe_float(pos.get("highest_price")), cp), 2)
+                pos["highest_price"] = round(
+                    max(_safe_float(pos.get("highest_price")), cp), 2
+                )
                 open_positions[ticker] = pos
                 state.setdefault("open_positions", {})[ticker] = pos
                 trailing_updates.append(
@@ -2561,7 +2615,9 @@ def _run_sim_auto_check(
                 if cp <= 0:
                     cp = _safe_float(row.get("current_price"))
                 strategy_entry = _safe_float(row.get("strategy_price_at_open"))
-                if not _is_realistic_price(cp) or not _is_realistic_price(strategy_entry):
+                if not _is_realistic_price(cp) or not _is_realistic_price(
+                    strategy_entry
+                ):
                     continue
                 strategy_dev = abs(cp - strategy_entry) / max(strategy_entry, 1e-9)
                 if strategy_dev > max(0.05, SIM_MAX_PRICE_DEVIATION_FROM_STRATEGY):
@@ -2588,6 +2644,14 @@ def _run_sim_auto_check(
                 )
                 qty = max(0, min(qty_suggested, qty_cash, SIM_QTY_HARD_MAX))
                 if qty <= 0:
+                    continue
+                available_cash = _safe_float(state.get("cash"))
+                est_notional = qty * cp
+                est_fee = _estimate_entry_fee(
+                    est_notional,
+                    trade_type="equity_delivery",
+                )
+                if est_notional + est_fee > available_cash + 1e-9:
                     continue
                 stop_loss = _safe_float(row.get("stop_loss_price"))
                 target = _safe_float(row.get("target_price"))
@@ -2737,10 +2801,10 @@ def _execute_sim_sell(
         "fee": round(sell_fee, 2),
         "realized_pnl": round(realized_pnl, 2),
         "cash_after": round(state["cash"], 2),
-        "stop_loss_price": round(_safe_float(pos.get("stop_loss_price")), 2),
-        "target_price": round(_safe_float(pos.get("target_price")), 2),
-        "entry_range_low": round(_safe_float(pos.get("entry_range_low")), 2),
-        "entry_range_high": round(_safe_float(pos.get("entry_range_high")), 2),
+        "stop_loss_price": _display_price_or_none(pos.get("stop_loss_price")),
+        "target_price": _display_price_or_none(pos.get("target_price")),
+        "entry_range_low": _display_price_or_none(pos.get("entry_range_low")),
+        "entry_range_high": _display_price_or_none(pos.get("entry_range_high")),
     }
     state.setdefault("trade_history", []).append(event)
     return state, event, None
@@ -3697,7 +3761,12 @@ def api_advisor_open_buy_list():
                     break
 
         raw_holds: list[dict] = []
-        if len(buy_candidates) < n and allow_warming and not cached_rows and not force_fresh:
+        if (
+            len(buy_candidates) < n
+            and allow_warming
+            and not cached_rows
+            and not force_fresh
+        ):
             return (
                 jsonify(
                     {
@@ -3814,8 +3883,13 @@ def api_advisor_open_buy_list():
         if candidate_tickers:
             cached_map = _price_cache or {}
             for ticker in candidate_tickers:
-                cached_row = cached_map.get(ticker) if isinstance(cached_map, dict) else None
-                if isinstance(cached_row, dict) and _safe_float(cached_row.get("price")) > 0:
+                cached_row = (
+                    cached_map.get(ticker) if isinstance(cached_map, dict) else None
+                )
+                if (
+                    isinstance(cached_row, dict)
+                    and _safe_float(cached_row.get("price")) > 0
+                ):
                     live_prices[ticker] = dict(cached_row)
             if use_live_prices:
                 missing = [t for t in candidate_tickers if t not in live_prices]
@@ -3875,13 +3949,38 @@ def api_advisor_open_buy_list():
             row["sentiment_weighted_score"] = round(
                 _safe_float(row.get("weighted_sentiment_raw")), 4
             )
-            row["stop_loss_pct"] = round(_safe_float(row.get("stop_loss_pct")) * 100.0, 3)
+            row["stop_loss_pct"] = round(
+                _safe_float(row.get("stop_loss_pct")) * 100.0, 3
+            )
+            row["strategy_price_at_open"] = _display_price_or_none(
+                row.get("strategy_price_at_open")
+            )
+            row["current_price"] = _display_price_or_none(row.get("current_price"))
+            row["entry_range_low"] = _display_price_or_none(row.get("entry_range_low"))
+            row["entry_range_high"] = _display_price_or_none(
+                row.get("entry_range_high")
+            )
+            row["stop_loss_price"] = _display_price_or_none(row.get("stop_loss_price"))
+            row["target_price"] = _display_price_or_none(row.get("target_price"))
+            row["estimated_fee"] = _display_price_or_none(row.get("estimated_fee"))
+            row["estimated_notional"] = _display_price_or_none(
+                row.get("estimated_notional")
+            )
+            row["est_trade_cost"] = _display_price_or_none(row.get("est_trade_cost"))
+            qty_display = _display_qty_or_none(row.get("suggested_qty"), digits=0)
+            row["suggested_qty"] = int(qty_display) if qty_display is not None else None
             if _safe_float(row.get("liquidity_factor")) < 0.8:
                 warnings.append(
                     f"{row.get('ticker')} has lower liquidity "
                     f"(factor={_safe_float(row.get('liquidity_factor')):.2f}, "
                     f"avg_volume_30d={_safe_float(row.get('avg_volume_30d')):.0f})."
                 )
+
+        picks = [
+            row
+            for row in picks
+            if row.get("suggested_qty") and row.get("est_trade_cost")
+        ]
 
         total_cost = round(sum(_safe_float(r.get("est_trade_cost")) for r in picks), 2)
         remaining_budget = round(max(0.0, budget - total_cost), 2)
@@ -3936,19 +4035,13 @@ def api_simulate_portfolio():
             {
                 "ticker": ticker,
                 "name": ticker_names.get(ticker, _clean_name(ticker)),
-                "quantity": round(qty, 4),
-                "entry_price": round(entry, 2),
-                "current_price": round(live, 2) if live > 0 else None,
-                "target_price": (
-                    round(strategy_target, 2) if strategy_target > 0 else None
-                ),
-                "stop_loss_price": round(stop_loss, 2) if stop_loss > 0 else None,
-                "entry_range_low": round(_safe_float(pos.get("entry_range_low")), 2)
-                if _safe_float(pos.get("entry_range_low")) > 0
-                else None,
-                "entry_range_high": round(_safe_float(pos.get("entry_range_high")), 2)
-                if _safe_float(pos.get("entry_range_high")) > 0
-                else None,
+                "quantity": _display_qty_or_none(qty),
+                "entry_price": _display_price_or_none(entry),
+                "current_price": _display_price_or_none(live),
+                "target_price": (_display_price_or_none(strategy_target)),
+                "stop_loss_price": _display_price_or_none(stop_loss),
+                "entry_range_low": _display_price_or_none(pos.get("entry_range_low")),
+                "entry_range_high": _display_price_or_none(pos.get("entry_range_high")),
                 "unrealized_pnl": round(mark - entry_value, 2),
                 "next_recommended_sell_time": _next_recommended_sell_time(
                     live if live > 0 else entry, stop_loss, strategy_target
@@ -4045,6 +4138,10 @@ def api_simulate_trade():
     Supports BUY, SELL, AUTO_CHECK, RESET.
     """
     payload = request.get_json(silent=True) or {}
+    if not payload:
+        # Support query-string invocation for quick smoke checks:
+        # /api/simulate/trade?action=AUTO_CHECK&auto_buy=true
+        payload = dict(request.args or {})
     action = str(payload.get("action", payload.get("side", "BUY"))).strip().upper()
     if action not in {"BUY", "SELL", "AUTO_CHECK", "RESET"}:
         return jsonify({"error": "action must be BUY, SELL, AUTO_CHECK, or RESET"}), 400
@@ -4059,9 +4156,10 @@ def api_simulate_trade():
             budget = SIMULATION_DEFAULT_CASH
         if budget <= 0:
             budget = SIMULATION_DEFAULT_CASH
-        clear_history = bool(payload.get("clear_history", True))
-        clear_portfolio_sim_trades = bool(
-            payload.get("clear_portfolio_sim_trades", True)
+        clear_history = _as_bool(payload.get("clear_history"), default=True)
+        clear_portfolio_sim_trades = _as_bool(
+            payload.get("clear_portfolio_sim_trades"),
+            default=True,
         )
         cleanup = (
             _clear_simulation_history(
@@ -4112,7 +4210,7 @@ def api_simulate_trade():
             )
         result = _run_sim_auto_check(
             state,
-            auto_buy_enabled=bool(payload.get("auto_buy", False)),
+            auto_buy_enabled=_as_bool(payload.get("auto_buy"), default=False),
             now_iso=now_iso,
             source="strategy_simulation",
         )
@@ -4214,14 +4312,18 @@ def api_simulate_trade():
             target_price = _round_to_tick(
                 price + max(abs(price - stop_loss) * max(rr_ratio, 1.0), price * 0.01)
             )
-        strategy_recommendation = str(
-            payload.get("strategy_recommendation")
-            or _strategy_action_from_signal(
-                str(payload.get("signal", "")).strip().upper(),
-                predicted_return_pct=_safe_float(payload.get("predicted_return")),
+        strategy_recommendation = (
+            str(
+                payload.get("strategy_recommendation")
+                or _strategy_action_from_signal(
+                    str(payload.get("signal", "")).strip().upper(),
+                    predicted_return_pct=_safe_float(payload.get("predicted_return")),
+                )
+                or "HOLD"
             )
-            or "HOLD"
-        ).strip().upper()
+            .strip()
+            .upper()
+        )
         if strategy_recommendation not in {"BUY", "SELL", "HOLD"}:
             strategy_recommendation = "HOLD"
 
@@ -4282,8 +4384,10 @@ def api_top_picks():
     grouped = request.args.get("grouped", "").lower() in ("1", "true", "yes")
     force = request.args.get("force", "").lower() in ("1", "true", "yes")
     refresh_ai = request.args.get("refresh_ai", "").lower() in ("1", "true", "yes")
-    use_cached_analysis = (
-        request.args.get("use_cached_analysis", "false").lower() in ("1", "true", "yes")
+    use_cached_analysis = request.args.get("use_cached_analysis", "false").lower() in (
+        "1",
+        "true",
+        "yes",
     )
     ai_refresh_limit = max(0, int(os.environ.get("TOP_PICKS_AI_REFRESH_LIMIT", "6")))
     ai_refresh_count = 0
@@ -4362,7 +4466,10 @@ def api_top_picks():
             rows.append(r)
 
         def _rank_key(item: dict):
-            return (_safe_float(item.get("confidence")), _safe_float(item.get("_score")))
+            return (
+                _safe_float(item.get("confidence")),
+                _safe_float(item.get("_score")),
+            )
 
         buys = sorted(
             [r for r in rows if str(r.get("signal", "")).upper() == "BUY"],
@@ -4402,7 +4509,9 @@ def api_top_picks():
                     202,
                 )
             if not groups:
-                groups = predictor.predict_top_picks_grouped(sectors=sectors, top_n=top_n)
+                groups = predictor.predict_top_picks_grouped(
+                    sectors=sectors, top_n=top_n
+                )
             cleaned_groups: dict[str, list[dict]] = {
                 "top_buy": [],
                 "top_sell": [],
@@ -5745,7 +5854,9 @@ def _build_premarket_snapshot(tickers: list[str] | None = None) -> dict:
             "confidence": round(float(pred.get("confidence", 0) or 0), 2),
             "model_agreement": round(float(pred.get("model_agreement", 0) or 0), 2),
             "atr_pct": round(float(pred.get("atr_pct", 0) or 0), 3),
-            "liquidity_factor": round(float(pred.get("liquidity_factor", 1.0) or 1.0), 3),
+            "liquidity_factor": round(
+                float(pred.get("liquidity_factor", 1.0) or 1.0), 3
+            ),
             "weighted_sentiment_raw": round(
                 float(pred.get("weighted_sentiment_raw", 0) or 0),
                 4,
@@ -5904,6 +6015,33 @@ def _safe_float(value) -> float:
     return 0.0
 
 
+def _display_price_or_none(value, *, digits: int = 2) -> float | None:
+    out = _safe_float(value)
+    if out <= 0:
+        return None
+    return round(out, digits)
+
+
+def _display_qty_or_none(value, *, digits: int = 4) -> float | None:
+    out = _safe_float(value)
+    if out <= 0:
+        return None
+    return round(out, digits)
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 def _load_groq_forecast_cache() -> None:
     """Load persisted Groq price-forecast cache once per process."""
     global _groq_forecast_cache_loaded, _groq_forecast_cache, _groq_forecast_cache_time
@@ -5945,7 +6083,9 @@ def _load_groq_forecast_cache() -> None:
             if cached_at <= 0:
                 generated_at_iso = payload.get("generated_at_iso")
                 try:
-                    cached_at = datetime.fromisoformat(str(generated_at_iso)).timestamp()
+                    cached_at = datetime.fromisoformat(
+                        str(generated_at_iso)
+                    ).timestamp()
                 except Exception:
                     cached_at = now_ts
             t = str(ticker or "").upper()
@@ -6714,14 +6854,11 @@ def _daily_trade_report_scheduler_loop():
         try:
             now = datetime.now(IST)
             today = now.strftime("%Y-%m-%d")
-            due = (
-                now.weekday() < 5
-                and (
-                    now.hour > TRADE_DAILY_REPORT_HOUR_IST
-                    or (
-                        now.hour == TRADE_DAILY_REPORT_HOUR_IST
-                        and now.minute >= TRADE_DAILY_REPORT_MINUTE_IST
-                    )
+            due = now.weekday() < 5 and (
+                now.hour > TRADE_DAILY_REPORT_HOUR_IST
+                or (
+                    now.hour == TRADE_DAILY_REPORT_HOUR_IST
+                    and now.minute >= TRADE_DAILY_REPORT_MINUTE_IST
                 )
             )
             if due:
@@ -6833,7 +6970,6 @@ def api_price_tracker(ticker: str):
         allow_generate=refresh_ai and bool(os.environ.get("GROQ_API_KEY")),
     )
     ai_predicted_price = float(ai_meta_open.get("price") or 0)
-    ai_available = ai_predicted_price > 0
     ai_open_price = float(
         premarket_row.get("ai_predicted_price") or ai_predicted_price or 0
     )
@@ -6910,6 +7046,11 @@ def api_price_tracker(ticker: str):
     if ai_open_price <= 0:
         ai_open_price = ai_predicted_price if ai_predicted_price > 0 else 0.0
 
+    sim_positions = dict(_read_portfolio_sim_state().get("open_positions", {}))
+    sim_pos = dict(sim_positions.get(ticker, {}) or {})
+    entry_range_low = _safe_float(sim_pos.get("entry_range_low"))
+    entry_range_high = _safe_float(sim_pos.get("entry_range_high"))
+
     current_strategy_ref = current_price if current_price > 0 else open_price
     current_strategy_price = (
         round(current_strategy_ref * (1 + live_strategy_return / 100.0), 2)
@@ -6936,8 +7077,7 @@ def api_price_tracker(ticker: str):
     current_ai_price = float(ai_meta_live.get("price") or ai_open_price or 0)
     if prediction_window == "after_hours_live":
         current_ai_predicted_at = (
-            ai_meta_live.get("generated_at_iso")
-            or now_ist.isoformat()
+            ai_meta_live.get("generated_at_iso") or now_ist.isoformat()
         )
 
     if next_day_mode:
@@ -7023,26 +7163,37 @@ def api_price_tracker(ticker: str):
     )
 
     snapshot_now_iso = datetime.now(IST).isoformat()
+    open_price_display = _display_price_or_none(open_price)
+    market_open_price = _display_price_or_none(open_price)
+    strategy_price_at_open_display = _display_price_or_none(strategy_price_at_open)
     return jsonify(
         {
             "ticker": ticker,
             "name": ticker_names.get(ticker, _clean_name(ticker)),
-            "open_price": round(open_price, 2),
+            "open_price": open_price_display,
+            "market_open_price": market_open_price,
             "open_price_captured_at": open_price_captured_at,
             "open_price_captured_at_display": _format_ist_timestamp(
                 open_price_captured_at
             ),
-            "predicted_price": round(display_strategy_price, 2),
-            "strategy_predicted_price": round(display_strategy_price, 2),
+            "predicted_price": _display_price_or_none(display_strategy_price),
+            "strategy_predicted_price": _display_price_or_none(display_strategy_price),
+            "strategy_price_at_open": strategy_price_at_open_display,
             "ai_predicted_price": (
                 round(display_ai_price, 2) if display_ai_price > 0 else None
             ),
-            "current_strategy_predicted_price": round(next_day_strategy_price, 2),
+            "current_strategy_predicted_price": _display_price_or_none(
+                next_day_strategy_price
+            ),
             "current_ai_predicted_price": (
                 round(next_day_ai_price, 2) if next_day_ai_price > 0 else None
             ),
-            "current_price": round(current_price, 2),
-            "close_price": round(current_price, 2) if is_market_closed else None,
+            "current_price": _display_price_or_none(current_price),
+            "close_price": (
+                _display_price_or_none(current_price) if is_market_closed else None
+            ),
+            "entry_range_low": _display_price_or_none(entry_range_low),
+            "entry_range_high": _display_price_or_none(entry_range_high),
             "display_price_label": display_price_label,
             "market_status": market_status,
             "prediction_window": prediction_window,
@@ -7052,9 +7203,7 @@ def api_price_tracker(ticker: str):
                 round(reference_price, 2) if reference_price > 0 else None
             ),
             "next_day_strategy_predicted_price": (
-                round(next_day_strategy_price, 2)
-                if next_day_strategy_price > 0
-                else None
+                _display_price_or_none(next_day_strategy_price)
             ),
             "next_day_ai_predicted_price": (
                 round(next_day_ai_price, 2) if next_day_ai_price > 0 else None
@@ -7087,7 +7236,7 @@ def api_price_tracker(ticker: str):
             ),
             "current_snapshot_at": snapshot_now_iso,
             "current_snapshot_at_display": _format_ist_timestamp(snapshot_now_iso),
-            "prev_close": round(prev_close, 2),
+            "prev_close": _display_price_or_none(prev_close),
             "open_to_current_pct": round(open_to_current_pct, 3),
             "open_to_predicted_pct": round(open_to_predicted_pct, 3),
             "open_to_ai_predicted_pct": (
@@ -7112,9 +7261,9 @@ def api_price_tracker(ticker: str):
             ),
             "strategy_source": "ensemble_models",
             "volume": curr.get("volume", 0),
-            "high": curr.get("high", 0),
-            "low": curr.get("low", 0),
-            "open": curr.get("open", 0),
+            "high": _display_price_or_none(curr.get("high", 0)),
+            "low": _display_price_or_none(curr.get("low", 0)),
+            "open": _display_price_or_none(curr.get("open", 0)),
             "change": curr.get("change", 0),
             "change_pct": curr.get("change_pct", 0),
         }

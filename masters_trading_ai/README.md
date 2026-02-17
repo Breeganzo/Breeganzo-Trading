@@ -67,6 +67,16 @@ DAILY_ANALYSIS_TTL_SEC=90
 PRICE_CACHE_TTL_SEC=30
 ```
 
+Strategy-first sentiment knobs:
+```bash
+# Predictor blend defaults (same-day sentiment only):
+ENSEMBLE_WEIGHT=0.90
+SENTIMENT_WEIGHT=0.10
+
+# Advisor candidate scoring sentiment influence:
+ADVISOR_SENTIMENT_INFLUENCE=0.10
+```
+
 ## 3) Model-loading transparency
 Use:
 ```bash
@@ -199,8 +209,10 @@ Simulation risk controls:
 - same-cycle reinvestment:
   - after simulated sell frees cash, auto-buy optimizer can allocate into fresh strategy BUY candidates during market hours.
 - strategy-first with sentiment adjustment:
-  - baseline action comes from strategy signal;
-  - same-day relevant sentiment can downgrade/upgrade action conservatively.
+  - baseline action always comes from strategy signal;
+  - same-day sentiment only (`day0`) can adjust action conservatively;
+  - positive sentiment does not force BUY upgrades;
+  - default blend policy is strategy/ensemble `0.90` + sentiment `0.10`.
 - portfolio optimizer:
   - risk-constrained utility optimization (budget cap, concentration cap, risk budget, fee-aware quantity rounding).
 - simulation-to-portfolio sync:
