@@ -22,6 +22,8 @@ import re
 import time
 import hashlib
 import logging
+import threading
+import resource
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -79,6 +81,11 @@ ENABLE_GROQ_NEWS_SENTIMENT = os.environ.get(
 GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE = int(
     os.environ.get("GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE", "8")
 )
+YF_MAX_PARALLEL = max(1, int(os.environ.get("YF_MAX_PARALLEL", "2")))
+YF_CALL_TIMEOUT_SEC = max(3.0, float(os.environ.get("YF_CALL_TIMEOUT_SEC", "15")))
+YF_NEWS_TTL_SECONDS = max(60, int(os.environ.get("YF_NEWS_TTL_SECONDS", "300")))
+FD_SOFT_GUARD_RATIO = float(os.environ.get("FD_SOFT_GUARD_RATIO", "0.85"))
+_yf_download_semaphore = threading.BoundedSemaphore(YF_MAX_PARALLEL)
 
 
 def _sanitize_predicted_return(value: float, base_preds: dict) -> float:
@@ -126,6 +133,44 @@ def _sanitize_predicted_return(value: float, base_preds: dict) -> float:
         )
 
     return sanitized
+
+
+def _fd_pressure_high() -> bool:
+    try:
+        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft <= 0:
+            return False
+        used = len(os.listdir("/dev/fd"))
+        ratio = max(0.5, min(FD_SOFT_GUARD_RATIO, 0.98))
+        return used >= int(float(soft) * ratio)
+    except Exception:
+        return False
+
+
+def _safe_yf_download(*args, **kwargs) -> pd.DataFrame:
+    if yf is None:
+        return pd.DataFrame()
+    if _fd_pressure_high():
+        log.warning("Predictor skipped yfinance download under high FD pressure")
+        return pd.DataFrame()
+    if not _yf_download_semaphore.acquire(timeout=YF_CALL_TIMEOUT_SEC):
+        log.warning("Predictor skipped yfinance download due to semaphore timeout")
+        return pd.DataFrame()
+    try:
+        kwargs.setdefault("progress", False)
+        kwargs.setdefault("threads", False)
+        kwargs.setdefault("timeout", YF_CALL_TIMEOUT_SEC)
+        try:
+            out = yf.download(*args, **kwargs)
+        except TypeError:
+            kwargs.pop("timeout", None)
+            out = yf.download(*args, **kwargs)
+        return out if isinstance(out, pd.DataFrame) else pd.DataFrame()
+    except Exception as exc:
+        log.debug("Predictor yfinance download failed: %s", exc)
+        return pd.DataFrame()
+    finally:
+        _yf_download_semaphore.release()
 
 
 # ---------------------------------------------------------------------------
@@ -382,10 +427,34 @@ class LivePredictor:
     ) -> list[dict]:
         if yf is None:
             return []
-        try:
-            news_items = yf.Ticker(ticker).news or []
-        except Exception:
-            return []
+        ticker_key = str(ticker or "").strip().upper()
+        raw_news_cache_key = f"raw_news::{ticker_key}"
+        now_ts = time.time()
+        news_items = None
+        cached_raw = self._sentiment_cache.get(raw_news_cache_key)
+        if isinstance(cached_raw, dict):
+            ts = float(cached_raw.get("ts", 0) or 0)
+            if (now_ts - ts) < YF_NEWS_TTL_SECONDS:
+                rows = cached_raw.get("items", [])
+                if isinstance(rows, list):
+                    news_items = rows
+
+        if news_items is None:
+            if _fd_pressure_high():
+                return []
+            if not _yf_download_semaphore.acquire(timeout=YF_CALL_TIMEOUT_SEC):
+                return []
+            try:
+                news_items = yf.Ticker(ticker_key).news or []
+            except Exception:
+                news_items = []
+            finally:
+                _yf_download_semaphore.release()
+            self._sentiment_cache[raw_news_cache_key] = {
+                "ts": now_ts,
+                "items": news_items if isinstance(news_items, list) else [],
+            }
+            self._save_sentiment_cache()
 
         articles: list[dict] = []
         for row in news_items:
@@ -973,7 +1042,7 @@ class LivePredictor:
             return None
 
         try:
-            df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
+            df = _safe_yf_download(ticker, period=period, auto_adjust=True)
             if df is None or len(df) < 300:
                 return None
 
@@ -2025,8 +2094,8 @@ class LivePredictor:
             return None
         try:
             # Use unadjusted candles for live-trading price parity with broker/UI quotes.
-            data = yf.download(
-                ticker, period="2d", interval="1d", progress=False, auto_adjust=False
+            data = _safe_yf_download(
+                ticker, period="2d", interval="1d", auto_adjust=False
             )
             if data is None or data.empty:
                 return None
@@ -2080,8 +2149,8 @@ def get_intraday_data(
         return None
     try:
         # Keep intraday chart prices in raw market units (not split-adjusted).
-        df = yf.download(
-            ticker, period=period, interval=interval, progress=False, auto_adjust=False
+        df = _safe_yf_download(
+            ticker, period=period, interval=interval, auto_adjust=False
         )
         if df is None or df.empty:
             return None

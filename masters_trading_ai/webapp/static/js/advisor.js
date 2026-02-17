@@ -145,12 +145,13 @@ function renderAdvisorOpenList(rows) {
     const body = document.getElementById('advisor-open-buy-body');
     if (!body) return;
     if (!rows || !rows.length) {
-        body.innerHTML = '<tr><td colspan="7" class="muted-text">No advisor picks available right now.</td></tr>';
+        body.innerHTML = '<tr><td colspan="8" class="muted-text">No advisor picks available right now.</td></tr>';
         return;
     }
     body.innerHTML = rows.map((row) => `
         <tr>
             <td><strong>${row.name || row.ticker.replace('.NS', '')}</strong><br><span class="muted-text">${row.ticker}</span></td>
+            <td>${String(row.sector || 'other').replaceAll('_', ' ')}</td>
             <td>${advisorFormatPrice(row.strategy_price_at_open)}</td>
             <td>${Number(row.suggested_qty || 0)}</td>
             <td>${advisorFormatPrice(row.est_trade_cost)}</td>
@@ -170,8 +171,15 @@ async function loadAdvisorOpenBuyList() {
     if (status) status.textContent = 'Loading advisor picks...';
     setAdvisorBusy(true);
     try {
-        const res = await fetch(`/api/advisor/open-buy-list?n=10&budget=${encodeURIComponent(budget)}`);
+        const res = await fetch(`/api/advisor/open-buy-list?n=10&budget=${encodeURIComponent(budget)}&allow_warming=1`);
         const data = await res.json();
+        if (res.status === 202 && data.status === 'warming') {
+            if (status) status.textContent = `${data.message || 'Advisor cache warming...'} Retrying in ${Number(data.retry_after_sec || 5)}s.`;
+            setTimeout(() => {
+                loadAdvisorOpenBuyList();
+            }, Math.max(2, Number(data.retry_after_sec || 5)) * 1000);
+            return;
+        }
         if (!res.ok || data.error) throw new Error(data.error || 'Advisor list unavailable');
         advisorOpenList = data.picks || [];
         renderAdvisorOpenList(advisorOpenList);

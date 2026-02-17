@@ -43,6 +43,7 @@ python webapp/server.py
 
 Open:
 - `http://localhost:5001` (Dashboard)
+- `http://localhost:5001/advisor` (Strategy Advisor simulation page)
 - `http://localhost:5001/portfolio`
 - `http://localhost:5001/risk`
 
@@ -50,6 +51,20 @@ If port 5001 is busy:
 ```bash
 lsof -iTCP:5001 -sTCP:LISTEN -n -P
 kill $(lsof -tiTCP:5001 -sTCP:LISTEN)
+```
+
+If you see `OSError: [Errno 24] Too many open files`:
+```bash
+ulimit -n 4096
+```
+and set conservative runtime knobs in `.env`:
+```bash
+FLASK_THREADED=1
+YF_MAX_PARALLEL=2
+YF_CALL_TIMEOUT_SEC=15
+FD_SOFT_GUARD_RATIO=0.85
+DAILY_ANALYSIS_TTL_SEC=90
+PRICE_CACHE_TTL_SEC=30
 ```
 
 ## 3) Model-loading transparency
@@ -127,6 +142,10 @@ Guarantees:
 - max `n` is capped at `50`
 - ranking is confidence-first, then score:
   - `score = |predicted_return_decimal| × (confidence/100) × (model_agreement/100) × liquidity_factor`
+
+Top Picks vs Top 10 Analysis:
+- `Top Picks`: actionable strategy-ranked list (up to 50).
+- `Top 10 Analysis`: deeper analytics cards for review/explanation.
 
 ### `/api/advisor/open-buy-list`
 ```bash
@@ -327,6 +346,8 @@ GROQ_MODELS=llama-3.3-70b-versatile,llama-3.1-8b-instant
 ENABLE_GROQ_NEWS_SENTIMENT=1
 GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE=8
 SENTIMENT_CACHE_TTL_SECONDS=1800
+YF_NEWS_TTL_SECONDS=300
+ADVISOR_MAX_PER_SECTOR=3
 ```
 
 ## 12) Branch workflow (feature -> main)

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Strategy Advisor | Masters AI Trading Bot</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">
+            <span class="logo">📈</span>
+            <a href="/" class="brand-name">Masters AI Trading</a>
+        </div>
+        <div class="nav-links">
+            <a href="/" class="nav-link">Stocks</a>
+            <a href="/portfolio" class="nav-link">Portfolio</a>
+            <a href="/advisor" class="nav-link active">Strategy Advisor</a>
+            <a href="/risk" class="nav-link">Risk Analytics</a>
+            <a href="/ai-risk" class="nav-link">AI Risk Analysis</a>
+        </div>
+        <div class="nav-status">
+            <span class="status-badge">Simulation Only</span>
+        </div>
+    </nav>
+
+    <main class="container">
+        <section class="top-analysis-section" style="display:block;">
+            <h2 class="section-title">Trading Desk Strategy Advisor</h2>
+            <p class="section-subtitle">
+                Strategy-derived picks only: ranked by expected edge, confidence, agreement, liquidity, and sector diversification.
+                AI/Groq is used only for explanations and sentiment overlays, not core strategy price generation.
+            </p>
+            <div class="advisor-panel" id="advisor-panel">
+                <div class="advisor-panel-head">
+                    <h3>Trading Desk Advisor (Simulation Only)</h3>
+                    <div class="advisor-controls">
+                        <label for="advisor-budget">Budget</label>
+                        <input id="advisor-budget" type="number" min="1000" step="100" value="40000">
+                        <button type="button" class="tf-btn" onclick="loadAdvisorOpenBuyList()">Load 10 Open Buys</button>
+                        <button type="button" class="tf-btn" onclick="runAdvisorAutoCheck()">Auto-check SL/Target</button>
+                        <button type="button" class="tf-btn" onclick="resetAdvisorSimulation()">Reset Sim</button>
+                    </div>
+                </div>
+                <p class="section-help-text">Simulation only. No live brokerage orders are placed. Uses strategy prices + estimated Groww fees to stay within budget.</p>
+                <div class="advisor-kpis" id="advisor-kpis">
+                    <span class="advisor-kpi"><span class="advisor-kpi-label">Sim Cash</span><strong id="advisor-cash">₹40,000</strong></span>
+                    <span class="advisor-kpi"><span class="advisor-kpi-label">Open Positions</span><strong id="advisor-open-count">0</strong></span>
+                    <span class="advisor-kpi"><span class="advisor-kpi-label">Sim Equity</span><strong id="advisor-equity">₹40,000</strong></span>
+                </div>
+                <div class="advisor-table-wrap">
+                    <table class="premarket-table advisor-table">
+                        <thead>
+                            <tr>
+                                <th>Ticker</th>
+                                <th>Sector</th>
+                                <th>Strategy Price</th>
+                                <th>Qty</th>
+                                <th>Trade Cost</th>
+                                <th>Stop Loss</th>
+                                <th>R:R</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="advisor-open-buy-body">
+                            <tr><td colspan="8" class="muted-text">Loading advisor suggestions...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="muted-text" id="advisor-status">Simulation cash defaults to ₹40,000.</div>
+                <div class="muted-text" id="advisor-transactions-summary">Transactions: —</div>
+                <div class="advisor-table-wrap">
+                    <table class="premarket-table advisor-table">
+                        <thead>
+                            <tr>
+                                <th>Ticker</th>
+                                <th>Status</th>
+                                <th>Qty</th>
+                                <th>Buy Price</th>
+                                <th>Buy Time</th>
+                                <th>Sell Price</th>
+                                <th>Sell Time</th>
+                                <th>PnL</th>
+                                <th>Reason</th>
+                            </tr>
+                        </thead>
+                        <tbody id="advisor-trade-ledger-body">
+                            <tr><td colspan="9" class="muted-text">No simulated transactions yet.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/js/advisor.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', async () => {
+            await refreshAdvisorSummary();
+            await loadAdvisorOpenBuyList();
+        });
+    </script>
+</body>
+</html>

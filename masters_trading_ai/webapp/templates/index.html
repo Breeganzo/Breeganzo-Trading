@@ -18,6 +18,7 @@
         <div class="nav-links">
             <a href="/" class="nav-link active" onclick="selectSector('all')">Stocks</a>
             <a href="/portfolio" class="nav-link">Portfolio</a>
+            <a href="/advisor" class="nav-link">Strategy Advisor</a>
             <a href="#" class="nav-link" onclick="showTopAnalysis()">Top 10 Analysis</a>
             <a href="#" class="nav-link" onclick="showTopPicks()">Top Picks</a>
             <a href="#" class="nav-link" onclick="showExpectedVsActual()">Expected vs Actual</a>
@@ -140,6 +141,7 @@
                     <div class="advisor-controls">
                         <label for="advisor-budget">Budget</label>
                         <input id="advisor-budget" type="number" min="1000" step="100" value="40000">
+                        <a href="/advisor" class="tf-btn">Open Advisor Page</a>
                         <button type="button" class="tf-btn" onclick="loadAdvisorOpenBuyList()">Load 10 Open Buys</button>
                         <button type="button" class="tf-btn" onclick="runAdvisorAutoCheck()">Auto-check SL/Target</button>
                         <button type="button" class="tf-btn" onclick="resetAdvisorSimulation()">Reset Sim</button>
@@ -156,6 +158,7 @@
                         <thead>
                             <tr>
                                 <th>Ticker</th>
+                                <th>Sector</th>
                                 <th>Strategy Price</th>
                                 <th>Qty</th>
                                 <th>Trade Cost</th>
@@ -165,7 +168,7 @@
                             </tr>
                         </thead>
                         <tbody id="advisor-open-buy-body">
-                            <tr><td colspan="7" class="muted-text">Load advisor suggestions to view budget-constrained open-buy list.</td></tr>
+                            <tr><td colspan="8" class="muted-text">Load advisor suggestions to view budget-constrained open-buy list.</td></tr>
                         </tbody>
                     </table>
                 </div>

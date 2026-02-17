@@ -16,6 +16,7 @@ import time
 import smtplib
 import logging
 import threading
+import resource
 from email.message import EmailMessage
 from collections import deque, defaultdict
 from uuid import uuid4
@@ -192,6 +193,11 @@ AUTO_SIMULATION_INTERVAL_SEC = max(
     5,
     int(os.environ.get("AUTO_SIMULATION_INTERVAL_SEC", "30")),
 )
+YF_MAX_PARALLEL = max(1, int(os.environ.get("YF_MAX_PARALLEL", "2")))
+YF_CALL_TIMEOUT_SEC = max(3.0, float(os.environ.get("YF_CALL_TIMEOUT_SEC", "15")))
+FD_SOFT_GUARD_RATIO = float(os.environ.get("FD_SOFT_GUARD_RATIO", "0.85"))
+FD_TARGET_SOFT_LIMIT = max(256, int(os.environ.get("FD_TARGET_SOFT_LIMIT", "4096")))
+_yf_download_semaphore = threading.BoundedSemaphore(YF_MAX_PARALLEL)
 
 # Trading-desk risk management defaults (simulation only).
 RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE", "0.01"))
@@ -218,6 +224,7 @@ ADVISOR_RISK_AVERSION = float(os.environ.get("ADVISOR_RISK_AVERSION", "0.35"))
 ADVISOR_MAX_PORTFOLIO_RISK = float(
     os.environ.get("ADVISOR_MAX_PORTFOLIO_RISK", "0.12")
 )
+ADVISOR_MAX_PER_SECTOR = max(1, int(os.environ.get("ADVISOR_MAX_PER_SECTOR", "3")))
 ADVISOR_BUY_TRIGGER_BUFFER = float(os.environ.get("ADVISOR_BUY_TRIGGER_BUFFER", "0.002"))
 SIM_PRICE_HARD_MAX = float(os.environ.get("SIM_PRICE_HARD_MAX", "1000000"))
 SIM_QTY_HARD_MAX = int(os.environ.get("SIM_QTY_HARD_MAX", "100000"))
@@ -251,6 +258,77 @@ SIM_TRADE_CACHE_MAX_ROWS = max(
     100,
     int(os.environ.get("SIM_TRADE_CACHE_MAX_ROWS", "5000")),
 )
+
+
+def _raise_nofile_soft_limit() -> None:
+    """
+    Best-effort increase of soft open-files limit for long-running local sessions.
+    Helps avoid OSError: [Errno 24] Too many open files under heavy refresh/load.
+    """
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft <= 0:
+            return
+        target = min(max(soft, FD_TARGET_SOFT_LIMIT), hard)
+        if target > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            log.info("Raised RLIMIT_NOFILE soft limit: %s -> %s", soft, target)
+    except Exception:
+        # Non-fatal on environments where setrlimit is restricted.
+        pass
+
+
+def _fd_pressure_high() -> bool:
+    """Return True when process file descriptors are near the soft limit."""
+    try:
+        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft <= 0:
+            return False
+        used = len(os.listdir("/dev/fd"))
+        ratio = max(0.5, min(FD_SOFT_GUARD_RATIO, 0.98))
+        return used >= int(float(soft) * ratio)
+    except Exception:
+        return False
+
+
+def _safe_yf_download(*args, **kwargs) -> pd.DataFrame:
+    """
+    Guarded yfinance download:
+    - bounded concurrent calls
+    - yfinance internal threads disabled
+    - backpressure when FD usage is high
+    """
+    try:
+        import yfinance as yf
+    except Exception:
+        return pd.DataFrame()
+
+    if _fd_pressure_high():
+        log.warning("Skipping yfinance download under high FD pressure")
+        return pd.DataFrame()
+
+    if not _yf_download_semaphore.acquire(timeout=YF_CALL_TIMEOUT_SEC):
+        log.warning("Skipping yfinance download due to semaphore timeout")
+        return pd.DataFrame()
+    try:
+        kwargs.setdefault("progress", False)
+        kwargs.setdefault("threads", False)
+        kwargs.setdefault("timeout", YF_CALL_TIMEOUT_SEC)
+        try:
+            out = yf.download(*args, **kwargs)
+        except TypeError:
+            kwargs.pop("timeout", None)
+            out = yf.download(*args, **kwargs)
+        return out if isinstance(out, pd.DataFrame) else pd.DataFrame()
+    except Exception as exc:
+        log.warning("yfinance download failed: %s", exc)
+        return pd.DataFrame()
+    finally:
+        _yf_download_semaphore.release()
+
+
+_raise_nofile_soft_limit()
+
 
 try:
     import openpyxl  # noqa: F401
@@ -389,6 +467,7 @@ logger = PredictionLogger()
 tickers_by_sector: dict[str, list[str]] = {}
 all_tickers: list[str] = []
 ticker_names: dict[str, str] = {}  # RELIANCE.NS → Reliance Industries
+ticker_to_sector: dict[str, str] = {}
 models_loaded = False
 load_error = ""
 models_loading = False
@@ -399,6 +478,9 @@ _groq_forecast_cache_time: dict[str, float] = {}
 _groq_forecast_cache_lock = threading.Lock()
 _groq_forecast_cache_loaded = False
 GROQ_FORECAST_TTL = 900  # 15m
+NEWS_CONTEXT_TTL = max(60, int(os.environ.get("NEWS_CONTEXT_TTL", "300")))
+_news_context_cache: dict[str, dict] = {}
+_news_context_cache_lock = threading.Lock()
 _sim_trade_event_cache: deque = deque(maxlen=SIM_TRADE_CACHE_MAX_ROWS)
 _daily_trade_report_dates_done: set[str] = set()
 try:
@@ -418,7 +500,7 @@ def _clean_name(ticker: str) -> str:
 
 def load_tickers():
     """Load ticker universe from config."""
-    global tickers_by_sector, all_tickers, ticker_names
+    global tickers_by_sector, all_tickers, ticker_names, ticker_to_sector
     cfg_path = CONFIG_DIR / "tickers.yaml"
     with open(cfg_path) as f:
         data = yaml.safe_load(f)
@@ -435,6 +517,8 @@ def load_tickers():
         if isinstance(syms, list):
             tickers_by_sector[sec] = syms
             all_tickers.extend(syms)
+            for sym in syms:
+                ticker_to_sector[str(sym).strip().upper()] = sec
 
     all_tickers_set = sorted(set(all_tickers))
     all_tickers.clear()
@@ -1741,6 +1825,7 @@ def _build_strategy_buy_candidates(
             {
                 "ticker": ticker,
                 "name": ticker_names.get(ticker, _clean_name(ticker)),
+                "sector": str(ticker_to_sector.get(ticker, "other")),
                 "source": "strategy",
                 "current_price": round(cp, 2),
                 "strategy_price_at_open": round(strategy_price, 2),
@@ -1848,10 +1933,15 @@ def _optimize_candidate_allocations(
     )
     picks: list[dict] = []
     remaining = budget
+    sector_cap = max(1, min(ADVISOR_MAX_PER_SECTOR, max_positions))
+    sector_counts: dict[str, int] = defaultdict(int)
     for idx in order:
         if len(picks) >= max_positions or remaining <= 0:
             break
         c = candidates[idx]
+        sector_key = str(c.get("sector") or "other")
+        if sector_counts.get(sector_key, 0) >= sector_cap:
+            continue
         px = float(c["strategy_price_at_open"])
         if not _is_realistic_price(px):
             continue
@@ -1898,6 +1988,7 @@ def _optimize_candidate_allocations(
                 "edge_score": round(c["objective_utility"], 6),
             }
         )
+        sector_counts[sector_key] = sector_counts.get(sector_key, 0) + 1
 
     return picks
 
@@ -2033,15 +2124,20 @@ def _run_sim_auto_check(
                 for t in dict(state.get("open_positions", {})).keys()
                 if str(t).strip()
             }
-            snap_tickers = [
-                str(r.get("ticker", "")).upper()
-                for r in snap_rows
-                if isinstance(r, dict) and str(r.get("ticker", "")).strip()
+            with _daily_analysis_lock:
+                cached_rows = list((_daily_analysis_cache or {}).get("all_stocks", []))
+            base_rows = [
+                r
+                for r in cached_rows
+                if isinstance(r, dict)
+                and str(r.get("ticker", "")).strip()
+                and _safe_float(r.get("current_price")) > 0
             ]
-            cand_live = _get_live_prices_batch(snap_tickers) if snap_tickers else {}
+            if not base_rows:
+                base_rows = [r for r in snap_rows if isinstance(r, dict)]
             candidates, _warnings = _build_strategy_buy_candidates(
-                [r for r in snap_rows if isinstance(r, dict)],
-                live_prices=cand_live,
+                base_rows,
+                live_prices={},
                 exclude_tickers=open_now,
             )
             max_new_positions = max(1, 10 - len(open_now))
@@ -2051,11 +2147,21 @@ def _run_sim_auto_check(
                 trade_type="equity_delivery",
                 max_positions=max_new_positions,
             )
+            optimized_tickers = [
+                str(row.get("ticker", "")).upper()
+                for row in optimized
+                if str(row.get("ticker", "")).strip()
+            ]
+            trigger_live = (
+                _get_live_prices_batch(optimized_tickers) if optimized_tickers else {}
+            )
             for row in optimized:
                 ticker = str(row.get("ticker", "")).upper()
                 if not ticker or ticker in state.get("open_positions", {}):
                     continue
-                cp = _safe_float(cand_live.get(ticker, {}).get("price"))
+                cp = _safe_float(trigger_live.get(ticker, {}).get("price"))
+                if cp <= 0:
+                    cp = _safe_float(row.get("current_price"))
                 strategy_entry = _safe_float(row.get("strategy_price_at_open"))
                 if not _is_realistic_price(cp) or not _is_realistic_price(strategy_entry):
                     continue
@@ -2542,8 +2648,6 @@ def _portfolio_summary_from_trades(
 
 def _get_live_prices_batch(tickers: list[str]) -> dict:
     """Get live prices for multiple tickers using yfinance."""
-    import yfinance as yf
-
     result: dict[str, dict] = {}
 
     clean_tickers = [str(t).strip().upper() for t in tickers if str(t).strip()]
@@ -2567,13 +2671,11 @@ def _get_live_prices_batch(tickers: list[str]) -> dict:
 
     try:
         # Use unadjusted prices for live parity with broker/app quotes.
-        data = yf.download(
+        data = _safe_yf_download(
             clean_tickers if len(clean_tickers) > 1 else clean_tickers[0],
             period="2d",
             interval="1d",
-            progress=False,
             auto_adjust=False,
-            threads=True,
         )
         if data is None or data.empty:
             if len(clean_tickers) == 1:
@@ -2661,8 +2763,6 @@ def _get_live_prices_batch(tickers: list[str]) -> dict:
 
 def _get_close_prices_for_date(tickers: list[str], date_str: str) -> dict[str, float]:
     """Fetch close price for the specific trading date for each ticker."""
-    import yfinance as yf
-
     try:
         day = datetime.strptime(date_str, "%Y-%m-%d").date()
     except Exception:
@@ -2677,14 +2777,12 @@ def _get_close_prices_for_date(tickers: list[str], date_str: str) -> dict[str, f
         return prices
 
     try:
-        data = yf.download(
+        data = _safe_yf_download(
             tickers,
             start=start,
             end=end,
             interval="1d",
-            progress=False,
             auto_adjust=False,
-            threads=True,
         )
         if data is None or data.empty:
             return prices
@@ -2763,19 +2861,15 @@ def _get_benchmark_return_pct(date_str: str, use_eod_close: bool) -> float:
         return _live_fallback()
 
     try:
-        import yfinance as yf
-
         day = datetime.strptime(date_str, "%Y-%m-%d").date()
         start = day.strftime("%Y-%m-%d")
         end = (day + timedelta(days=2)).strftime("%Y-%m-%d")
-        data = yf.download(
+        data = _safe_yf_download(
             bench_ticker,
             start=start,
             end=end,
             interval="1d",
-            progress=False,
             auto_adjust=False,
-            threads=False,
         )
         if data is None or data.empty:
             return _live_fallback()
@@ -2817,6 +2911,12 @@ def stock_detail(ticker: str):
 def portfolio_page():
     """Portfolio page with positions and full trade ledger."""
     return render_template("portfolio.html")
+
+
+@app.route("/advisor")
+def advisor_page():
+    """Dedicated strategy advisor page (simulation only)."""
+    return render_template("advisor.html")
 
 
 # ---------------------------------------------------------------------------
@@ -3110,6 +3210,11 @@ def api_advisor_open_buy_list():
     if trade_type not in {"equity_delivery", "equity_intraday"}:
         trade_type = "equity_delivery"
     force_fresh = request.args.get("force_fresh", "").lower() in ("1", "true", "yes")
+    allow_warming = request.args.get("allow_warming", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
     try:
         allowed_tickers = {
@@ -3137,6 +3242,21 @@ def api_advisor_open_buy_list():
                     break
 
         raw_holds: list[dict] = []
+        if len(buy_candidates) < n and allow_warming and not cached_rows and not force_fresh:
+            return (
+                jsonify(
+                    {
+                        "status": "warming",
+                        "message": "Advisor cache warming. Retry shortly.",
+                        "retry_after_sec": 5,
+                        "count": 0,
+                        "picks": [],
+                        "warnings": [],
+                        "source": "strategy_advisor",
+                    }
+                ),
+                202,
+            )
         if len(buy_candidates) < n and (force_fresh or not cached_rows):
             grouped = predictor.predict_top_picks_grouped(sectors=sectors, top_n=50)
             raw_buys = grouped.get("top_buy", []) if isinstance(grouped, dict) else []
@@ -3876,11 +3996,13 @@ def api_intraday(ticker: str):
 def api_history(ticker: str):
     """Get daily price history for charting."""
     period = request.args.get("period", "1y")
-    import yfinance as yf
 
     try:
-        df = yf.download(
-            ticker, period=period, interval="1d", progress=False, auto_adjust=False
+        df = _safe_yf_download(
+            ticker,
+            period=period,
+            interval="1d",
+            auto_adjust=False,
         )
         if df is None or df.empty:
             return jsonify({"error": "No data"}), 404
@@ -4446,18 +4568,24 @@ MARKET_OPEN_MINUTE = 15
 _daily_analysis_cache: dict = {}
 _daily_analysis_cache_time: float = 0
 _daily_analysis_lock = threading.Lock()
-DAILY_ANALYSIS_TTL = 30  # seconds — serve cached result within this window
+DAILY_ANALYSIS_TTL = max(
+    30,
+    int(os.environ.get("DAILY_ANALYSIS_TTL_SEC", "90")),
+)  # seconds
 
 # Price cache with TTL (shared across endpoints)
 _price_cache: dict[str, dict] = {}
 _price_cache_time: float = 0
-PRICE_CACHE_TTL = 15  # seconds
+PRICE_CACHE_TTL = max(10, int(os.environ.get("PRICE_CACHE_TTL_SEC", "30")))
 
 
 def _get_prices_chunked(tickers: list[str], chunk_size: int = 25) -> dict:
     """Fetch prices in parallel-friendly chunks to avoid yfinance timeouts."""
     all_prices: dict = {}
     for i in range(0, len(tickers), chunk_size):
+        if _fd_pressure_high():
+            log.warning("Price chunking paused under high FD pressure")
+            break
         chunk = tickers[i : i + chunk_size]
         try:
             prices = _get_live_prices_batch(chunk)
@@ -4473,10 +4601,13 @@ def _get_cached_prices() -> dict:
     now = time.time()
     if _price_cache and (now - _price_cache_time) < PRICE_CACHE_TTL:
         return _price_cache
+    if _fd_pressure_high() and _price_cache:
+        return _price_cache
     prices = _get_prices_chunked(all_tickers)
-    _price_cache = prices
-    _price_cache_time = time.time()
-    return prices
+    if prices:
+        _price_cache = prices
+        _price_cache_time = time.time()
+    return _price_cache
 
 
 def _capture_opening_prices():
@@ -5347,15 +5478,34 @@ def _get_recent_legit_news_context(ticker: str, max_items: int = 6) -> str:
     Pull recent Yahoo Finance-linked headlines with publisher names.
     Used to ground Groq prompts in identifiable sources.
     """
+    key = str(ticker or "").strip().upper()
+    if not key:
+        return ""
+    now_ts = time.time()
+    with _news_context_cache_lock:
+        cached = _news_context_cache.get(key)
+    if isinstance(cached, dict):
+        if (now_ts - float(cached.get("ts", 0) or 0)) < NEWS_CONTEXT_TTL:
+            txt = str(cached.get("text", "") or "")
+            if txt:
+                return txt
+
     try:
         import yfinance as yf
     except Exception:
         return ""
 
+    if _fd_pressure_high():
+        return ""
+
+    if not _yf_download_semaphore.acquire(timeout=YF_CALL_TIMEOUT_SEC):
+        return ""
     try:
-        news_items = yf.Ticker(ticker).news or []
+        news_items = yf.Ticker(key).news or []
     except Exception:
         return ""
+    finally:
+        _yf_download_semaphore.release()
 
     lines = []
     for row in news_items:
@@ -5382,7 +5532,10 @@ def _get_recent_legit_news_context(ticker: str, max_items: int = 6) -> str:
         )
         if len(lines) >= max_items:
             break
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    with _news_context_cache_lock:
+        _news_context_cache[key] = {"ts": now_ts, "text": text}
+    return text
 
 
 def _get_cached_ai_forecast_meta(ticker: str) -> dict:
@@ -5900,6 +6053,10 @@ def _daily_analysis_background_loop():
         if not models_loaded or not all_tickers:
             time.sleep(5)
             continue
+        if _fd_pressure_high():
+            log.warning("Daily analysis refresh skipped under high FD pressure")
+            time.sleep(min(30, DAILY_ANALYSIS_TTL))
+            continue
         try:
             _get_prediction_snapshot(force=False, use_latest_stored=True)
             result = _build_daily_analysis()
@@ -5977,6 +6134,9 @@ def _auto_simulation_background_loop():
         try:
             if not AUTO_SIMULATION_ENABLED:
                 time.sleep(10)
+                continue
+            if _fd_pressure_high():
+                time.sleep(min(20, AUTO_SIMULATION_INTERVAL_SEC))
                 continue
             if not _is_market_trade_window():
                 time.sleep(min(30, AUTO_SIMULATION_INTERVAL_SEC))
@@ -7427,7 +7587,6 @@ def api_risk_analytics():
     Returns correlation matrix, sector exposure, risk metrics,
     Monte Carlo simulation, and statistical validation.
     """
-    import yfinance as yf
     from src.backtest.metrics import (
         sharpe_ratio as calc_sharpe,
         sortino_ratio as calc_sortino,
@@ -7515,13 +7674,11 @@ def api_risk_analytics():
 
         # Download 6 months of history for robust risk calcs
         ticker_str = " ".join(portfolio_tickers + ["^NSEI"])
-        data = yf.download(
+        data = _safe_yf_download(
             ticker_str,
             period="6mo",
             interval="1d",
-            progress=False,
             auto_adjust=True,
-            threads=True,
         )
 
         if data is None or data.empty:
@@ -7775,5 +7932,10 @@ if __name__ == "__main__":
     )
 
     port = int(os.environ.get("FLASK_PORT", 5001))
+    threaded_mode = os.environ.get("FLASK_THREADED", "1").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     log.info(f"Starting Flask server at http://localhost:{port}")
-    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=threaded_mode)
