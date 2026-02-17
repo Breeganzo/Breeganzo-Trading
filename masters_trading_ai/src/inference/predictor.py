@@ -68,8 +68,8 @@ CACHE_DIR = PROJECT_ROOT / "cache"
 log = logging.getLogger(__name__)
 
 SENTIMENT_WEIGHTS = {"day0": 0.35, "day1": 0.25, "day2": 0.15, "day3": 0.05}
-ENSEMBLE_WEIGHT = float(os.environ.get("ENSEMBLE_WEIGHT", "0.80"))
-SENTIMENT_WEIGHT = float(os.environ.get("SENTIMENT_WEIGHT", "0.20"))
+ENSEMBLE_WEIGHT = float(os.environ.get("ENSEMBLE_WEIGHT", "0.90"))
+SENTIMENT_WEIGHT = float(os.environ.get("SENTIMENT_WEIGHT", "0.10"))
 SENTIMENT_RETURN_SCALE = float(os.environ.get("SENTIMENT_RETURN_SCALE", "0.05"))
 SENTIMENT_LOOKBACK_DAYS = int(os.environ.get("SENTIMENT_LOOKBACK_DAYS", "3"))
 SENTIMENT_CACHE_TTL_SECONDS = int(os.environ.get("SENTIMENT_CACHE_TTL_SECONDS", "1800"))
@@ -384,7 +384,9 @@ class LivePredictor:
         self._groq_sentiment_call_times = [
             t for t in self._groq_sentiment_call_times if (now - t) < 60.0
         ]
-        return len(self._groq_sentiment_call_times) < GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE
+        return (
+            len(self._groq_sentiment_call_times) < GROQ_SENTIMENT_MAX_CALLS_PER_MINUTE
+        )
 
     @staticmethod
     def _sentiment_decay_weight(days_ago: int) -> float:
@@ -417,6 +419,68 @@ class LivePredictor:
             except Exception:
                 return None
         return None
+
+    @staticmethod
+    def _has_same_day_sentiment(sentiment_meta: dict | None) -> bool:
+        """
+        Strategy-first guard:
+        sentiment may influence prediction only when same-day (day0) news exists.
+        """
+        if not isinstance(sentiment_meta, dict):
+            return False
+        article_count = int(float(sentiment_meta.get("article_count", 0) or 0))
+        if article_count <= 0:
+            return False
+        weights = sentiment_meta.get("weights_used", {})
+        if not isinstance(weights, dict):
+            return False
+        return float(weights.get("day0", 0) or 0) > 0
+
+    @staticmethod
+    def _blend_strategy_and_sentiment(
+        technical_prediction: float,
+        sentiment_meta: dict | None,
+    ) -> tuple[float, float, float, float, bool]:
+        """
+        Blend technical prediction with sentiment under strategy-first policy.
+        Returns:
+          (combined_prediction, ensemble_weight_used, sentiment_weight_used,
+           weighted_sentiment_decimal_used, same_day_sentiment)
+        """
+        tech = float(technical_prediction or 0.0)
+        meta = sentiment_meta if isinstance(sentiment_meta, dict) else {}
+        weighted_sentiment = float(meta.get("weighted_sentiment_decimal", 0.0) or 0.0)
+        same_day = LivePredictor._has_same_day_sentiment(meta)
+        sentiment_article_count = int(meta.get("article_count", 0) or 0)
+
+        if sentiment_article_count > 0 and same_day:
+            ensemble_weight_used = float(np.clip(ENSEMBLE_WEIGHT, 0.0, 1.0))
+            sentiment_weight_used = float(np.clip(SENTIMENT_WEIGHT, 0.0, 1.0))
+            total_weight = ensemble_weight_used + sentiment_weight_used
+            if total_weight > 0:
+                ensemble_weight_used = ensemble_weight_used / total_weight
+                sentiment_weight_used = sentiment_weight_used / total_weight
+            else:
+                ensemble_weight_used = 1.0
+                sentiment_weight_used = 0.0
+            if meta.get("weighted_sentiment_raw", 0.0) <= NEGATIVE_SENTIMENT_CUTOFF:
+                ensemble_weight_used = 1.0
+                sentiment_weight_used = 0.0
+        else:
+            ensemble_weight_used = 1.0
+            sentiment_weight_used = 0.0
+            weighted_sentiment = 0.0
+
+        combined = (
+            ensemble_weight_used * tech + sentiment_weight_used * weighted_sentiment
+        )
+        return (
+            float(combined),
+            float(ensemble_weight_used),
+            float(sentiment_weight_used),
+            float(weighted_sentiment),
+            bool(same_day),
+        )
 
     def _fetch_recent_news_articles(
         self,
@@ -581,7 +645,11 @@ class LivePredictor:
                     return items
 
         client = self._get_groq_client()
-        if (not ENABLE_GROQ_NEWS_SENTIMENT) or client is None or (not self._groq_sentiment_quota_available()):
+        if (
+            (not ENABLE_GROQ_NEWS_SENTIMENT)
+            or client is None
+            or (not self._groq_sentiment_quota_available())
+        ):
             scored = []
             for idx, article in enumerate(articles):
                 score, polarity = self._fallback_headline_sentiment(
@@ -1062,9 +1130,7 @@ class LivePredictor:
             # Defensive: yfinance may still return duplicated/2D column blocks.
             for col in required:
                 if isinstance(df[col], pd.DataFrame):
-                    df[col] = pd.to_numeric(
-                        df[col].iloc[:, 0], errors="coerce"
-                    )
+                    df[col] = pd.to_numeric(df[col].iloc[:, 0], errors="coerce")
             df = df.dropna()
 
             # Add Returns column (needed by pipeline)
@@ -1391,27 +1457,15 @@ class LivePredictor:
             ticker=ticker,
             prediction_dt=datetime.now(IST),
         )
-        weighted_sentiment = float(
-            sentiment_meta.get("weighted_sentiment_decimal", 0.0) or 0.0
-        )
-        sentiment_article_count = int(sentiment_meta.get("article_count", 0) or 0)
-
-        if sentiment_article_count > 0:
-            ensemble_weight_used = float(np.clip(ENSEMBLE_WEIGHT, 0.0, 1.0))
-            sentiment_weight_used = float(np.clip(SENTIMENT_WEIGHT, 0.0, 1.0))
-            if sentiment_meta.get("weighted_sentiment_raw", 0.0) <= NEGATIVE_SENTIMENT_CUTOFF:
-                # Very poor sentiment: ignore sentiment contribution and trust model output.
-                ensemble_weight_used = 1.0
-                sentiment_weight_used = 0.0
-        else:
-            # No fresh news in lookback window => neutral sentiment contribution.
-            ensemble_weight_used = 1.0
-            sentiment_weight_used = 0.0
-            weighted_sentiment = 0.0
-
-        predicted_return = (
-            ensemble_weight_used * technical_prediction
-            + sentiment_weight_used * weighted_sentiment
+        (
+            predicted_return,
+            ensemble_weight_used,
+            sentiment_weight_used,
+            weighted_sentiment_used,
+            same_day_sentiment,
+        ) = self._blend_strategy_and_sentiment(
+            technical_prediction=technical_prediction,
+            sentiment_meta=sentiment_meta,
         )
 
         # --- Compute derived quantities ---
@@ -1433,7 +1487,9 @@ class LivePredictor:
         # Model agreement combines directional consistency + magnitude alignment.
         if base_preds:
             if ensemble_weights:
-                total_w = sum(abs(float(ensemble_weights.get(k, 0) or 0)) for k in base_preds)
+                total_w = sum(
+                    abs(float(ensemble_weights.get(k, 0) or 0)) for k in base_preds
+                )
                 if total_w > 0:
                     weighted_sign = sum(
                         (1 if float(v) > 0 else -1)
@@ -1444,7 +1500,10 @@ class LivePredictor:
                     ref = abs(technical_prediction) + max(atr_pct * 0.5, 1e-6)
                     magnitude_alignment = sum(
                         (float(ensemble_weights.get(k, 0) or 0) / total_w)
-                        * max(0.0, 1.0 - (abs(float(v) - technical_prediction) / (2.0 * ref)))
+                        * max(
+                            0.0,
+                            1.0 - (abs(float(v) - technical_prediction) / (2.0 * ref)),
+                        )
                         for k, v in base_preds.items()
                     )
                     model_agreement = float(
@@ -1504,8 +1563,10 @@ class LivePredictor:
             "sentiment_articles": int(sentiment_meta.get("article_count", 0) or 0),
             "sentiment_sources": sentiment_meta.get("sources", []),
             "sentiment_decay_weights": sentiment_meta.get("weights_used", {}),
+            "same_day_sentiment_available": bool(same_day_sentiment),
             "ensemble_weight_used": round(ensemble_weight_used, 4),
             "sentiment_weight_used": round(sentiment_weight_used, 4),
+            "weighted_sentiment_applied_decimal": round(weighted_sentiment_used, 6),
             "predicted_price": predicted_price,
             "current_price": round(current_price, 2),
             "previous_close": round(previous_close, 2),
@@ -1771,7 +1832,9 @@ class LivePredictor:
         return pred_ret_decimal * conf * agreement * liq
 
     @staticmethod
-    def _compute_liquidity_factor(avg_volume_30d: float, median_volume_30d: float) -> float:
+    def _compute_liquidity_factor(
+        avg_volume_30d: float, median_volume_30d: float
+    ) -> float:
         """
         Liquidity normalization based on 30-day average volume.
         Clipped to avoid overweighting outliers.
@@ -1813,11 +1876,7 @@ class LivePredictor:
             for r in results
             if float(r.get("avg_volume_30d", 0) or 0) > 0
         ]
-        median_volume_30d = (
-            float(np.median(volume_samples))
-            if volume_samples
-            else 0.0
-        )
+        median_volume_30d = float(np.median(volume_samples)) if volume_samples else 0.0
         for pred in results:
             liq_factor = self._compute_liquidity_factor(
                 avg_volume_30d=float(pred.get("avg_volume_30d", 0) or 0),

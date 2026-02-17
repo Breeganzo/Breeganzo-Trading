@@ -948,17 +948,17 @@ async function loadStockEVA() {
             <div class="pred-grid">
                 <div class="pred-card">
                     <span class="pred-label">Market Open Price</span>
-                    <span class="pred-value">₹${formatN(openPx)}</span>
+                    <span class="pred-value">${formatPrice(openPx)}</span>
                     <span class="muted-text">${trackerData.open_price_captured_at ? formatTimestamp(trackerData.open_price_captured_at) : 'Market Open (09:15 IST)'}</span>
                 </div>
                 <div class="pred-card">
                     <span class="pred-label">Strategy @ Open</span>
-                    <span class="pred-value ${strategyOpenPx >= openPx ? 'up-color' : 'down-color'}">₹${formatN(strategyOpenPx)}</span>
+                    <span class="pred-value ${strategyOpenPx >= openPx ? 'up-color' : 'down-color'}">${formatPrice(strategyOpenPx)}</span>
                     <span class="muted-text">${formatOpenWindowTime(trackerData.strategy_predicted_at_open, istDateStrNow(), 20)}</span>
                 </div>
                 <div class="pred-card">
                     <span class="pred-label">${label}</span>
-                    <span class="pred-value ${currentPx >= openPx ? 'up-color' : 'down-color'}">₹${formatN(currentPx)}</span>
+                    <span class="pred-value ${currentPx >= openPx ? 'up-color' : 'down-color'}">${formatPrice(currentPx)}</span>
                     <span class="muted-text">${formatTimestamp(trackerData.current_snapshot_at)}</span>
                 </div>
                 <div class="pred-card">
@@ -999,21 +999,21 @@ async function loadStockEVA() {
                             <div class="pred-grid">
                                 <div class="pred-card">
                                     <span class="pred-label">Market Open Price</span>
-                                    <span class="pred-value">₹${formatN(openPx)}</span>
+                                    <span class="pred-value">${formatPrice(openPx)}</span>
                                 </div>
                                 <div class="pred-card">
                                     <span class="pred-label">Strategy @ Open</span>
-                                    <span class="pred-value ${strategyOpenPx >= openPx ? 'up-color' : 'down-color'}">₹${formatN(strategyOpenPx)}</span>
+                                    <span class="pred-value ${strategyOpenPx >= openPx ? 'up-color' : 'down-color'}">${formatPrice(strategyOpenPx)}</span>
                                     <span class="muted-text">${formatOpenWindowTime(stockResult.strategy_predicted_at_open, latestDate, 20)}</span>
                                 </div>
                                 <div class="pred-card">
                                     <span class="pred-label">${closeLabel}</span>
-                                    <span class="pred-value ${actualClosePx >= openPx ? 'up-color' : 'down-color'}">₹${formatN(actualClosePx)}</span>
+                                    <span class="pred-value ${actualClosePx >= openPx ? 'up-color' : 'down-color'}">${formatPrice(actualClosePx)}</span>
                                 </div>
                                 <div class="pred-card">
                                     <span class="pred-label">Actual vs Strategy Price</span>
                                     <span class="pred-value ${diffPx >= 0 ? 'up-color' : 'down-color'}">
-                                        ${diffPx >= 0 ? '+' : ''}₹${formatN(diffPx)}
+                                        ${Number.isFinite(diffPx) ? `${diffPx >= 0 ? '+' : ''}₹${formatN(diffPx)}` : '—'}
                                     </span>
                                 </div>
                                 <div class="pred-card">
@@ -1052,6 +1052,12 @@ function formatN(n) {
     if (n >= 10000000) return (n / 10000000).toFixed(2) + ' Cr';
     if (n >= 100000) return (n / 100000).toFixed(2) + ' L';
     return n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+}
+
+function formatPrice(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return '—';
+    return `₹${formatN(n)}`;
 }
 
 function formatVolume(v) {
@@ -1601,7 +1607,7 @@ async function loadPriceTracker() {
         const stock = await res.json();
         if (stock.error) return;
 
-        const openPrice = Number(stock.open_price || 0);
+        const openPrice = Number(stock.market_open_price ?? stock.open_price ?? 0);
         const nextDayMode = stock.prediction_mode === 'next_day_after_close';
         const predictionWindow = String(stock.prediction_window || '');
         const liveWindow = predictionWindow === 'after_hours_live' && !nextDayMode;
@@ -1641,9 +1647,9 @@ async function loadPriceTracker() {
         const currentAiAvailable = currentAiPrice > 0;
 
         // Update tracker cards
-        document.getElementById('tracker-open').textContent = `₹${formatN(openPrice)}`;
-        document.getElementById('tracker-predicted').textContent = `₹${formatN(predPrice)}`;
-        document.getElementById('tracker-current').textContent = `₹${formatN(currPrice)}`;
+        document.getElementById('tracker-open').textContent = formatPrice(openPrice);
+        document.getElementById('tracker-predicted').textContent = formatPrice(predPrice);
+        document.getElementById('tracker-current').textContent = formatPrice(currPrice);
         const strategyLabelEl = document.getElementById('tracker-strategy-label');
         if (strategyLabelEl) {
             strategyLabelEl.textContent = nextDayMode
@@ -1677,6 +1683,16 @@ async function loadPriceTracker() {
                 || stock.current_snapshot_at;
             strategyOpenTimeEl.textContent = `Predicted: ${formatTimestamp(strategyDisplayTime)}`;
         }
+        const entryRangeEl = document.getElementById('tracker-entry-range');
+        if (entryRangeEl) {
+            const lo = Number(stock.entry_range_low || 0);
+            const hi = Number(stock.entry_range_high || 0);
+            if (Number.isFinite(lo) && lo > 0 && Number.isFinite(hi) && hi > 0) {
+                entryRangeEl.textContent = `Entry Range: ${formatPrice(Math.min(lo, hi))} - ${formatPrice(Math.max(lo, hi))}`;
+            } else {
+                entryRangeEl.textContent = 'Entry Range: —';
+            }
+        }
         const aiOpenTimeEl = document.getElementById('tracker-ai-open-time');
         if (aiOpenTimeEl) {
             const aiDisplayTime = stock.ai_display_predicted_at
@@ -1695,7 +1711,7 @@ async function loadPriceTracker() {
 
         const currentStrategyPriceEl = document.getElementById('current-strategy-price');
         if (currentStrategyPriceEl) {
-            currentStrategyPriceEl.textContent = currentStrategyPrice > 0 ? `₹${formatN(currentStrategyPrice)}` : '—';
+            currentStrategyPriceEl.textContent = formatPrice(currentStrategyPrice);
         }
         const currentStrategyTimeEl = document.getElementById('current-strategy-time');
         if (currentStrategyTimeEl) {
@@ -1703,7 +1719,7 @@ async function loadPriceTracker() {
         }
         const currentAiPriceEl = document.getElementById('current-ai-price');
         if (currentAiPriceEl) {
-            currentAiPriceEl.textContent = currentAiAvailable ? `₹${formatN(currentAiPrice)}` : '—';
+            currentAiPriceEl.textContent = currentAiAvailable ? formatPrice(currentAiPrice) : '—';
         }
         const currentAiTimeEl = document.getElementById('current-ai-time');
         if (currentAiTimeEl) {

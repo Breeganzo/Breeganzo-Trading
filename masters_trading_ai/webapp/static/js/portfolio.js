@@ -27,9 +27,15 @@ async function checkStatus() {
 }
 
 function formatN(n) {
-    const v = Number(n || 0);
-    if (!Number.isFinite(v)) return '0';
+    const v = Number(n);
+    if (!Number.isFinite(v)) return '—';
     return v.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+}
+
+function formatPrice(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return '—';
+    return `₹${formatN(n)}`;
 }
 
 function signedClass(v) {
@@ -91,9 +97,9 @@ function renderHoldings(rows) {
         <tr>
             <td><a href="/stock/${encodeURIComponent(r.ticker)}">${r.ticker}</a></td>
             <td>${r.quantity}</td>
-            <td>₹${formatN(r.avg_buy_price || r.entry_price)}</td>
-            <td>${r.current_price > 0 ? `₹${formatN(r.current_price)}` : '—'}</td>
-            <td class="${signedClass(r.unrealized_pnl)}">₹${formatN(r.unrealized_pnl)}</td>
+            <td>${formatPrice(r.avg_buy_price || r.entry_price)}</td>
+            <td>${formatPrice(r.current_price)}</td>
+            <td class="${signedClass(r.unrealized_pnl)}">${Number.isFinite(Number(r.unrealized_pnl)) ? `₹${formatN(r.unrealized_pnl)}` : '—'}</td>
             <td class="${signedClass(r.unrealized_pnl_pct)}">${Number(r.unrealized_pnl_pct || 0).toFixed(2)}%</td>
         </tr>
     `).join('');
@@ -126,8 +132,8 @@ function renderTrades(rows) {
                 <td><a href="/stock/${encodeURIComponent(r.ticker)}">${r.ticker}</a></td>
                 <td>${r.side}</td>
                 <td>${qty}</td>
-                <td>₹${formatN(price)}</td>
-                <td>₹${formatN(notional)}</td>
+                <td>${formatPrice(price)}</td>
+                <td>${formatPrice(notional)}</td>
                 <td>
                     <button class="tf-btn" onclick="editTrade('${r.id}')">Edit</button>
                     <button class="tf-btn" onclick="deleteTrade('${r.id}')">Delete</button>
