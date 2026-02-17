@@ -112,7 +112,9 @@ def test_api_top_picks_large_cap_grouped_path(monkeypatch):
     monkeypatch.setattr(server, "ticker_names", {"RELIANCE.NS": "Reliance"})
 
     with server.app.test_client() as client:
-        response = client.get("/api/top-picks?sectors=large_cap&grouped=true&n=10")
+        response = client.get(
+            "/api/top-picks?sectors=large_cap&grouped=true&n=10&mode=strategy"
+        )
         assert response.status_code == 200
         payload = response.get_json()
 

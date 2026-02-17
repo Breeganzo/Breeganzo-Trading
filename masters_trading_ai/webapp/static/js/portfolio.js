@@ -52,12 +52,71 @@ async function refreshPortfolioPage() {
     portfolioBusy = true;
     setPortfolioBusy(true, 'Refreshing portfolio...');
     try {
-        const res = await fetch('/api/portfolio/refresh?limit=300');
+        const [res, simRes] = await Promise.all([
+            fetch('/api/portfolio/refresh?limit=300'),
+            fetch('/api/simulate/portfolio'),
+        ]);
         const data = await res.json();
+        const simData = await simRes.json();
         if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
-        renderSummary(data.summary || {});
-        renderHoldings(data.holdings || []);
-        renderTrades(data.trades || []);
+
+        let summary = data.summary || {};
+        let holdings = data.holdings || [];
+        let trades = data.trades || [];
+
+        const simHoldings = Array.isArray(simData?.holdings) ? simData.holdings : [];
+        const simTrades = Array.isArray(simData?.trade_history) ? simData.trade_history : [];
+        if (!holdings.length && simHoldings.length) {
+            holdings = simHoldings.map((row) => {
+                const invested = Number(row.invested_value_after_cost || 0);
+                const currentAfterCost = Number(row.current_value_after_cost || 0);
+                const pnlAfterCost = Number(row.unrealized_pnl_after_cost || 0);
+                const pct = invested > 0 ? (pnlAfterCost / invested) * 100 : 0;
+                return {
+                    ticker: row.ticker,
+                    quantity: row.quantity,
+                    avg_buy_price: row.entry_price,
+                    current_price: row.current_price,
+                    invested_value_after_cost: invested,
+                    current_value_after_cost: currentAfterCost,
+                    transaction_cost_eaten: row.transaction_cost_eaten,
+                    unrealized_pnl: pnlAfterCost,
+                    unrealized_pnl_after_cost_pct: pct,
+                };
+            });
+            trades = simTrades.map((row) => ({
+                id: row.id || `${row.ticker}-${row.timestamp}`,
+                timestamp: row.timestamp,
+                ticker: row.ticker,
+                side: row.action,
+                quantity: row.quantity,
+                price: row.price,
+            }));
+            summary = {
+                ...(summary || {}),
+                position_count: Number(simData.open_positions_count || holdings.length),
+                trade_count: Number(trades.length),
+                invested_value: Number(simData.invested_value || 0),
+                current_value_after_cost: Number(simData.current_value_after_cost || simData.mark_to_market_value || 0),
+                transaction_costs_total_including_open_estimate: Number(
+                    (simData.transaction_summary?.total_transaction_cost || 0)
+                    + (simData.transaction_cost_eaten_open_positions || 0)
+                ),
+                realized_pnl: Number(simData.transaction_summary?.realized_pnl || 0),
+                unrealized_pnl_after_cost: Number(
+                    (simData.current_value_after_cost || 0)
+                    - (simData.invested_value_after_cost || 0)
+                ),
+                total_pnl_after_cost: Number(
+                    (simData.equity_value_after_cost || 0)
+                    - (simData.initial_cash || 0)
+                ),
+            };
+        }
+
+        renderSummary(summary);
+        renderHoldings(holdings);
+        renderTrades(trades);
         setToolbarStatus(`Refreshed at ${new Date(data.refreshed_at || Date.now()).toLocaleTimeString('en-IN')}`);
     } catch (e) {
         setToolbarStatus(`Portfolio refresh failed: ${e.message}`);

@@ -206,20 +206,18 @@ function renderAdvisorOpenList(rows) {
     const body = document.getElementById('advisor-open-buy-body');
     if (!body) return;
     if (!rows || !rows.length) {
-        body.innerHTML = '<tr><td colspan="11" class="muted-text">No advisor picks available right now.</td></tr>';
+        body.innerHTML = '<tr><td colspan="9" class="muted-text">No advisor picks available right now.</td></tr>';
         return;
     }
     body.innerHTML = rows.map((row) => `
         <tr>
             <td><strong>${row.name || row.ticker.replace('.NS', '')}</strong><br><span class="muted-text">${row.ticker}</span></td>
             <td>${String(row.sector || 'other').replaceAll('_', ' ')}</td>
-            <td>${advisorFormatPrice(row.strategy_price_at_open)}</td>
             <td>${advisorFormatPrice(row.current_price)}</td>
-            <td>${advisorFormatPriceRange(row.entry_range_low, row.entry_range_high)}</td>
+            <td>${advisorFormatPriceRange(row.buy_range_low || row.entry_range_low, row.buy_range_high || row.entry_range_high)}</td>
+            <td>${advisorFormatPriceRange(row.sell_range_low || row.stop_loss_price, row.sell_range_high || row.target_price)}</td>
             <td>${Number(row.suggested_qty || 0)}</td>
             <td>${advisorFormatPrice(row.est_trade_cost)}</td>
-            <td>${advisorFormatPrice(row.stop_loss_price)}</td>
-            <td>${advisorFormatPrice(row.target_price)}</td>
             <td>${Number(row.risk_reward || 0).toFixed(2)}</td>
             <td>
                 <button type="button" class="tf-btn" ${advisorViewFilter === 'hold' ? 'disabled' : ''} onclick="simulateAdvisorBuy('${row.ticker}')">${advisorViewFilter === 'hold' ? 'Watch' : 'Sim BUY'}</button>

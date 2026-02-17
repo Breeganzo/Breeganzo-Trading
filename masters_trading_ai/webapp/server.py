@@ -2094,8 +2094,8 @@ def _build_strategy_buy_candidates(
             if (
                 not allow_soft_buy
                 or effective_action == "SELL"
-                or pred_ret_pct <= 0
-                or confidence_pct < 50
+                or pred_ret_pct <= -0.10
+                or confidence_pct < 35
             ):
                 continue
             soft_candidate = True
@@ -2120,10 +2120,16 @@ def _build_strategy_buy_candidates(
             uses_sentiment=uses_sentiment,
         )
         if skip_trade:
-            warnings.append(
-                f"{ticker} skipped: low confidence {confidence_pct:.1f}% under risk policy."
-            )
-            continue
+            if allow_soft_buy and confidence_pct >= 30 and pred_ret_pct >= 0:
+                soft_candidate = True
+                warnings.append(
+                    f"{ticker} kept as soft candidate: low confidence {confidence_pct:.1f}% under risk policy."
+                )
+            else:
+                warnings.append(
+                    f"{ticker} skipped: low confidence {confidence_pct:.1f}% under risk policy."
+                )
+                continue
 
         stop_loss = _round_to_tick(strategy_price * (1 - stop_loss_pct))
         if stop_loss <= 0 or stop_loss >= strategy_price:
@@ -2154,11 +2160,11 @@ def _build_strategy_buy_candidates(
             1.0 - sentiment_influence
         ) * strategy_edge_component + sentiment_influence * sentiment_component
         if soft_candidate:
-            expected_edge *= 0.85
+            expected_edge *= 0.90
         risk_metric = max(stop_loss_pct, atr_pct / 100.0, 0.01)
         utility = expected_edge - ADVISOR_RISK_AVERSION * risk_metric
 
-        if utility <= (-0.03 if soft_candidate else -0.01):
+        if utility <= (-0.06 if soft_candidate else -0.02):
             continue
 
         if abs(pred_ret_pct) > 4.5:
@@ -2592,6 +2598,13 @@ def _run_sim_auto_check(
                 live_prices={},
                 exclude_tickers=open_now,
             )
+            if not candidates:
+                candidates, _warnings = _build_strategy_buy_candidates(
+                    base_rows,
+                    live_prices={},
+                    exclude_tickers=open_now,
+                    allow_soft_buy=True,
+                )
             max_new_positions = max(1, 10 - len(open_now))
             optimized = _optimize_candidate_allocations(
                 candidates,
@@ -4225,8 +4238,12 @@ def api_advisor_open_buy_list():
             row["entry_range_high"] = _display_price_or_none(
                 row.get("entry_range_high")
             )
+            row["buy_range_low"] = row["entry_range_low"]
+            row["buy_range_high"] = row["entry_range_high"]
             row["stop_loss_price"] = _display_price_or_none(row.get("stop_loss_price"))
             row["target_price"] = _display_price_or_none(row.get("target_price"))
+            row["sell_range_low"] = row["stop_loss_price"]
+            row["sell_range_high"] = row["target_price"]
             row["estimated_fee"] = _display_price_or_none(row.get("estimated_fee"))
             row["estimated_notional"] = _display_price_or_none(
                 row.get("estimated_notional")
@@ -4678,9 +4695,9 @@ def api_top_picks():
     grouped = request.args.get("grouped", "").lower() in ("1", "true", "yes")
     force = request.args.get("force", "").lower() in ("1", "true", "yes")
     refresh_ai = request.args.get("refresh_ai", "").lower() in ("1", "true", "yes")
-    mode = str(request.args.get("mode", "strategy") or "strategy").strip().lower()
+    mode = str(request.args.get("mode", "ai") or "ai").strip().lower()
     if mode not in {"ai", "strategy"}:
-        mode = "strategy"
+        mode = "ai"
 
     use_cached_analysis = request.args.get("use_cached_analysis", "false").lower() in (
         "1",
