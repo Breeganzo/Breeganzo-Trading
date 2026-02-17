@@ -991,6 +991,14 @@ a:hover { text-decoration: underline; }
     padding: 6px 10px;
 }
 
+.advisor-controls select {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    border-radius: 8px;
+    padding: 6px 10px;
+}
+
 .advisor-kpis {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));

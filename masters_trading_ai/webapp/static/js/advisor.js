@@ -4,6 +4,10 @@
 
 let advisorOpenList = [];
 let advisorBusy = false;
+let advisorLedgerRows = [];
+let advisorViewFilter = 'buy';
+let advisorRealtimeTimer = null;
+let advisorRealtimeBusy = false;
 
 function advisorFormatPrice(value) {
     const n = Number(value);
@@ -48,8 +52,28 @@ function setAdvisorBusy(isBusy) {
     panel.querySelectorAll('button.tf-btn').forEach((btn) => {
         btn.disabled = advisorBusy;
     });
+    const filterInput = document.getElementById('advisor-view-filter');
+    if (filterInput) filterInput.disabled = advisorBusy;
     const budgetInput = document.getElementById('advisor-budget');
     if (budgetInput) budgetInput.disabled = advisorBusy;
+}
+
+function setAdvisorViewFilter(value) {
+    const normalized = String(value || 'buy').toLowerCase();
+    advisorViewFilter = ['buy', 'sell', 'hold'].includes(normalized) ? normalized : 'buy';
+    const filter = document.getElementById('advisor-view-filter');
+    if (filter) filter.value = advisorViewFilter;
+
+    const openWrap = document.getElementById('advisor-open-buy-wrap');
+    const ledgerWrap = document.getElementById('advisor-ledger-wrap');
+    if (openWrap) openWrap.style.display = advisorViewFilter === 'buy' ? '' : 'none';
+    if (ledgerWrap) ledgerWrap.style.display = advisorViewFilter === 'buy' ? 'none' : '';
+
+    if (advisorViewFilter === 'buy') {
+        renderAdvisorOpenList(advisorOpenList);
+    } else {
+        renderAdvisorTradeLedgerRows(advisorLedgerRows);
+    }
 }
 
 function renderTransactionSummary(summary) {
@@ -70,7 +94,7 @@ function renderTransactionSummary(summary) {
 
 async function refreshAdvisorTransactions() {
     try {
-        const res = await fetch('/api/simulate/transactions-summary');
+        const res = await fetch('/api/simulate/transactions-summary?session=1');
         const data = await res.json();
         if (!res.ok || data.error) throw new Error(data.error || 'Transaction summary unavailable');
         renderTransactionSummary(data);
@@ -79,15 +103,21 @@ async function refreshAdvisorTransactions() {
     }
 }
 
-function renderAdvisorTradeLedger(payload) {
+function renderAdvisorTradeLedgerRows(rows) {
     const body = document.getElementById('advisor-trade-ledger-body');
     if (!body) return;
-    const rows = Array.isArray(payload?.rows) ? payload.rows : [];
-    if (!rows.length) {
+    const allRows = Array.isArray(rows) ? rows : [];
+    const filtered = allRows.filter((row) => {
+        const status = String(row?.status || 'HOLD').toUpperCase();
+        if (advisorViewFilter === 'sell') return status === 'SOLD';
+        if (advisorViewFilter === 'hold') return status === 'HOLD';
+        return true;
+    });
+    if (!filtered.length) {
         body.innerHTML = '<tr><td colspan="9" class="muted-text">No simulated transactions yet.</td></tr>';
         return;
     }
-    body.innerHTML = rows.map((row) => {
+    body.innerHTML = filtered.map((row) => {
         const status = String(row.status || 'HOLD').toUpperCase();
         const qty = Number(row.quantity || 0);
         const pnl = status === 'SOLD' ? Number(row.realized_pnl || 0) : Number(row.unrealized_pnl || 0);
@@ -109,9 +139,14 @@ function renderAdvisorTradeLedger(payload) {
     }).join('');
 }
 
+function renderAdvisorTradeLedger(payload) {
+    advisorLedgerRows = Array.isArray(payload?.rows) ? payload.rows : [];
+    renderAdvisorTradeLedgerRows(advisorLedgerRows);
+}
+
 async function refreshAdvisorTradeLedger() {
     try {
-        const res = await fetch('/api/simulate/trade-ledger?limit=200');
+        const res = await fetch('/api/simulate/trade-ledger?limit=200&session=1');
         const data = await res.json();
         if (!res.ok || data.error) throw new Error(data.error || 'Trade ledger unavailable');
         renderAdvisorTradeLedger(data);
@@ -290,6 +325,28 @@ async function resetAdvisorSimulation() {
     }
 }
 
+async function advisorRealtimeTick() {
+    if (advisorRealtimeBusy || advisorBusy) return;
+    if (document.visibilityState !== 'visible') return;
+    const panel = document.getElementById('advisor-panel');
+    if (!panel) return;
+    advisorRealtimeBusy = true;
+    try {
+        await refreshAdvisorSummary();
+    } catch (_) {
+        // best effort polling
+    } finally {
+        advisorRealtimeBusy = false;
+    }
+}
+
+function startAdvisorRealtimeMonitor() {
+    if (advisorRealtimeTimer) return;
+    advisorRealtimeTimer = setInterval(() => {
+        advisorRealtimeTick();
+    }, 1000);
+}
+
 window.loadAdvisorOpenBuyList = loadAdvisorOpenBuyList;
 window.simulateAdvisorBuy = simulateAdvisorBuy;
 window.runAdvisorAutoCheck = runAdvisorAutoCheck;
@@ -297,3 +354,5 @@ window.resetAdvisorSimulation = resetAdvisorSimulation;
 window.refreshAdvisorSummary = refreshAdvisorSummary;
 window.refreshAdvisorTransactions = refreshAdvisorTransactions;
 window.refreshAdvisorTradeLedger = refreshAdvisorTradeLedger;
+window.setAdvisorViewFilter = setAdvisorViewFilter;
+window.startAdvisorRealtimeMonitor = startAdvisorRealtimeMonitor;

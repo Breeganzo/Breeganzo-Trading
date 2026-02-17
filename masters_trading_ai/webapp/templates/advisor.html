@@ -39,6 +39,12 @@
                     <div class="advisor-controls">
                         <label for="advisor-budget">Budget</label>
                         <input id="advisor-budget" type="number" min="1000" step="100" value="40000">
+                        <label for="advisor-view-filter">View</label>
+                        <select id="advisor-view-filter" onchange="setAdvisorViewFilter(this.value)">
+                            <option value="buy">BUY</option>
+                            <option value="sell">SELL</option>
+                            <option value="hold">HOLD</option>
+                        </select>
                         <button type="button" class="tf-btn" onclick="loadAdvisorOpenBuyList()">Load 10 Open Buys</button>
                         <button type="button" class="tf-btn" onclick="runAdvisorAutoCheck()">Auto-check SL/Target</button>
                         <button type="button" class="tf-btn" onclick="resetAdvisorSimulation()">Reset Sim</button>
@@ -50,7 +56,7 @@
                     <span class="advisor-kpi"><span class="advisor-kpi-label">Open Positions</span><strong id="advisor-open-count">0</strong></span>
                     <span class="advisor-kpi"><span class="advisor-kpi-label">Sim Equity</span><strong id="advisor-equity">₹40,000</strong></span>
                 </div>
-                <div class="advisor-table-wrap">
+                <div class="advisor-table-wrap" id="advisor-open-buy-wrap">
                     <table class="premarket-table advisor-table">
                         <thead>
                             <tr>
@@ -71,7 +77,7 @@
                 </div>
                 <div class="muted-text" id="advisor-status">Simulation cash defaults to ₹40,000.</div>
                 <div class="muted-text" id="advisor-transactions-summary">Transactions: —</div>
-                <div class="advisor-table-wrap">
+                <div class="advisor-table-wrap" id="advisor-ledger-wrap" style="display:none;">
                     <table class="premarket-table advisor-table">
                         <thead>
                             <tr>
@@ -98,8 +104,10 @@
     <script src="/static/js/advisor.js"></script>
     <script>
         document.addEventListener('DOMContentLoaded', async () => {
+            setAdvisorViewFilter('buy');
             await refreshAdvisorSummary();
             await loadAdvisorOpenBuyList();
+            startAdvisorRealtimeMonitor();
         });
     </script>
 </body>

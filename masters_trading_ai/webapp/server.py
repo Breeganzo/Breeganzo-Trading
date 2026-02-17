@@ -190,8 +190,8 @@ AUTO_SIMULATION_AUTO_BUY = os.environ.get(
     "true",
 ).lower() in ("1", "true", "yes")
 AUTO_SIMULATION_INTERVAL_SEC = max(
-    5,
-    int(os.environ.get("AUTO_SIMULATION_INTERVAL_SEC", "30")),
+    1,
+    int(os.environ.get("AUTO_SIMULATION_INTERVAL_SEC", "1")),
 )
 YF_MAX_PARALLEL = max(1, int(os.environ.get("YF_MAX_PARALLEL", "2")))
 YF_CALL_TIMEOUT_SEC = max(3.0, float(os.environ.get("YF_CALL_TIMEOUT_SEC", "15")))
@@ -226,6 +226,12 @@ ADVISOR_MAX_PORTFOLIO_RISK = float(
 )
 ADVISOR_MAX_PER_SECTOR = max(1, int(os.environ.get("ADVISOR_MAX_PER_SECTOR", "3")))
 ADVISOR_BUY_TRIGGER_BUFFER = float(os.environ.get("ADVISOR_BUY_TRIGGER_BUFFER", "0.002"))
+SIM_MAX_PRICE_DEVIATION_FROM_STRATEGY = float(
+    os.environ.get("SIM_MAX_PRICE_DEVIATION_FROM_STRATEGY", "0.35")
+)
+SIM_MAX_PRICE_DEVIATION_FROM_ENTRY = float(
+    os.environ.get("SIM_MAX_PRICE_DEVIATION_FROM_ENTRY", "0.35")
+)
 SIM_PRICE_HARD_MAX = float(os.environ.get("SIM_PRICE_HARD_MAX", "1000000"))
 SIM_QTY_HARD_MAX = int(os.environ.get("SIM_QTY_HARD_MAX", "100000"))
 TRADE_DAILY_REPORT_HOUR_IST = int(
@@ -939,6 +945,7 @@ def _simulation_state_template(cash: float = SIMULATION_DEFAULT_CASH) -> dict:
         "closed_trades": [],
         "trade_history": [],
         "daily_loss_tracker": tracker,
+        "session_started_at": now_iso,
         "updated_at": now_iso,
     }
 
@@ -961,6 +968,10 @@ def _read_portfolio_sim_state() -> dict:
                 state.setdefault("open_positions", {})
                 state.setdefault("closed_trades", [])
                 state.setdefault("trade_history", [])
+                state.setdefault(
+                    "session_started_at",
+                    datetime.now(IST).isoformat(),
+                )
                 state["daily_loss_tracker"] = _daily_tracker_for_state(state)
                 return state
         except Exception:
@@ -1051,18 +1062,68 @@ def _append_trade_event_to_csv(event: dict) -> None:
 
 
 def _append_trade_event_to_excel(event: dict) -> None:
-    """Append one event to .xlsx ledger (best effort)."""
+    """Append one event to .xlsx ledger using one sheet per date (best effort)."""
     if not OPENPYXL_AVAILABLE:
         return
     try:
-        row_df = pd.DataFrame([event])
-        if SIMULATED_TRADE_EXCEL_FILE.exists():
-            prev_df = pd.read_excel(SIMULATED_TRADE_EXCEL_FILE)
-            out_df = pd.concat([prev_df, row_df], ignore_index=True)
-        else:
-            out_df = row_df
+        from openpyxl import Workbook, load_workbook
+
+        fieldnames = [
+            "id",
+            "timestamp",
+            "date_ist",
+            "time_ist",
+            "action",
+            "ticker",
+            "quantity",
+            "price",
+            "notional",
+            "fee",
+            "total_paid",
+            "total_received",
+            "net_cash_impact",
+            "trade_type",
+            "reason",
+            "realized_pnl",
+            "cash_after",
+            "source",
+            "auto",
+        ]
+        sheet_name = str(event.get("date_ist") or datetime.now(IST).strftime("%Y-%m-%d"))[
+            :31
+        ]
+
         SIMULATED_TRADE_EXCEL_FILE.parent.mkdir(parents=True, exist_ok=True)
-        out_df.to_excel(SIMULATED_TRADE_EXCEL_FILE, index=False)
+        if SIMULATED_TRADE_EXCEL_FILE.exists():
+            wb = load_workbook(SIMULATED_TRADE_EXCEL_FILE)
+        else:
+            wb = Workbook()
+
+        if sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+        else:
+            ws = wb.create_sheet(title=sheet_name)
+            ws.append(fieldnames)
+
+        if ws.max_row < 1:
+            ws.append(fieldnames)
+        elif ws.max_row == 1:
+            first = [str(c.value or "") for c in ws[1]]
+            if first != fieldnames:
+                ws.append(fieldnames)
+
+        ws.append([event.get(k) for k in fieldnames])
+
+        if "Sheet" in wb.sheetnames and len(wb.sheetnames) > 1:
+            default_ws = wb["Sheet"]
+            if (
+                default_ws.max_row == 1
+                and default_ws.max_column == 1
+                and default_ws["A1"].value is None
+            ):
+                wb.remove(default_ws)
+
+        wb.save(SIMULATED_TRADE_EXCEL_FILE)
     except Exception as exc:
         log.warning("Failed to update Excel trade ledger: %s", exc)
 
@@ -1175,9 +1236,33 @@ def _warm_sim_trade_cache_from_log() -> None:
             _sim_trade_event_cache.append(row)
 
 
-def _build_transaction_summary(date_str: str | None = None) -> dict:
+def _parse_iso_with_ist(value: str | None) -> datetime | None:
+    try:
+        if not value:
+            return None
+        dt = datetime.fromisoformat(str(value))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=IST)
+        return dt.astimezone(IST)
+    except Exception:
+        return None
+
+
+def _build_transaction_summary(
+    date_str: str | None = None,
+    *,
+    since_ts: str | None = None,
+) -> dict:
     target_date = str(date_str or datetime.now(IST).strftime("%Y-%m-%d"))
     rows = _read_sim_trade_events(target_date)
+    since_dt = _parse_iso_with_ist(since_ts)
+    if since_dt is not None:
+        rows = [
+            r
+            for r in rows
+            if (_parse_iso_with_ist(r.get("timestamp")) or datetime.min.replace(tzinfo=IST))
+            >= since_dt
+        ]
     with _sim_trade_cache_lock:
         cache_rows = [r for r in list(_sim_trade_event_cache) if r.get("date_ist") == target_date]
     trade_rows = [r for r in rows if r.get("action") in {"BUY", "SELL"}]
@@ -1232,6 +1317,7 @@ def _minutes_between(start_iso: str | None, end_iso: str | None) -> int | None:
 def _build_sim_trade_ledger(
     date_str: str | None = None,
     *,
+    since_ts: str | None = None,
     limit: int = 500,
 ) -> dict:
     """
@@ -1242,6 +1328,14 @@ def _build_sim_trade_ledger(
     """
     target_date = str(date_str or datetime.now(IST).strftime("%Y-%m-%d"))
     events = _read_sim_trade_events(target_date)
+    since_dt = _parse_iso_with_ist(since_ts)
+    if since_dt is not None:
+        events = [
+            e
+            for e in events
+            if (_parse_iso_with_ist(e.get("timestamp")) or datetime.min.replace(tzinfo=IST))
+            >= since_dt
+        ]
     trade_events = [
         e
         for e in events
@@ -1466,7 +1560,69 @@ def _log_simulated_trade(event: dict) -> None:
 
     with _sim_trade_cache_lock:
         _sim_trade_event_cache.append(row)
+    _sync_portfolio_from_simulated_trade(row)
     _send_trade_notification_async(row)
+
+
+def _sync_portfolio_from_simulated_trade(event: dict) -> None:
+    """
+    Mirror simulation BUY/SELL events into portfolio trade ledger so
+    portfolio pages reflect strategy automation without manual re-entry.
+    """
+    action = str(event.get("action", "")).strip().upper()
+    if action not in {"BUY", "SELL"}:
+        return
+    ticker = str(event.get("ticker", "")).strip().upper()
+    qty = _safe_float(event.get("quantity"))
+    price = _safe_float(event.get("price"))
+    if not ticker or qty <= 0 or price <= 0:
+        return
+
+    try:
+        trades = _read_portfolio_trades()
+        sim_trade_id = str(event.get("id", "")).strip()
+        if sim_trade_id and any(
+            str(tr.get("sim_trade_id", "")).strip() == sim_trade_id for tr in trades
+        ):
+            return
+
+        tr = _new_trade_entry(ticker=ticker, side=action, qty=qty, price=price)
+        tr["timestamp"] = str(event.get("timestamp") or tr["timestamp"])
+        tr["source"] = (
+            "strategy_simulation_auto"
+            if bool(event.get("auto", False))
+            else "strategy_simulation"
+        )
+        if sim_trade_id:
+            tr["sim_trade_id"] = sim_trade_id
+        trades.append(tr)
+
+        valid, err = _validate_trade_sequence(trades)
+        if not valid:
+            log.warning(
+                "Skipping portfolio sync for simulated trade %s (%s): %s",
+                sim_trade_id or ticker,
+                action,
+                err,
+            )
+            return
+
+        _write_portfolio_trades(trades)
+        summary = _portfolio_summary_from_trades(trades, include_live_prices=False)
+        _write_portfolio(
+            [
+                {
+                    "ticker": row["ticker"],
+                    "name": row["name"],
+                    "quantity": row["quantity"],
+                    "entry_price": row["avg_buy_price"],
+                    "updated_at": datetime.now(IST).isoformat(),
+                }
+                for row in summary["positions"]
+            ]
+        )
+    except Exception as exc:
+        log.warning("Failed portfolio sync from simulated trade: %s", exc)
 
 
 def _infer_trade_type_for_exit(entry_ts: str, exit_ts: str) -> str:
@@ -2037,6 +2193,17 @@ def _run_sim_auto_check(
         stop_loss = _safe_float(pos.get("stop_loss_price"))
         target = _safe_float(pos.get("target_price"))
         entry = _safe_float(pos.get("avg_entry_price"))
+        if entry > 0:
+            entry_dev = abs(cp - entry) / max(entry, 1e-9)
+            if entry_dev > max(0.05, SIM_MAX_PRICE_DEVIATION_FROM_ENTRY):
+                log.warning(
+                    "AUTO_CHECK skipped %s due price-entry deviation %.2f%% (cp=%.2f entry=%.2f)",
+                    ticker,
+                    entry_dev * 100.0,
+                    cp,
+                    entry,
+                )
+                continue
         snap_row = snapshot_by_ticker.get(ticker, {})
         pred_ret_pct = _normalize_predicted_return_pct(
             snap_row.get(
@@ -2164,6 +2331,16 @@ def _run_sim_auto_check(
                     cp = _safe_float(row.get("current_price"))
                 strategy_entry = _safe_float(row.get("strategy_price_at_open"))
                 if not _is_realistic_price(cp) or not _is_realistic_price(strategy_entry):
+                    continue
+                strategy_dev = abs(cp - strategy_entry) / max(strategy_entry, 1e-9)
+                if strategy_dev > max(0.05, SIM_MAX_PRICE_DEVIATION_FROM_STRATEGY):
+                    log.warning(
+                        "AUTO_CHECK skipped BUY %s due strategy deviation %.2f%% (cp=%.2f strategy=%.2f)",
+                        ticker,
+                        strategy_dev * 100.0,
+                        cp,
+                        strategy_entry,
+                    )
                     continue
                 trigger = cp <= strategy_entry * (1.0 + max(0.0, ADVISOR_BUY_TRIGGER_BUFFER))
                 if not trigger:
@@ -2653,6 +2830,7 @@ def _get_live_prices_batch(tickers: list[str]) -> dict:
     clean_tickers = [str(t).strip().upper() for t in tickers if str(t).strip()]
     if not clean_tickers:
         return result
+    single_request = len(clean_tickers) == 1
 
     def _extract_field_series(df: pd.DataFrame, field: str, ticker: str):
         if isinstance(df.columns, pd.MultiIndex):
@@ -2663,7 +2841,7 @@ def _get_live_prices_batch(tickers: list[str]) -> dict:
             if isinstance(obj, pd.DataFrame):
                 if ticker in obj.columns:
                     return obj[ticker]
-                if obj.shape[1] == 1:
+                if single_request and obj.shape[1] == 1:
                     return obj.iloc[:, 0]
                 return None
             return obj
@@ -3494,8 +3672,11 @@ def api_simulate_portfolio():
             "closed_trades_count": len(state.get("closed_trades", [])),
             "holdings": holdings,
             "trade_history": state.get("trade_history", [])[-50:],
-            "transaction_summary": _build_transaction_summary(),
+            "transaction_summary": _build_transaction_summary(
+                since_ts=state.get("session_started_at")
+            ),
             "daily_loss_tracker": state.get("daily_loss_tracker", {}),
+            "session_started_at": state.get("session_started_at"),
             "updated_at": state.get("updated_at"),
         }
     )
@@ -3506,7 +3687,11 @@ def api_simulate_transactions_summary():
     """Aggregate simulated BUY/SELL counts, costs and totals for a date."""
     date_str = request.args.get("date", "").strip()
     target_date = date_str or datetime.now(IST).strftime("%Y-%m-%d")
-    summary = _build_transaction_summary(target_date)
+    session_scope = request.args.get("session", "").lower() in ("1", "true", "yes")
+    since_ts = None
+    if session_scope:
+        since_ts = _read_portfolio_sim_state().get("session_started_at")
+    summary = _build_transaction_summary(target_date, since_ts=since_ts)
     return jsonify(summary)
 
 
@@ -3520,7 +3705,11 @@ def api_simulate_trade_ledger():
     except Exception:
         limit = 300
     limit = max(1, min(limit, 1000))
-    payload = _build_sim_trade_ledger(target_date, limit=limit)
+    session_scope = request.args.get("session", "").lower() in ("1", "true", "yes")
+    since_ts = None
+    if session_scope:
+        since_ts = _read_portfolio_sim_state().get("session_started_at")
+    payload = _build_sim_trade_ledger(target_date, since_ts=since_ts, limit=limit)
     return jsonify(payload)
 
 

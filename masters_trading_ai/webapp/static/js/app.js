@@ -18,6 +18,8 @@ let metricTooltipHideTimer = null;
 let useLatestStoredPredictions = false;
 let currentMarketStatus = '';
 let groqStatusTimer = null;
+let topPicksLivePriceTimer = null;
+let topPicksLivePriceBusy = false;
 
 // ── Init ──────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -46,6 +48,11 @@ document.addEventListener('DOMContentLoaded', () => {
             checkGroqStatus();
         }
     }, 12000);
+    topPicksLivePriceTimer = setInterval(() => {
+        if (document.visibilityState === 'visible') {
+            refreshTopPicksLivePrices();
+        }
+    }, 1000);
     document.addEventListener('keydown', (evt) => {
         if (evt.key === 'Escape') hideMetricTooltip(true);
     });
@@ -378,7 +385,7 @@ function selectSector(sector) {
     document.getElementById('stock-grid').style.display = 'grid';
     document.getElementById('top-picks-section').classList.add('hidden');
     document.getElementById('expected-actual-section').classList.add('hidden');
-    document.getElementById('top-analysis-section').classList.add('hidden');
+    document.getElementById('top-analysis-section')?.classList.add('hidden');
     document.querySelector('.sector-tabs').style.display = '';
     document.querySelector('.search-container').style.display = '';
 
@@ -567,9 +574,16 @@ function filterStocks() {
 
 // ── Top 10 Analysis ───────────────────────────────
 async function showTopAnalysis() {
+    const section = document.getElementById('top-analysis-section');
+    if (!section) {
+        await showTopPicks();
+        return;
+    }
     // Update nav
     document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
-    event.target.classList.add('active');
+    if (typeof event !== 'undefined' && event?.target?.classList) {
+        event.target.classList.add('active');
+    }
 
     // Show section
     document.getElementById('stock-grid').style.display = 'none';
@@ -578,7 +592,6 @@ async function showTopAnalysis() {
     document.querySelector('.sector-tabs').style.display = 'none';
     document.querySelector('.search-container').style.display = 'none';
 
-    const section = document.getElementById('top-analysis-section');
     section.classList.remove('hidden');
 
     const grid = document.getElementById('analysis-grid');
@@ -730,7 +743,7 @@ async function showTopPicks(evt = null) {
 
     document.getElementById('stock-grid').style.display = 'none';
     document.getElementById('expected-actual-section').classList.add('hidden');
-    document.getElementById('top-analysis-section').classList.add('hidden');
+    document.getElementById('top-analysis-section')?.classList.add('hidden');
     document.querySelector('.sector-tabs').style.display = 'none';
     document.querySelector('.search-container').style.display = 'none';
 
@@ -771,12 +784,13 @@ async function showTopPicks(evt = null) {
         highlightedPremarketTicker = selected.length ? selected[0].ticker : null;
         await loadPremarketOutlook();
         renderTopPicks();
-        if (typeof loadAdvisorOpenBuyList === 'function') {
+        if (document.getElementById('advisor-panel') && typeof loadAdvisorOpenBuyList === 'function') {
             await loadAdvisorOpenBuyList();
         }
-        if (typeof refreshAdvisorSummary === 'function') {
+        if (document.getElementById('advisor-panel') && typeof refreshAdvisorSummary === 'function') {
             await refreshAdvisorSummary();
         }
+        await refreshTopPicksLivePrices();
     } catch (e) {
         const msg = e?.name === 'AbortError'
             ? 'Top Picks request timed out. Please retry in a few seconds.'
@@ -900,6 +914,56 @@ function renderTopPicks() {
     grid.innerHTML = html;
 }
 
+async function refreshTopPicksLivePrices() {
+    const section = document.getElementById('top-picks-section');
+    if (!section || section.classList.contains('hidden')) return;
+    if (topPicksLivePriceBusy) return;
+
+    const picks = groupedTopPicks[topPickFilter] || [];
+    if (!picks.length) return;
+
+    const tickers = [...new Set(
+        picks
+            .slice(0, 15)
+            .map((p) => String(p?.ticker || '').toUpperCase())
+            .filter(Boolean)
+    )];
+    if (!tickers.length) return;
+
+    topPicksLivePriceBusy = true;
+    try {
+        const res = await fetch(`/api/prices?tickers=${tickers.join(',')}`);
+        if (!res.ok) return;
+        const quotes = await res.json();
+        const priceByTicker = {};
+        for (const [ticker, row] of Object.entries(quotes || {})) {
+            const px = Number(row?.price || 0);
+            if (Number.isFinite(px) && px > 0) priceByTicker[String(ticker).toUpperCase()] = px;
+        }
+        if (!Object.keys(priceByTicker).length) return;
+
+        for (const key of ['top_buy', 'top_sell', 'top_hold']) {
+            groupedTopPicks[key] = (groupedTopPicks[key] || []).map((row) => {
+                const ticker = String(row?.ticker || '').toUpperCase();
+                const px = priceByTicker[ticker];
+                return px ? { ...row, current_price: px } : row;
+            });
+        }
+        premarketOutlookData = (premarketOutlookData || []).map((row) => {
+            const ticker = String(row?.ticker || '').toUpperCase();
+            const px = priceByTicker[ticker];
+            return px ? { ...row, current_price: px } : row;
+        });
+
+        renderTopPicks();
+        renderPremarketOutlookTable();
+    } catch (_) {
+        // Best-effort live price refresh; ignore transient failures.
+    } finally {
+        topPicksLivePriceBusy = false;
+    }
+}
+
 async function loadPremarketOutlook() {
     const table = document.getElementById('premarket-table-body');
     const header = document.getElementById('premarket-captured-at');
@@ -986,11 +1050,13 @@ function selectPremarketTicker(ticker) {
 // ── Expected vs Actual ────────────────────────────
 async function showExpectedVsActual() {
     document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
-    event.target.classList.add('active');
+    if (typeof event !== 'undefined' && event?.target?.classList) {
+        event.target.classList.add('active');
+    }
 
     document.getElementById('stock-grid').style.display = 'none';
     document.getElementById('top-picks-section').classList.add('hidden');
-    document.getElementById('top-analysis-section').classList.add('hidden');
+    document.getElementById('top-analysis-section')?.classList.add('hidden');
     document.querySelector('.sector-tabs').style.display = 'none';
     document.querySelector('.search-container').style.display = 'none';
 

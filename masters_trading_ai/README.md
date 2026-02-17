@@ -143,9 +143,9 @@ Guarantees:
 - ranking is confidence-first, then score:
   - `score = |predicted_return_decimal| × (confidence/100) × (model_agreement/100) × liquidity_factor`
 
-Top Picks vs Top 10 Analysis:
-- `Top Picks`: actionable strategy-ranked list (up to 50).
-- `Top 10 Analysis`: deeper analytics cards for review/explanation.
+Top Picks vs DailyAdvisor:
+- `Top Picks`: actionable ranked market list (BUY/SELL/HOLD filters).
+- `DailyAdvisor` (`/advisor`): strategy execution simulation board with BUY candidates and post-buy HOLD/SOLD tracking.
 
 ### `/api/advisor/open-buy-list`
 ```bash
@@ -182,7 +182,7 @@ Simulation state is persisted in:
 - `cache/portfolio_sim.json`
 - `cache/prediction_log/simulated_trades.jsonl`
 - `cache/prediction_log/simulated_trades.csv`
-- `cache/prediction_log/simulated_trades.xlsx` (when `openpyxl` is installed)
+- `cache/prediction_log/simulated_trades.xlsx` (when `openpyxl` is installed, one worksheet per IST date)
 
 Simulation risk controls:
 - ATR + confidence dynamic stop-loss
@@ -191,6 +191,7 @@ Simulation risk controls:
 - daily loss circuit breaker (`MAX_DAILY_LOSS`)
 - BUY/SELL triggers are allowed only during `09:30-15:30 IST` on trading days
 - AUTO_CHECK outside market hours returns a safe "skipped" response (no trades fired)
+- SELL before BUY is blocked by quantity-sequence validation.
 - auto-sell triggers on:
   - stop-loss hit,
   - target hit,
@@ -202,6 +203,8 @@ Simulation risk controls:
   - same-day relevant sentiment can downgrade/upgrade action conservatively.
 - portfolio optimizer:
   - risk-constrained utility optimization (budget cap, concentration cap, risk budget, fee-aware quantity rounding).
+- simulation-to-portfolio sync:
+  - each simulated BUY/SELL is mirrored into `cache/portfolio_trades.json` so Portfolio updates automatically.
 
 Important: this is simulation only; no live brokerage order is sent.
 
@@ -259,15 +262,16 @@ Export schema is retraining-friendly and includes direction comparison fields.
 
 ## 7) Dashboard behavior
 - Top Picks supports dropdown: `BUY`, `SELL`, `HOLD` (SELL/HOLD restricted to portfolio symbols).
-- Top Picks and Top-10 Analysis are separate:
-  - Top Picks: actionable ranked list (up to 50).
-  - Top-10 Analysis: deep analytics cards and context.
+- Top Picks page is focused on actionable ranking + premarket/current snapshot.
+- DailyAdvisor page (`/advisor`) is focused on strategy simulation execution and ledger review.
 - New table: **Premarket vs Current**.
-- New **Trading Desk Advisor** panel:
+- DailyAdvisor includes:
   - default simulation cash ₹40,000,
+  - BUY/SOLD/HOLD view selector,
   - open-buy list constrained by budget + estimated fees,
-  - simulated BUY/SELL and auto stop-loss/target checks.
-  - transaction totals (count + buy/sell/both costs) from server summary endpoint.
+  - simulated BUY/SELL and auto stop-loss/target checks,
+  - transaction totals (count + buy/sell/both costs) from server summary endpoint,
+  - 1-second status refresh while page is visible.
 - `0/null` prices render as `—` (not fake `₹0`).
 
 Email notifications/report (optional):

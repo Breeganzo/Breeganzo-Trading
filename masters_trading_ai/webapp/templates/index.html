@@ -19,7 +19,6 @@
             <a href="/" class="nav-link active" onclick="selectSector('all')">Stocks</a>
             <a href="/portfolio" class="nav-link">Portfolio</a>
             <a href="/advisor" class="nav-link">Strategy Advisor</a>
-            <a href="#" class="nav-link" onclick="showTopAnalysis()">Top 10 Analysis</a>
             <a href="#" class="nav-link" onclick="showTopPicks()">Top Picks</a>
             <a href="#" class="nav-link" onclick="showExpectedVsActual()">Expected vs Actual</a>
             <a href="/risk" class="nav-link">Risk Analytics</a>
@@ -83,15 +82,6 @@
             </div>
         </div>
 
-        <!-- Top 10 Analysis section (hidden by default) -->
-        <div class="top-analysis-section hidden" id="top-analysis-section">
-            <h2 class="section-title">🏆 Top 10 AI-Analyzed Stocks</h2>
-            <p class="section-subtitle">Top-10 Analysis shows deep analytics cards (volatility, liquidity, indicators, risk context). It is different from Top Picks ranking.</p>
-            <div class="analysis-grid" id="analysis-grid">
-                <div class="loading-spinner"><div class="spinner"></div><p>Running deep analysis across all stocks...</p></div>
-            </div>
-        </div>
-
         <!-- Top Picks section (hidden by default) -->
         <div class="top-picks-section hidden" id="top-picks-section">
             <h2 class="section-title">🎯 AI Top Picks</h2>
@@ -104,6 +94,7 @@
                     <option value="top_hold">Portfolio HOLD</option>
                 </select>
                 <button type="button" class="tf-btn" onclick="refreshTopPicksAndSnapshots()">Refresh</button>
+                <a href="/advisor" class="tf-btn">Open DailyAdvisor</a>
             </div>
             <div class="premarket-panels">
                 <div class="premarket-panel">
@@ -135,66 +126,6 @@
                     </div>
                 </div>
             </div>
-            <div class="advisor-panel" id="advisor-panel">
-                <div class="advisor-panel-head">
-                    <h3>Trading Desk Advisor (Simulation Only)</h3>
-                    <div class="advisor-controls">
-                        <label for="advisor-budget">Budget</label>
-                        <input id="advisor-budget" type="number" min="1000" step="100" value="40000">
-                        <a href="/advisor" class="tf-btn">Open Advisor Page</a>
-                        <button type="button" class="tf-btn" onclick="loadAdvisorOpenBuyList()">Load 10 Open Buys</button>
-                        <button type="button" class="tf-btn" onclick="runAdvisorAutoCheck()">Auto-check SL/Target</button>
-                        <button type="button" class="tf-btn" onclick="resetAdvisorSimulation()">Reset Sim</button>
-                    </div>
-                </div>
-                <p class="section-help-text">Simulation only. No live brokerage orders are placed. Uses strategy prices + estimated Groww fees to stay within budget.</p>
-                <div class="advisor-kpis" id="advisor-kpis">
-                    <span class="advisor-kpi"><span class="advisor-kpi-label">Sim Cash</span><strong id="advisor-cash">₹40,000</strong></span>
-                    <span class="advisor-kpi"><span class="advisor-kpi-label">Open Positions</span><strong id="advisor-open-count">0</strong></span>
-                    <span class="advisor-kpi"><span class="advisor-kpi-label">Sim Equity</span><strong id="advisor-equity">₹40,000</strong></span>
-                </div>
-                <div class="advisor-table-wrap">
-                    <table class="premarket-table advisor-table">
-                        <thead>
-                            <tr>
-                                <th>Ticker</th>
-                                <th>Sector</th>
-                                <th>Strategy Price</th>
-                                <th>Qty</th>
-                                <th>Trade Cost</th>
-                                <th>Stop Loss</th>
-                                <th>R:R</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody id="advisor-open-buy-body">
-                            <tr><td colspan="8" class="muted-text">Load advisor suggestions to view budget-constrained open-buy list.</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-                <div class="muted-text" id="advisor-status">Simulation cash defaults to ₹40,000.</div>
-                <div class="muted-text" id="advisor-transactions-summary">Transactions: —</div>
-                <div class="advisor-table-wrap">
-                    <table class="premarket-table advisor-table">
-                        <thead>
-                            <tr>
-                                <th>Ticker</th>
-                                <th>Status</th>
-                                <th>Qty</th>
-                                <th>Buy Price</th>
-                                <th>Buy Time</th>
-                                <th>Sell Price</th>
-                                <th>Sell Time</th>
-                                <th>PnL</th>
-                                <th>Reason</th>
-                            </tr>
-                        </thead>
-                        <tbody id="advisor-trade-ledger-body">
-                            <tr><td colspan="9" class="muted-text">No simulated transactions yet.</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
             <div class="picks-grid" id="picks-grid">
                 <div class="loading-spinner"><div class="spinner"></div><p>Generating predictions...</p></div>
             </div>
@@ -224,6 +155,5 @@
     </div>
 
     <script src="/static/js/app.js"></script>
-    <script src="/static/js/advisor.js"></script>
 </body>
 </html>
